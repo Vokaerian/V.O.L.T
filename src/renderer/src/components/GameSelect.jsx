@@ -1,11 +1,19 @@
+import rimworldCover from '../assets/covers/rimworld.jpg';
+import zomboidCover from '../assets/covers/zomboid.jpg';
+import lethalCover from '../assets/covers/lethal.jpg';
+import valheimCover from '../assets/covers/valheim.jpg';
+import sts2Cover from '../assets/covers/sts2.jpg';
+import repoCover from '../assets/covers/repo.jpg';
+import palworldCover from '../assets/covers/palworld.jpg';
+
 const GAMES = [
-  { key: 'rimworld', name: 'RimWorld', initials: 'RW', enabled: true },
-  { key: 'zomboid', name: 'Project Zomboid', initials: 'PZ', enabled: false },
-  { key: 'lethal', name: 'Lethal Company', initials: 'LC', enabled: false },
-  { key: 'valheim', name: 'Valheim', initials: 'VH', enabled: false },
-  { key: 'sts2', name: 'Slay the Spire 2', initials: 'S2', enabled: false },
-  { key: 'repo', name: 'R.E.P.O.', initials: 'RP', enabled: false },
-  { key: 'palworld', name: 'Palworld', initials: 'PW', enabled: false },
+  { key: 'rimworld', name: 'RimWorld', cover: rimworldCover, enabled: true },
+  { key: 'zomboid', name: 'Project Zomboid', cover: zomboidCover, enabled: false },
+  { key: 'lethal', name: 'Lethal Company', cover: lethalCover, enabled: false },
+  { key: 'valheim', name: 'Valheim', cover: valheimCover, enabled: false },
+  { key: 'sts2', name: 'Slay the Spire 2', cover: sts2Cover, enabled: false },
+  { key: 'repo', name: 'R.E.P.O.', cover: repoCover, enabled: false },
+  { key: 'palworld', name: 'Palworld', cover: palworldCover, enabled: false },
 ];
 
 export default function GameSelect({ onSelect }) {
@@ -35,8 +43,7 @@ function GameTile({ game, onSelect }) {
       onClick={game.enabled ? () => onSelect(game.key) : undefined}
     >
       <div className="game-tile-cover">
-        <span className="game-tile-initials">{game.initials}</span>
-        <span className="game-tile-cover-tag">Cover art — placeholder</span>
+        <img src={game.cover} alt="" className="game-tile-cover-image" />
       </div>
       <div className="game-tile-label">{game.name}</div>
       {!game.enabled && (
