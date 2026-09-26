@@ -15,7 +15,7 @@ const path = require('node:path');
 // until the game-selection screen exists and can pass the real active game in.
 const GAME_SLUG = 'rimworld';
 
-function resolveBaseRoot(app, env) {
+function resolveBaseRoot(app, env = process.env) {
   if (env.VOLT_APP_ROOT) return path.resolve(env.VOLT_APP_ROOT);
   if (app.isPackaged) {
     if (env.APPIMAGE) return path.dirname(env.APPIMAGE);
@@ -28,4 +28,4 @@ function resolveAppRoot(app, env = process.env) {
   return path.join(resolveBaseRoot(app, env), GAME_SLUG);
 }
 
-module.exports = { resolveAppRoot, GAME_SLUG };
+module.exports = { resolveAppRoot, resolveBaseRoot, GAME_SLUG };

@@ -5,8 +5,9 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require('electron');
-const { resolveAppRoot } = require('./lib/appRoot');
+const { resolveAppRoot, resolveBaseRoot } = require('./lib/appRoot');
 const { createSettingsStore } = require('./lib/settings');
+const { createWindowStateStore } = require('./lib/windowState');
 const paths = require('./lib/paths');
 const { isDir, exists, writeFileAtomic, removeTreeBestEffort } = require('./lib/fsutil');
 const { scanModRoots, readPreviewDataUrl } = require('./lib/mods');
@@ -21,6 +22,7 @@ const { isWritableId, cleanIds } = require('./lib/ids');
 const { initLog, log, clip, ipcArgsText, ipcResultText } = require('./lib/log');
 
 const appRoot = resolveAppRoot(app);
+const windowState = createWindowStateStore(resolveBaseRoot(app));
 const settings = createSettingsStore(appRoot);
 const logPath = initLog(appRoot);
 
@@ -355,10 +357,11 @@ function registerIpc() {
   });
 }
 
-function createWindow() {
+async function createWindow() {
+  const { width, height } = await windowState.load();
   mainWindow = new BrowserWindow({
-    width: 1600,
-    height: 950,
+    width,
+    height,
     minWidth: 1000,
     minHeight: 600,
     show: false,
@@ -376,7 +379,22 @@ function createWindow() {
   // Keep the versioned window title rather than index.html's <title>.
   mainWindow.on('page-title-updated', (e) => e.preventDefault());
   mainWindow.once('ready-to-show', () => mainWindow.show());
+
+  // Persist the user's chosen size (debounced - 'resize' fires continuously
+  // while dragging), so the next launch reopens at the same size.
+  let saveBoundsTimer = null;
+  mainWindow.on('resize', () => {
+    clearTimeout(saveBoundsTimer);
+    saveBoundsTimer = setTimeout(() => {
+      if (!mainWindow) return;
+      const bounds = mainWindow.getBounds();
+      windowState.save({ width: bounds.width, height: bounds.height })
+        .catch((err) => log(`[windowState] save failed: ${err.message}`));
+    }, 500);
+  });
+
   mainWindow.on('closed', () => {
+    clearTimeout(saveBoundsTimer);
     mainWindow = null;
   });
 
@@ -395,10 +413,10 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   console.log(`[volt] v${app.getVersion()} - APP-ROOT: ${appRoot}`);
   registerIpc();
-  createWindow();
+  await createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

@@ -873,23 +873,27 @@ button.settings-tab.selected {
 }
 
 /* Game-selection screen (multi-game shell, PLAN.md §7): shown on every
-   launch, ahead of the RimWorld app. Grid of 7 tiles, 4 top row + 3
-   centered beneath; only RimWorld enabled until a second game ships. */
+   launch, ahead of the RimWorld app. A flex-wrap grid, not fixed rows,
+   so it reflows instead of clipping on a smaller/odd-ratio window —
+   4 tiles fit one line at the normal window width, the rest wrap to a
+   centered second line; overflow-y lets it scroll rather than clip if
+   even a reflowed layout doesn't fit a short window. Only RimWorld
+   enabled until a second game ships. */
 .game-select {
   width: 100%;
   height: 100%;
+  box-sizing: border-box;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  position: relative;
   padding: 56px 80px;
-  box-sizing: border-box;
 }
 .game-select-header {
   display: flex;
   flex-direction: column;
   align-items: center;
+  flex-shrink: 0;
 }
 .game-select-header h1 {
   margin: 0;
@@ -918,17 +922,17 @@ button.settings-tab.selected {
   letter-spacing: 2.5px;
   color: var(--muted);
   text-transform: uppercase;
+  flex-shrink: 0;
 }
 .game-select-grid {
   display: flex;
-  flex-direction: column;
-  gap: 28px;
-  margin-top: 26px;
-}
-.game-select-row {
-  display: flex;
+  flex-wrap: wrap;
   gap: 28px;
   justify-content: center;
+  margin-top: 26px;
+  width: 100%;
+  max-width: 1440px;
+  flex-shrink: 0;
 }
 .game-tile {
   box-sizing: border-box;
@@ -936,7 +940,9 @@ button.settings-tab.selected {
   overflow: hidden;
   text-align: left;
   padding: 0;
-  width: 336px;
+  flex: 1 1 300px;
+  min-width: 220px;
+  max-width: 336px;
   height: 256px;
   border: 1px solid var(--border);
   border-radius: var(--radius);

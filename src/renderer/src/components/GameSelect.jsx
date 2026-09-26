@@ -1,10 +1,8 @@
-const GAMES_ROW_1 = [
+const GAMES = [
   { key: 'rimworld', name: 'RimWorld', initials: 'RW', enabled: true },
   { key: 'zomboid', name: 'Project Zomboid', initials: 'PZ', enabled: false },
   { key: 'lethal', name: 'Lethal Company', initials: 'LC', enabled: false },
   { key: 'valheim', name: 'Valheim', initials: 'VH', enabled: false },
-];
-const GAMES_ROW_2 = [
   { key: 'sts2', name: 'Slay the Spire 2', initials: 'S2', enabled: false },
   { key: 'repo', name: 'R.E.P.O.', initials: 'RP', enabled: false },
   { key: 'palworld', name: 'Palworld', initials: 'PW', enabled: false },
@@ -20,16 +18,9 @@ export default function GameSelect({ onSelect }) {
       </div>
       <div className="game-select-caption">Select a game</div>
       <div className="game-select-grid">
-        <div className="game-select-row">
-          {GAMES_ROW_1.map((g) => (
-            <GameTile key={g.key} game={g} onSelect={onSelect} />
-          ))}
-        </div>
-        <div className="game-select-row">
-          {GAMES_ROW_2.map((g) => (
-            <GameTile key={g.key} game={g} onSelect={onSelect} />
-          ))}
-        </div>
+        {GAMES.map((g) => (
+          <GameTile key={g.key} game={g} onSelect={onSelect} />
+        ))}
       </div>
     </div>
   );
