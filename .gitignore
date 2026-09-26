@@ -5,6 +5,7 @@
 
 # Dev tooling -- deliberately kept out of version control (CLAUDE.md §2b).
 /tools/
+/.claude/
 
 # Scratch / task workspace.
 /temp/
