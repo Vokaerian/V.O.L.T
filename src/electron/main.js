@@ -21,10 +21,13 @@ const steamCmd = require('./lib/steamCmd');
 const { isWritableId, cleanIds } = require('./lib/ids');
 const { initLog, log, clip, ipcArgsText, ipcResultText } = require('./lib/log');
 
-const appRoot = resolveAppRoot(app);
 const windowState = createWindowStateStore(resolveBaseRoot(app));
-const settings = createSettingsStore(appRoot);
-const logPath = initLog(appRoot);
+// Resolved once the renderer activates a game (game:activate IPC, below) -
+// exactly one game is chosen per process lifetime (App.jsx's GameGate has
+// no way back to game-select), so these never need to support switching.
+let appRoot = null;
+let settings = null;
+let logPath = null;
 
 // Get whatever is about to crash the main process into the log first, no
 // recovery. 'uncaughtExceptionMonitor' fires before Node/Electron's default
@@ -92,7 +95,20 @@ async function runAutodetect(force) {
   };
 }
 
+// Called once, right after the user picks a game on the game-select screen
+// (game:activate IPC below). Resolves that game's real APP-ROOT and
+// (re)creates its settings store and log. Never needs to tear down a
+// previous activation - see the comment on the `let appRoot` declaration.
+function activateGame(slug) {
+  appRoot = resolveAppRoot(app, slug);
+  settings = createSettingsStore(appRoot);
+  logPath = initLog(appRoot);
+  console.log(`[volt] activated '${slug}' - APP-ROOT: ${appRoot}`);
+  return { slug, appRoot };
+}
+
 function registerIpc() {
+  handle('game:activate', async (slug) => activateGame(slug));
   handle('app:info', async () => ({
     version: app.getVersion(),
     appRoot,
@@ -414,7 +430,7 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  console.log(`[volt] v${app.getVersion()} - APP-ROOT: ${appRoot}`);
+  console.log(`[volt] v${app.getVersion()} ready`);
   registerIpc();
   await createWindow();
   app.on('activate', () => {

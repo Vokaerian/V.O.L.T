@@ -61,7 +61,15 @@ export default function App() {
 // existing app unchanged. No refactor of Main below this gate.
 function GameGate() {
   const [game, setGame] = useState(null);
-  if (game !== 'rimworld') return <GameSelect onSelect={setGame} />;
+  const onSelect = async (slug) => {
+    try {
+      await api.gameActivate(slug);
+      setGame(slug);
+    } catch (err) {
+      rlog(`game:activate failed: ${errMsg(err)}`);
+    }
+  };
+  if (game !== 'rimworld') return <GameSelect onSelect={onSelect} />;
   return <Main />;
 }
 

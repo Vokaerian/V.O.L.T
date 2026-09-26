@@ -12,6 +12,7 @@ async function call(channel, ...args) {
 }
 
 contextBridge.exposeInMainWorld('volt', {
+  gameActivate: (slug) => call('game:activate', slug),
   getAppInfo: () => call('app:info'),
   log: (message) => call('log:write', message),
   getSettings: () => call('settings:get'),

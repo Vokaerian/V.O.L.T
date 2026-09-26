@@ -107,7 +107,8 @@ function forkWorker() {
   // Explicit cwd at APP-ROOT: SteamAPI_Init's breakpad bootstrap writes files
   // relative to cwd, and the inherited one sits under src/electron/ in dev,
   // which dev.js's watcher sees as a source change and restarts Electron.
-  const cwd = require('./appRoot').resolveAppRoot(app);
+  const { resolveAppRoot, GAME_SLUG } = require('./appRoot');
+  const cwd = resolveAppRoot(app, GAME_SLUG);
   return utilityProcess.fork(WORKER_SCRIPT, [], { serviceName: 'volt-steam-worker', cwd });
 }
 
