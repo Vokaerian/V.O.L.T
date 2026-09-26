@@ -17,6 +17,12 @@ dev.bat
 /src/dev-app-root/
 /src/dist/
 
+# Python rewrite (volt-py) -- venv/cache/dev-runtime are regenerated, never committed.
+/volt-py/.venv/
+/volt-py/**/__pycache__/
+/volt-py/**/*.py[cod]
+/volt-py/dev-app-root/
+
 # Packaged release output.
 /releases/
 
