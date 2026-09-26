@@ -13,6 +13,7 @@ import ValidationWindow from './components/ValidationWindow.jsx';
 import ScanIssuesWindow from './components/ScanIssuesWindow.jsx';
 import SettingsWindow from './components/SettingsWindow.jsx';
 import DownloadBar from './components/DownloadBar.jsx';
+import GameSelect from './components/GameSelect.jsx';
 
 const EMPTY_MODS = new Map();
 
@@ -52,7 +53,16 @@ const SUBSCRIBE_WAIT = { pollMs: SUBSCRIBE_POLL_MS, timeoutMs: SUBSCRIBE_TIMEOUT
 const workshopPage = (wid) => `steam://url/CommunityFilePage/${wid}`;
 
 export default function App() {
-  return api ? <Main /> : <NoElectron />;
+  return api ? <GameGate /> : <NoElectron />;
+}
+
+// Game-selection screen shell (PLAN.md §7): shown fresh on every launch,
+// never remembered. Only RimWorld is wired up; picking it mounts the
+// existing app unchanged. No refactor of Main below this gate.
+function GameGate() {
+  const [game, setGame] = useState(null);
+  if (game !== 'rimworld') return <GameSelect onSelect={setGame} />;
+  return <Main />;
 }
 
 function NoElectron() {

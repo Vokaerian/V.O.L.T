@@ -871,3 +871,155 @@ button.settings-tab.selected {
 .path-value.unset {
   color: var(--danger);
 }
+
+/* Game-selection screen (multi-game shell, PLAN.md §7): shown on every
+   launch, ahead of the RimWorld app. Grid of 7 tiles, 4 top row + 3
+   centered beneath; only RimWorld enabled until a second game ships. */
+.game-select {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: 56px 80px;
+  box-sizing: border-box;
+}
+.game-select-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.game-select-header h1 {
+  margin: 0;
+  font-size: 46px;
+  font-weight: 700;
+  letter-spacing: 11px;
+}
+.game-select-accent-bar {
+  width: 64px;
+  height: 3px;
+  margin: 16px 0 14px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.game-select-subtitle {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.game-select-caption {
+  margin-top: 44px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 2.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.game-select-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  margin-top: 26px;
+}
+.game-select-row {
+  display: flex;
+  gap: 28px;
+  justify-content: center;
+}
+.game-tile {
+  box-sizing: border-box;
+  position: relative;
+  overflow: hidden;
+  text-align: left;
+  padding: 0;
+  width: 336px;
+  height: 256px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  font: inherit;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.game-tile.enabled {
+  cursor: pointer;
+}
+.game-tile.enabled:hover,
+.game-tile.enabled:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 10px 24px rgba(0, 0, 0, 0.55);
+  transform: translateY(-3px);
+  outline: none;
+}
+.game-tile.disabled {
+  cursor: not-allowed;
+}
+.game-tile-cover {
+  flex: 0 0 190px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.game-tile-initials {
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--accent);
+}
+.game-tile.disabled .game-tile-initials {
+  color: var(--muted);
+}
+.game-tile-cover-tag {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  font-style: italic;
+  color: var(--muted);
+  opacity: 0.75;
+}
+.game-tile-label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+}
+.game-tile.disabled .game-tile-label {
+  color: var(--muted);
+}
+.game-tile-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(27, 28, 31, 0.64);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.game-tile-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  padding: 5px 11px;
+  border-radius: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
