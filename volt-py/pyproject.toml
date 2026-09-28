@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "pyside6>=6.11.2",
+    "steamworks",
 ]
 
 [project.scripts]
@@ -22,3 +23,6 @@ build-backend = "uv_build"
 dev = [
     "nuitka>=4.2.2",
 ]
+
+[tool.uv.sources]
+steamworks = { git = "https://github.com/philippj/SteamworksPy" }

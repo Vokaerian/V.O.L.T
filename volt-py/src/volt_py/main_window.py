@@ -3,11 +3,13 @@
 import sys
 from importlib.metadata import version
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtGui import QResizeEvent
-from PySide6.QtWidgets import QLabel, QMainWindow
+from PySide6.QtWidgets import QMainWindow
 
 from volt_py.app_root import resolve_base_root
+from volt_py.screens.game_select import GameSelectScreen
+from volt_py.screens.rimworld_main_screen import RimWorldMainScreen
 
 DEFAULT_SIZE = (1600, 900)
 MIN_SIZE = (1000, 600)
@@ -55,9 +57,21 @@ class MainWindow(QMainWindow):
         # Clamp explicitly too, so a bad file can't request a sub-minimum size.
         self.resize(max(width, MIN_SIZE[0]), max(height, MIN_SIZE[1]))
 
-        placeholder = QLabel("VOLT — Python rewrite in progress")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setCentralWidget(placeholder)
+        # Game-selection screen first (port of Electron's GameSelect/GameGate).
+        # One game per run: no way back to it, and the pick isn't persisted
+        # (TODO.md #30, Electron parity).
+        game_select = GameSelectScreen()
+        game_select.gameSelected.connect(self._on_game_selected)
+        self.setCentralWidget(game_select)
+
+    def _on_game_selected(self, slug: str) -> None:
+        # Constructing the game's screen is the whole "activation" (Electron's
+        # gameActivate IPC): RimWorldMainScreen resolves its own APP-ROOT and
+        # starts its log. setCentralWidget hides the game-select screen and
+        # deleteLater()s it, so this is safe to run from the tile's own
+        # click/key handler. Only RimWorld's tile is enabled today.
+        if slug == "rimworld":
+            self.setCentralWidget(RimWorldMainScreen())
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

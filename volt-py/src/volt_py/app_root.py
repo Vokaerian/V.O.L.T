@@ -23,6 +23,24 @@ from pathlib import Path
 # case this dev branch is used for.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# RimWorld's own slug. Hardcoded until game selection exists (Electron picks
+# the slug on its game-selection screen; RimWorld is the only ported game).
+GAME_SLUG = "rimworld"
+
+
+def is_packaged() -> bool:
+    """True in a packaged build, False when running from source (dev).
+
+    The one dev-vs-packaged check: resolve_base_root and applog (dev-only
+    logging) both use it, so fixing the signal here fixes both.
+    """
+    # PLACEHOLDER, unverified: sys.frozen is the common "packaged" flag
+    # (PyInstaller/cx_Freeze set it), but Nuitka doesn't always set it,
+    # depending on build flags. Check against real Nuitka output once
+    # packaging starts (CLAUDE.md §3) - Nuitka's own `__compiled__` global
+    # may be the reliable test instead.
+    return bool(getattr(sys, "frozen", False))
+
 
 def resolve_base_root(env: Mapping[str, str] | None = None) -> Path:
     if env is None:
@@ -30,11 +48,14 @@ def resolve_base_root(env: Mapping[str, str] | None = None) -> Path:
     override = env.get("VOLT_APP_ROOT")
     if override:
         return Path(override).resolve()
-    # PLACEHOLDER, unverified: sys.frozen is the common "packaged" flag
-    # (PyInstaller/cx_Freeze set it), but Nuitka doesn't always set it,
-    # depending on build flags. Check against real Nuitka output once
-    # packaging starts (CLAUDE.md §3) - Nuitka's own `__compiled__` global
-    # may be the reliable test instead.
-    if getattr(sys, "frozen", False):
+    if is_packaged():
         return Path(sys.executable).resolve().parent
     return _PROJECT_ROOT / "dev-app-root"
+
+
+def resolve_app_root(slug: str, env: Mapping[str, str] | None = None) -> Path:
+    """Per-game APP-ROOT: <base root>/<slug> (Electron's resolveAppRoot).
+
+    Holds that game's settings.json, load-orders/, log, etc.
+    """
+    return resolve_base_root(env) / slug

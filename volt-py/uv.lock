@@ -69,11 +69,17 @@ wheels = [
 ]
 
 [[package]]
+name = "steamworks"
+version = "2.0.0"
+source = { git = "https://github.com/philippj/SteamworksPy#c021d1c186084d22a21817fc4fe5fad1e1c20a7e" }
+
+[[package]]
 name = "volt-py"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "pyside6" },
+    { name = "steamworks" },
 ]
 
 [package.dev-dependencies]
@@ -82,7 +88,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pyside6", specifier = ">=6.11.2" }]
+requires-dist = [
+    { name = "pyside6", specifier = ">=6.11.2" },
+    { name = "steamworks", git = "https://github.com/philippj/SteamworksPy" },
+]
 
 [package.metadata.requires-dev]
 dev = [{ name = "nuitka", specifier = ">=4.2.2" }]

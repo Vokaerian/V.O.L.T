@@ -8,6 +8,7 @@
 /.claude/
 cleanup.bat
 dev.bat
+dev-py.bat
 
 # Scratch / task workspace.
 /temp/

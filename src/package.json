@@ -1,7 +1,7 @@
 {
   "name": "volt",
   "productName": "VOLT",
-  "version": "0.4.14",
+  "version": "0.4.16",
   "description": "Vokaerian's Omni-game Load-order Tool - mod manager and troubleshooter, RimWorld today, more games planned",
   "private": true,
   "main": "electron/main.js",
