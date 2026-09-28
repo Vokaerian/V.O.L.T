@@ -34,12 +34,10 @@ def is_packaged() -> bool:
     The one dev-vs-packaged check: resolve_base_root and applog (dev-only
     logging) both use it, so fixing the signal here fixes both.
     """
-    # PLACEHOLDER, unverified: sys.frozen is the common "packaged" flag
-    # (PyInstaller/cx_Freeze set it), but Nuitka doesn't always set it,
-    # depending on build flags. Check against real Nuitka output once
-    # packaging starts (CLAUDE.md §3) - Nuitka's own `__compiled__` global
-    # may be the reliable test instead.
-    return bool(getattr(sys, "frozen", False))
+    # Nuitka never sets sys.frozen; it defines a `__compiled__` global in every
+    # compiled module instead (checked against Nuitka 4.2.2's source). sys.frozen
+    # is kept for PyInstaller/cx_Freeze-style builds.
+    return "__compiled__" in globals() or bool(getattr(sys, "frozen", False))
 
 
 def resolve_base_root(env: Mapping[str, str] | None = None) -> Path:
