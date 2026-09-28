@@ -1,0 +1,62 @@
+"""Valheim's own constants and path detection (VALHEIM.md SCOPE): the
+per-game instance of the Thunderstore/BepInEx pattern. Everything generic
+lives in thunderstore.py / bepinex_install.py / bepinex_load_orders.py; this
+module holds only what differs per game, so the next BepInEx game
+(Lethal Company, R.E.P.O.) is a copy of this file with new values.
+
+Steam only - no GOG release, no Steam Workshop; Thunderstore is the sole mod
+source, so paths.py's Workshop/Mods-folder/config-dir helpers don't apply
+and there is no config_dir setting (THUNDERSTORE.md TODO #6).
+"""
+
+from pathlib import Path
+
+from . import paths
+from .bepinex_load_orders import ThunderstoreGame
+from .fsutil import exists, is_dir
+
+NAME = "Valheim"  # shown in the manager screen's messages (screens/bepinex_main_screen.py)
+SLUG = "valheim"  # APP-ROOT subfolder (app_root.resolve_app_root) and game-select id
+COMMUNITY = "valheim"  # Thunderstore community slug (thunderstore.io/c/valheim/)
+STEAM_APPID = "892970"  # the client; the dedicated server is a separate app (896660)
+STEAM_INSTALLDIR = "Valheim"  # appmanifest installdir fallback when the .acf is missing
+DATA_DIR = "valheim_Data"  # Unity data folder beside the exe (holds Managed/ - confirmed on the real install)
+GAME_EXES = ["valheim.exe", "valheim.x86_64"]  # Windows / Linux; no macOS build
+FRAMEWORK_PACKAGE = "denikson-BepInExPack_Valheim"  # Thunderstore's pinned BepInEx pack for this community
+
+GAME = ThunderstoreGame(slug=SLUG, community=COMMUNITY, framework_package=FRAMEWORK_PACKAGE)
+
+
+def is_game_root(dir) -> bool:
+    """A Valheim install: holds valheim_Data/ or one of the game exes."""
+    if not is_dir(dir):
+        return False
+    d = Path(dir)
+    return is_dir(d / DATA_DIR) or any(exists(d / exe) for exe in GAME_EXES)
+
+
+def find_game_exe(game_dir) -> Path | None:
+    """The first GAME_EXES entry present directly in `game_dir`, else None."""
+    if not game_dir:
+        return None
+    for name in GAME_EXES:
+        exe = Path(game_dir) / name
+        if exists(exe):
+            return exe
+    return None
+
+
+def find_steam_install(tried: list | None = None) -> dict | None:
+    """{"source": "steam", "game_dir", "steam_root"} via paths.find_steam_app
+    with Valheim's appid / folder name / root check, or None."""
+    return paths.find_steam_app(STEAM_APPID, STEAM_INSTALLDIR, is_game_root, tried)
+
+
+def autodetect() -> dict:
+    """Same shape as paths.autodetect() minus config_dir (none for Valheim):
+    `game` is the pick, `games` every hit (Steam only), `tried` the folders
+    looked at."""
+    tried: list = []
+    steam = find_steam_install(tried)
+    games = [g for g in (steam,) if g]
+    return {"game": games[0] if games else None, "games": games, "tried": tried}

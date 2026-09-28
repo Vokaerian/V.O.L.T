@@ -30,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import net
 from .applog import clip, log
 
 API = "https://api.steampowered.com/ISteamRemoteStorage"
@@ -61,7 +62,7 @@ _SPECIAL_SCHEMES = {"http", "https", "ws", "wss", "ftp", "file"}
 _IPV4_DIGITS = {10: "0123456789", 16: "0123456789abcdefABCDEF", 8: "01234567"}
 
 # Check-harness seam (no network in the sandbox).
-env = types.SimpleNamespace(urlopen=urllib.request.urlopen)
+env = types.SimpleNamespace(urlopen=net.urlopen)
 
 
 class SteamWebApiError(RuntimeError):

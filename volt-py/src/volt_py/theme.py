@@ -148,7 +148,7 @@ QPushButton[variant="link"]:disabled {{
 }}
 
 /* ---- inputs ---- */
-QLineEdit, QComboBox {{
+QLineEdit, QComboBox, QPlainTextEdit {{
     background: {BG};
     border: 1px solid {BORDER};
     border-radius: {RADIUS}px;
@@ -283,6 +283,15 @@ QLabel[role="dl-num"] {{
     font-family: {_MONO_CSS};
     font-size: 12px;
     color: {MUTED};
+}}
+
+/* ---- Thunderstore/BepInEx manager (screens/bepinex_main_screen.py; the signed-off
+   Valheim mockup): the muted 12px path line under the paths bar. The rows'
+   own look (two lines, toggle, update button) is painted by
+   screens/bepinex_mod_list.py, not styled here. ---- */
+QLabel[role="path-line"] {{
+    color: {MUTED};
+    font-size: 12px;
 }}
 
 /* ---- Scan issues window (screens/scan_issues_window.py; .modal.validation-window.scan-issues) ---- */
@@ -445,6 +454,194 @@ QLabel[role="help-short"] {{
 }}
 QLabel[role="help-long"] {{
     color: {MUTED};
+}}
+
+/* ---- Edit Config window (screens/bepinex_config_window.py; the signed-off
+   mockup https://claude.ai/artifact/5WdEyKKwmrHpzvct1cqziY): the Help
+   window's frame and rail entries, the detail pane's form text roles ---- */
+QDialog#editConfig {{
+    background: {PANEL};
+}}
+QFrame#configRail {{
+    background: {PANEL_2};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+}}
+QFrame#configDetail {{
+    background: {PANEL};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+}}
+QScrollArea#configRailList, QScrollArea#configForm {{
+    background: transparent;
+    border: 0;
+}}
+QFrame#configDivider {{
+    border: 0;
+    border-top: 1px solid {BORDER};
+}}
+/* the rail's file rows (.vc-row-btn): the Help window's entry look */
+QPushButton[variant="config-entry"] {{
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    padding: 6px 10px;
+    text-align: left;
+    color: {MUTED};
+}}
+QPushButton[variant="config-entry"]:hover {{
+    background: {_mix(TEXT, 0.07, PANEL_2)};
+    color: {TEXT};
+}}
+QPushButton[variant="config-entry"][selected="true"] {{
+    background: {SELECTED};
+    color: {TEXT};
+}}
+/* the file's path in the toolbar: mono 14px 600 */
+QLabel[role="config-path"] {{
+    font-family: {_MONO_CSS};
+    font-size: 14px;
+    font-weight: 600;
+}}
+/* [Section] heading: 600, a rule under it */
+QLabel[role="config-section"] {{
+    font-weight: 600;
+    padding-bottom: 4px;
+    border-bottom: 1px solid {BORDER};
+}}
+QLabel[role="config-key"] {{
+    font-weight: 600;
+}}
+QLabel[role="config-desc"], QLabel[role="config-empty"] {{
+    color: {MUTED};
+}}
+/* "Setting type: X · Default value: Y" / Acceptable values: mono 11px muted */
+QLabel[role="config-meta"] {{
+    color: {MUTED};
+    font-family: {_MONO_CSS};
+    font-size: 11px;
+}}
+/* the raw-text fallback's banner: --warn text on a 14% --warn wash */
+QLabel[role="config-banner"] {{
+    background: {_alpha(WARN, 0.14)};
+    border-radius: {RADIUS}px;
+    padding: 8px 12px;
+    color: {WARN};
+}}
+/* the raw text box: mono 12px */
+QPlainTextEdit[mono="true"] {{
+    font-family: {_MONO_CSS};
+    font-size: 12px;
+}}
+/* "Show more" links under a long list / long text: 12px */
+QPushButton[variant="link"][small="true"] {{
+    font-size: 12px;
+}}
+/* the Color swatch (its background is set per widget from the value) */
+QPushButton[variant="config-swatch"] {{
+    border: 1px solid {BORDER};
+    border-radius: 5px;
+    padding: 0;
+}}
+/* ---- the pinned section-jump + search toolbar (THUNDERSTORE.md §7's QoL
+   pass, the same signed-off design's ConfigJump artboard) ---- */
+/* a section chip (.vc-chip): the plain button, hover = accent border +
+   accent-hover text, elided at 130px; dimmed (45%) in Filter mode when
+   its section has no matches */
+QPushButton[variant="config-chip"]:enabled:hover {{
+    border-color: {ACCENT};
+    color: {ACCENT_HOVER};
+}}
+QPushButton[variant="config-chip"]:enabled:pressed,
+QPushButton[variant="config-sections"]:enabled:pressed,
+QPushButton[variant="config-filter"]:enabled:pressed {{
+    background: {_mix(TEXT, 0.07, PANEL_2)};
+}}
+QPushButton[variant="config-chip"][dim="true"] {{
+    background: {_alpha(PANEL_2, 0.45)};
+    border-color: {_alpha(BORDER, 0.45)};
+    color: {_alpha(TEXT, 0.45)};
+}}
+/* "Sections (N) v": accent border while its popup is open */
+QPushButton[variant="config-sections"][open="true"] {{
+    border-color: {ACCENT};
+}}
+/* the Filter toggle: --selected + accent border + white text when on */
+QPushButton[variant="config-filter"]:checked {{
+    background: {SELECTED};
+    border-color: {ACCENT};
+    color: #ffffff;
+}}
+QPushButton[variant="config-filter"]:checked:hover {{
+    background: {_mix(ACCENT, 0.45, PANEL_2)};
+}}
+/* the search field: an input-look frame holding a bare line edit, the
+   counter and the mini buttons (.vc-input / .vc-bare / .vc-mini) */
+QFrame#configSearchBox {{
+    background: {BG};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+}}
+QFrame#configSearchBox[focus="true"] {{
+    border-color: {ACCENT};
+}}
+QLineEdit#configSearchEdit {{
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 2px 0;
+}}
+QLabel[role="config-counter"] {{
+    color: {MUTED};
+    font-size: 12px;
+}}
+QPushButton[variant="config-mini"] {{
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0 5px;
+    color: {MUTED};
+    font-size: 14px;
+}}
+QPushButton[variant="config-mini"]:enabled:hover {{
+    color: {TEXT};
+}}
+QPushButton[variant="config-mini"]:enabled:pressed {{
+    color: {ACCENT};
+}}
+/* the Sections popup: --panel-2, bordered, rounded (the drop shadow is a
+   QGraphicsDropShadowEffect); its rows reuse the config-entry look */
+QFrame#configSectionsPopup {{
+    background: {PANEL_2};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+}}
+QScrollArea#configSectionsList {{
+    background: transparent;
+    border: 0;
+}}
+QPushButton[variant="config-entry"][popup="true"]:pressed {{
+    background: {SELECTED};
+}}
+QPushButton[variant="config-entry"][dim="true"] {{
+    color: {_alpha(MUTED, 0.45)};
+}}
+/* an entry row as a card: transparent until the search marks it - a
+   match gets the 8% --warn wash + 30% --warn border, the current match
+   12% + a solid --warn border. (Non-matches are dimmed by a 50% --panel
+   wash the row paints over itself, since QSS has no opacity.) */
+QFrame[variant="config-row"] {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {RADIUS}px;
+}}
+QFrame[variant="config-row"][hit="match"] {{
+    background: {_alpha(WARN, 0.08)};
+    border-color: {_alpha(WARN, 0.3)};
+}}
+QFrame[variant="config-row"][hit="current"] {{
+    background: {_alpha(WARN, 0.12)};
+    border-color: {WARN};
 }}
 
 /* ---- Rules window (screens/rules_window.py; the approved Design mockup) ---- */

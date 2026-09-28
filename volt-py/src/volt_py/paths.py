@@ -3,6 +3,12 @@
 Finds the RimWorld install root for Steam or GOG, plus the game's config
 folder (ModsConfig.xml). Both storefronts use the same <install root>/Mods
 layout, so this only branches to *find* the root.
+
+The Steam-library scan itself (steam_root_candidates / steam_libraries /
+find_steam_app) is game-agnostic, parameterized by Steam appid + install
+folder name + a root validator, so any Steam game can reuse it (Valheim:
+valheim.py). RimWorld's own appid/exe/GOG/Workshop/config-dir specifics stay
+the module-level defaults, so its existing call sites are unchanged.
 """
 
 import os
@@ -15,6 +21,7 @@ from .registry import read_reg_tree, read_reg_value
 from .vdf import get_ci, parse_vdf
 
 STEAM_APPID = "294100"
+STEAM_INSTALLDIR = "RimWorld"  # appmanifest installdir fallback when the .acf is missing
 GOG_GAME_ID = "1094900708"  # RimWorld's GOG product id; the gameName match is the primary check.
 GAME_EXES = ["RimWorldWin64.exe", "RimWorldWin.exe", "RimWorldLinux", "RimWorldMac.app"]
 
@@ -110,9 +117,10 @@ def steam_root_candidates() -> list[Path]:
     return dedupe(norm(p) for p in c)
 
 
-def steam_libraries(steam_root) -> list[dict]:
+def steam_libraries(steam_root, appid: str = STEAM_APPID) -> list[dict]:
     """Library folders from libraryfolders.vdf. has_app: True/False when the
-    file lists installed app ids (newer format), None when unknown (older)."""
+    file lists installed app ids (newer format) for `appid`, None when unknown
+    (older format)."""
     steam_root = Path(steam_root)
     libs = [{"path": steam_root, "has_app": None}]
     for rel in (("steamapps", "libraryfolders.vdf"), ("config", "libraryfolders.vdf")):
@@ -130,7 +138,7 @@ def steam_libraries(steam_root) -> list[dict]:
             if not p:
                 continue
             apps = get_ci(v, "apps") if isinstance(v, dict) else None
-            has_app = (STEAM_APPID in apps) if isinstance(apps, dict) else None
+            has_app = (appid in apps) if isinstance(apps, dict) else None
             libs.append({"path": norm(p), "has_app": has_app})
     # Same library can appear twice (root + entry "0"); keep the most informative.
     by_key: dict[str, dict] = {}
@@ -142,34 +150,44 @@ def steam_libraries(steam_root) -> list[dict]:
     return list(by_key.values())
 
 
-def find_steam_install(tried: list | None = None) -> dict | None:
+def find_steam_app(appid: str, installdir: str, is_root, tried: list | None = None) -> dict | None:
+    """Generic Steam scan for one app: every Steam root, every library (the
+    ones whose libraryfolders.vdf lists `appid` first), <library>/steamapps/
+    common/<installdir from appmanifest_<appid>.acf, else `installdir`>, the
+    first candidate `is_root(dir)` accepts. Returns {"source": "steam",
+    "game_dir", "steam_root"} or None; every candidate looked at is appended
+    to `tried`."""
     if tried is None:
         tried = []
     for steam_root in steam_root_candidates():
         if not is_dir(steam_root):
             continue
-        libs = steam_libraries(steam_root)
+        libs = steam_libraries(steam_root, appid)
         ordered = [l for l in libs if l["has_app"] is True] + [l for l in libs if l["has_app"] is not True]
         for lib in ordered:
             steamapps = lib["path"] / "steamapps"
-            installdir = "RimWorld"
+            folder = installdir
             try:
-                acf = parse_vdf(read_text(steamapps / f"appmanifest_{STEAM_APPID}.acf"))
+                acf = parse_vdf(read_text(steamapps / f"appmanifest_{appid}.acf"))
                 d = get_ci(get_ci(acf, "AppState"), "installdir")
                 if isinstance(d, str) and d:
-                    installdir = d
+                    folder = d
             except (OSError, ValueError):
                 pass  # No manifest in this library - still try the default folder name.
-            candidate = steamapps / "common" / installdir
+            candidate = steamapps / "common" / folder
             tried.append(candidate)
-            if is_game_root(candidate):
-                return {
-                    "source": "steam",
-                    "game_dir": candidate,
-                    "steam_root": steam_root,
-                    "workshop_dir": workshop_dir_for(candidate),
-                }
+            if is_root(candidate):
+                return {"source": "steam", "game_dir": candidate, "steam_root": steam_root}
     return None
+
+
+def find_steam_install(tried: list | None = None) -> dict | None:
+    """RimWorld's Steam install (find_steam_app with RimWorld's constants),
+    plus its derived Workshop folder."""
+    found = find_steam_app(STEAM_APPID, STEAM_INSTALLDIR, is_game_root, tried)
+    if found:
+        found["workshop_dir"] = workshop_dir_for(found["game_dir"])
+    return found
 
 
 def find_gog_install(tried: list | None = None) -> dict | None:

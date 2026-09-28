@@ -49,11 +49,11 @@ import subprocess
 import threading
 import time
 import types
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+from . import net
 from .applog import clip, log
 from .fsutil import exists, is_dir, remove_tree_best_effort
 from .paths import STEAM_APPID
@@ -75,7 +75,7 @@ TIMING = {
     "log_poll_s": 0.15,
 }
 # Check-harness seams (no real Windows / SteamCMD / network in the sandbox).
-env = types.SimpleNamespace(platform=platform.system(), popen=subprocess.Popen, urlopen=urllib.request.urlopen,
+env = types.SimpleNamespace(platform=platform.system(), popen=subprocess.Popen, urlopen=net.urlopen,
                             remove_tree=remove_tree_best_effort)  # remove_tree: delete_item's seam (a locked file can't be faked portably)
 
 

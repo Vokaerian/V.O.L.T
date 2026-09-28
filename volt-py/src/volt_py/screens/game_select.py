@@ -2,7 +2,7 @@
 .game-select / .game-tile rules). Shown first on every launch; picking a game
 emits GameSelectScreen.gameSelected(slug), which MainWindow answers by
 swapping in that game's screen. One game per run, not persisted, no way back
-(TODO.md #30, Electron parity). Only RimWorld's tile is enabled so far.
+(TODO.md #30, Electron parity). RimWorld's and Valheim's tiles are enabled so far.
 
 Layout (top to bottom, centered, in a QScrollArea - CSS overflow-y: auto):
 the "V. O. L. T." header, a 64x3 accent bar, the subtitle, the "Select a game"
@@ -78,7 +78,7 @@ GAMES: tuple[Game, ...] = (
     Game("rimworld", "RimWorld", True),
     Game("zomboid", "Project Zomboid", False),
     Game("lethal", "Lethal Company", False),
-    Game("valheim", "Valheim", False),
+    Game("valheim", "Valheim", True),
     Game("sts2", "Slay the Spire 2", False),
     Game("repo", "R.E.P.O.", False),
     Game("palworld", "Palworld", False),

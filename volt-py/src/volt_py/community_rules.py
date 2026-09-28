@@ -21,9 +21,9 @@ only one of them ever fetches.
 
 import json
 import threading
-import urllib.request
 from pathlib import Path
 
+from . import net
 from .applog import clip, log
 from .fsutil import read_text, write_text_atomic
 
@@ -64,7 +64,7 @@ def normalize_rules(data) -> dict[str, dict[str, list[str]]]:
 
 def _fetch_live(cache_file: Path, url: str) -> dict:
     log(f"community rules: fetching {url} (timeout {TIMEOUT_S}s)")
-    with urllib.request.urlopen(url, timeout=TIMEOUT_S) as res:
+    with net.urlopen(url, timeout=TIMEOUT_S) as res:
         status = getattr(res, "status", None)  # None for a file:// URL (the check harness)
         if status is not None and not 200 <= status < 300:
             raise OSError(f"HTTP {status}")  # urlopen raises HTTPError for most; belt and braces

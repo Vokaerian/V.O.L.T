@@ -1,0 +1,508 @@
+"""Load orders for Thunderstore/BepInEx games (THUNDERSTORE.md §2): each one
+is a complete, independent BepInEx tree under that game's APP-ROOT -
+<APP-ROOT>/load-orders/<slug>/ holds loadorder.json (the manifest) beside the
+tree itself (BepInEx/{core,plugins,config,patchers,monomod}, winhttp.dll,
+doorstop_config.ini, ...). Never inside the real game install. Deliberately
+NOT load_orders.py (RimWorld's): that manifest references mods in a shared
+Mods folder; here the load order IS the tree, so the manifest tracks what is
+installed in it and which files each package put where.
+
+Same folder name (load-orders/), file name (loadorder.json), slug rules and
+JSON conventions (snake_case, schema_version, ISO created_at/updated_at) as
+RimWorld's - only the shape inside differs.
+
+Manifest (schema_version 1):
+{
+  "schema_version": 1,
+  "name": "Vanilla+",                       # display name; folder name is the slug
+  "created_at": "<ISO>", "updated_at": "<ISO>",
+  "framework": <entry>,                     # the game's BepInExPack, installed at
+                                            #   create; pinned, never in active/inactive
+  "active":   [<entry>, ...],               # ordered (cosmetic for BepInEx, kept for
+                                            #   the UI); each has its own "enabled"
+  "inactive": [<entry>, ...]                # still installed, files disabled on disk
+}
+<entry> = {
+  "full_name": "ValheimModding-Jotunn", "namespace": "ValheimModding", "name": "Jotunn",
+  "version": "2.30.0", "display_name": "Jotunn", "description": "...", "website_url": "...",
+  "dependencies": ["denikson-BepInExPack_Valheim-5.4.2333", ...],  # as declared, informational
+  "enabled": true,               # active-list toggle; always true for framework/inactive-irrelevant
+  "online_source": true,         # false once 8b's local import exists: skip update checks
+  "installed_at": "<ISO>",
+  "files": ["BepInEx/plugins/ValheimModding-Jotunn/Jotunn.dll", ...]  # tree-relative, enabled names
+}
+On disk, a mod's files are enabled (plain names) iff it is in `active` with
+enabled=true; `inactive` mods and toggled-off active mods are renamed with
+bepinex_install.DISABLED_SUFFIX. save_load_order() is the one place that
+materializes this. Unknown top-level fields are preserved.
+
+Network goes through thunderstore.py (fetch_package / ensure_cached), so the
+check harness fakes thunderstore.env.urlopen. Dependency auto-install
+(THUNDERSTORE.md §1): install_mod() pulls in every declared dependency not yet
+installed, recursively, at its LATEST version - a dependency string's version
+is informational, not a pin (TMM's own profiles show the same). A dependency
+that can't be fetched/installed is reported as a problem, not a failure of
+the whole install; the requested package failing raises.
+
+Updates (THUNDERSTORE.md §3, stage 3b): check_updates() asks Thunderstore for
+every installed package's current latest version (online_source ones only)
+and update_mod() re-downloads + installs one package (the framework
+included) in place - new files overwrite, files the old version had and the
+new one doesn't are deleted, config kept, the mod's on-disk enabled/disabled
+state preserved. The manager screen runs both off the GUI thread.
+"""
+
+import os
+import shutil
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from . import bepinex_install as bx
+from . import thunderstore as ts
+from .applog import log
+from .fsutil import read_json, remove_tree_best_effort, write_json
+from .mods import natural_key
+from .slug import is_valid_slug, slugify
+
+DIR_NAME = "load-orders"
+MANIFEST_FILE = "loadorder.json"
+SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class ThunderstoreGame:
+    """The per-game facts this module needs (THUNDERSTORE.md's per-game
+    checklist): APP-ROOT slug, Thunderstore community slug (URLs in the mod
+    browser), and the one canonical framework package's full_name."""
+
+    slug: str
+    community: str
+    framework_package: str
+
+    @property
+    def framework_ref(self) -> ts.PackageRef:
+        return ts.PackageRef.parse(self.framework_package)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def load_orders_root(app_root) -> Path:
+    return Path(app_root) / DIR_NAME
+
+
+def assert_slug(slug) -> None:
+    # The one guard between a slug and filesystem traversal - keep it strict.
+    if not is_valid_slug(slug):
+        raise ValueError(f"Invalid load order id: {slug!r}")
+
+
+def tree_root(app_root, slug) -> Path:
+    """The load order's folder = the root its BepInEx tree hangs off."""
+    assert_slug(slug)
+    return load_orders_root(app_root) / slug
+
+
+def bepinex_dir(app_root, slug) -> Path:
+    return tree_root(app_root, slug) / bx.BEPINEX_DIR
+
+
+def manifest_path(app_root, slug) -> Path:
+    return tree_root(app_root, slug) / MANIFEST_FILE
+
+
+def _entry(raw) -> dict | None:
+    if not isinstance(raw, dict) or not isinstance(raw.get("full_name"), str):
+        return None
+    try:
+        ref = ts.PackageRef.parse(raw["full_name"])
+    except ValueError:
+        return None
+    files = raw.get("files")
+    deps = raw.get("dependencies")
+    return {
+        **raw,
+        "full_name": ref.full_name,
+        "namespace": ref.namespace,
+        "name": ref.name,
+        "version": raw.get("version") if isinstance(raw.get("version"), str) else "",
+        "display_name": raw.get("display_name") if isinstance(raw.get("display_name"), str) and raw["display_name"] else ref.name,
+        "description": raw.get("description") if isinstance(raw.get("description"), str) else "",
+        "website_url": raw.get("website_url") if isinstance(raw.get("website_url"), str) else "",
+        "dependencies": [d for d in deps if isinstance(d, str)] if isinstance(deps, list) else [],
+        "enabled": raw.get("enabled") is not False,
+        "online_source": raw.get("online_source") is not False,
+        "installed_at": raw.get("installed_at"),
+        "files": [f for f in files if isinstance(f, str)] if isinstance(files, list) else [],
+    }
+
+
+def _entries(raw) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    out, seen = [], set()
+    for r in raw:
+        e = _entry(r)
+        if e and e["full_name"] not in seen:
+            seen.add(e["full_name"])
+            out.append(e)
+    return out
+
+
+def normalize_manifest(raw, slug: str) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("manifest is not a JSON object")
+    ver = raw.get("schema_version")
+    if isinstance(ver, (int, float)) and not isinstance(ver, bool) and ver > SCHEMA_VERSION:
+        raise ValueError(f"manifest schema_version {ver} is newer than this app supports ({SCHEMA_VERSION})")
+    name = raw.get("name")
+    framework = _entry(raw.get("framework"))
+    if framework:
+        framework["enabled"] = True
+    active = _entries(raw.get("active"))
+    taken = {e["full_name"] for e in active} | ({framework["full_name"]} if framework else set())
+    inactive = [e for e in _entries(raw.get("inactive")) if e["full_name"] not in taken]
+    return {
+        **raw,
+        "slug": slug,
+        "schema_version": SCHEMA_VERSION,
+        "name": name if isinstance(name, str) and name.strip() else slug,
+        "created_at": raw.get("created_at"),
+        "updated_at": raw.get("updated_at"),
+        "framework": framework,
+        "active": active,
+        "inactive": inactive,
+    }
+
+
+def installed(manifest: dict) -> dict[str, dict]:
+    """full_name -> entry for everything installed in the tree (framework
+    included), active first."""
+    out = {}
+    if manifest.get("framework"):
+        out[manifest["framework"]["full_name"]] = manifest["framework"]
+    for e in manifest["active"] + manifest["inactive"]:
+        out[e["full_name"]] = e
+    return out
+
+
+def _write(app_root, slug, manifest: dict) -> dict:
+    manifest = {k: v for k, v in manifest.items() if k != "slug"}
+    manifest["schema_version"] = SCHEMA_VERSION
+    manifest["updated_at"] = _now()
+    write_json(manifest_path(app_root, slug), manifest)
+    return normalize_manifest(manifest, slug)
+
+
+def list_load_orders(app_root) -> list[dict]:
+    """One row per load order folder (natural name order): {slug, name,
+    updated_at, active_count, framework_version} - or {slug, name, error} for
+    a folder whose manifest can't be read, so one bad one never hides the rest."""
+    try:
+        entries = list(os.scandir(load_orders_root(app_root)))
+    except FileNotFoundError:
+        return []
+    out = []
+    for e in entries:
+        if not e.is_dir() or not is_valid_slug(e.name):
+            continue
+        try:
+            m = normalize_manifest(read_json(manifest_path(app_root, e.name)), e.name)
+            out.append({
+                "slug": e.name, "name": m["name"], "updated_at": m["updated_at"],
+                "active_count": len(m["active"]),
+                "framework_version": m["framework"]["version"] if m["framework"] else None,
+            })
+        except Exception as err:
+            out.append({"slug": e.name, "name": e.name, "error": str(err)})
+    return sorted(out, key=lambda o: (natural_key(o["name"]), o["slug"]))  # slug breaks a name tie
+
+
+def load_load_order(app_root, slug) -> dict:
+    return normalize_manifest(read_json(manifest_path(app_root, slug)), slug)
+
+
+def _allocate(app_root, name) -> tuple[str, str]:
+    """(display name, fresh slug): slug the name, suffix -2, -3... on collision,
+    the folder created (non-recursive mkdir, so a race can't reuse one)."""
+    display = ("" if name is None else str(name)).strip()
+    if not display:
+        raise ValueError("Load order name is empty")
+    root = load_orders_root(app_root)
+    root.mkdir(parents=True, exist_ok=True)
+    base = slugify(display)
+    for n in range(1, 1000):
+        slug = base if n == 1 else f"{base}-{n}"
+        try:
+            (root / slug).mkdir()
+        except FileExistsError:
+            continue
+        return display, slug
+    raise ValueError(f'Too many load orders named like "{display}"')
+
+
+def _make_entry(ref: ts.PackageRef, result: dict) -> dict:
+    m = result["manifest"]
+    return {
+        "full_name": ref.full_name, "namespace": ref.namespace, "name": ref.name,
+        "version": m["version_number"], "display_name": m["name"],
+        "description": m["description"], "website_url": m["website_url"],
+        "dependencies": list(m["dependencies"]),
+        "enabled": True, "online_source": True, "installed_at": _now(),
+        "files": list(result["files"]),
+    }
+
+
+def _fetch_and_install(app_root, slug, ref: ts.PackageRef, framework: bool, app_version=None) -> dict:
+    """Resolve `ref` (a pinned version, else Thunderstore's latest), get the
+    zip into the shared cache, extract it into the tree. Returns the entry."""
+    url = None
+    if ref.version is None:
+        meta = ts.fetch_package(ref.namespace, ref.name, app_version)
+        ref = ts.latest_ref(meta)
+        url = meta["latest"].get("download_url") if isinstance(meta["latest"].get("download_url"), str) else None
+    zip_path = ts.ensure_cached(app_root, ref, url, app_version)
+    root = tree_root(app_root, slug)
+    try:
+        result = bx.install_package(zip_path, root, ref.full_name, framework=framework)
+    except bx.PackageError as err:
+        if err.kind == "bad-zip":  # a corrupt cached download: don't keep serving it
+            ts.evict_cached(app_root, ref)
+        raise
+    return _make_entry(ref, result)
+
+
+def create_load_order(app_root, name: str, game: ThunderstoreGame, app_version=None) -> dict:
+    """New load order: folder + manifest, then the game's framework package
+    downloaded (or taken from the cache) and installed into the tree root, so
+    it's launch-ready immediately. If the framework install fails the folder
+    is removed again and the error propagates."""
+    display, slug = _allocate(app_root, name)
+    now = _now()
+    manifest = {
+        "schema_version": SCHEMA_VERSION, "name": display, "created_at": now, "updated_at": now,
+        "framework": None, "active": [], "inactive": [],
+    }
+    write_json(manifest_path(app_root, slug), manifest)
+    log(f"[loadorders] created {slug!r} ({display!r}) at {tree_root(app_root, slug)}")
+    try:
+        manifest["framework"] = _fetch_and_install(app_root, slug, game.framework_ref, framework=True, app_version=app_version)
+    except Exception:
+        remove_tree_best_effort(tree_root(app_root, slug))
+        log(f"[loadorders] framework install failed, removed {slug!r}")
+        raise
+    return _write(app_root, slug, manifest)
+
+
+def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None) -> dict:
+    """Installs `target` (a PackageRef or "Team-Package[-Version]" string) into
+    the load order, appended to the active list enabled, after any of its
+    declared dependencies not yet installed (recursively, latest versions).
+    Already-installed packages (framework included) are left alone. Returns
+    {"installed": [entries, dependencies first], "problems": [{kind, path,
+    message, package}]} - a dependency that fails is a problem; the target
+    itself failing raises (ThunderstoreError / PackageError)."""
+    ref = target if isinstance(target, ts.PackageRef) else ts.PackageRef.parse(target)
+    manifest = load_load_order(app_root, slug)
+    have = installed(manifest)
+    if ref.full_name == game.framework_package or ref.full_name in have:
+        log(f"[loadorders] {slug}: {ref.full_name} already installed, nothing to do")
+        return {"installed": [], "problems": []}
+    done, problems, visiting = [], [], set()
+
+    def visit(r: ts.PackageRef, is_target: bool) -> None:
+        if r.full_name in have or r.full_name == game.framework_package or r.full_name in visiting:
+            return
+        visiting.add(r.full_name)
+        try:
+            entry = _fetch_and_install(app_root, slug, r, framework=False, app_version=app_version)
+        except (ts.ThunderstoreError, bx.PackageError) as err:
+            if is_target:
+                raise
+            problem = getattr(err, "problem", lambda: {"kind": "fetch-error", "path": "", "message": str(err)})()
+            problems.append({**problem, "package": r.full_name})
+            log(f"[loadorders] {slug}: dependency {r.full_name} failed: {err}")
+            return
+        for dep in entry["dependencies"]:
+            try:
+                d = ts.PackageRef.parse(dep)
+                visit(ts.PackageRef(d.namespace, d.name), False)  # the dep string's version is informational: latest
+            except ValueError as err:
+                problems.append({"kind": "bad-dependency", "path": "", "message": str(err), "package": r.full_name})
+        have[entry["full_name"]] = entry
+        manifest["active"].append(entry)
+        done.append(entry)
+        _write(app_root, slug, manifest)  # keep the manifest truthful after every install
+
+    visit(ref, True)
+    log(f"[loadorders] {slug}: installed {[e['full_name'] for e in done]}, {len(problems)} problems")
+    return {"installed": done, "problems": problems}
+
+
+def remove_mod(app_root, slug, full_name: str) -> dict:
+    """Deletes a mod's files from the tree (config kept) and drops it from
+    the manifest. The framework can't be removed. Returns the new manifest."""
+    manifest = load_load_order(app_root, slug)
+    fw = manifest.get("framework")
+    if fw and fw["full_name"] == full_name:
+        raise ValueError(f"{full_name} is the framework package and can't be removed")
+    entry = installed(manifest).get(full_name)
+    if entry is None:
+        raise ValueError(f"{full_name} is not installed in this load order")
+    res = bx.remove_files(tree_root(app_root, slug), entry["files"])
+    log(f"[loadorders] {slug}: removed {full_name}: {res}")
+    manifest["active"] = [e for e in manifest["active"] if e["full_name"] != full_name]
+    manifest["inactive"] = [e for e in manifest["inactive"] if e["full_name"] != full_name]
+    return _write(app_root, slug, manifest)
+
+
+def save_load_order(app_root, slug, active, inactive) -> dict:
+    """Save (THUNDERSTORE.md §3's one button): `active` = ordered list of
+    full_names or {"full_name", "enabled"} dicts, `inactive` = list of
+    full_names. Every installed mod (except the framework, which is pinned and
+    must not be passed) has to appear exactly once across the two; the
+    on-disk enable/disable state of every mod is then materialized to match.
+    Returns the new manifest."""
+    manifest = load_load_order(app_root, slug)
+    have = installed(manifest)
+    fw = manifest["framework"]["full_name"] if manifest.get("framework") else None
+    seen = set()
+
+    def take(item, enabled_default: bool) -> dict:
+        if isinstance(item, dict):
+            name, enabled = item.get("full_name"), item.get("enabled", enabled_default)
+        else:
+            name, enabled = item, enabled_default
+        if name == fw:
+            raise ValueError(f"{name} is the framework package: pinned, not part of the lists")
+        if name not in have:
+            raise ValueError(f"{name!r} is not installed in this load order")
+        if name in seen:
+            raise ValueError(f"{name} is listed twice")
+        seen.add(name)
+        return {**have[name], "enabled": bool(enabled)}
+
+    new_active = [take(i, True) for i in (active or [])]
+    new_inactive = [{**take(i, False), "enabled": True} for i in (inactive or [])]
+    missing = [n for n in have if n != fw and n not in seen]
+    if missing:
+        raise ValueError(f"Installed mods missing from both lists: {', '.join(missing)}")
+    root = tree_root(app_root, slug)
+    drift = []
+    for e in new_active:
+        drift += bx.set_files_enabled(root, e["files"], e["enabled"])["missing"]
+    for e in new_inactive:
+        drift += bx.set_files_enabled(root, e["files"], False)["missing"]
+    if drift:
+        log(f"[loadorders] {slug}: save: {len(drift)} tracked files missing from the tree: {drift[:10]}")
+    manifest["active"], manifest["inactive"] = new_active, new_inactive
+    log(f"[loadorders] {slug}: saved {len(new_active)} active ({sum(1 for e in new_active if not e['enabled'])} off), {len(new_inactive)} inactive")
+    return _write(app_root, slug, manifest)
+
+
+def set_mod_enabled(app_root, slug, full_name: str, enabled: bool) -> dict:
+    """One active mod's toggle, materialized immediately (a Save of the
+    current lists with just that flag changed). Returns the new manifest."""
+    manifest = load_load_order(app_root, slug)
+    if full_name not in {e["full_name"] for e in manifest["active"]}:
+        raise ValueError(f"{full_name} is not in the active list")
+    active = [{"full_name": e["full_name"], "enabled": enabled if e["full_name"] == full_name else e["enabled"]}
+              for e in manifest["active"]]
+    return save_load_order(app_root, slug, active, [e["full_name"] for e in manifest["inactive"]])
+
+
+def check_updates(manifest: dict, app_version=None) -> dict[str, dict]:
+    """One Thunderstore metadata fetch per installed package with
+    online_source (framework included): full_name -> {"latest_version",
+    "date_updated", "update": bool} or {"error": str} (that package's
+    fetch failed - the rest still get checked). Pure network + compare,
+    nothing written; the caller keeps/caches the result."""
+    out = {}
+    for full_name, entry in installed(manifest).items():
+        if not entry.get("online_source", True):
+            continue
+        try:
+            meta = ts.fetch_package(entry["namespace"], entry["name"], app_version)
+        except ts.ThunderstoreError as err:
+            out[full_name] = {"error": str(err)}
+            continue
+        latest = meta["latest"]["version_number"]
+        out[full_name] = {
+            "latest_version": latest,
+            "date_updated": meta.get("date_updated") if isinstance(meta.get("date_updated"), str) else None,
+            "update": ts.is_newer(latest, entry["version"]),
+        }
+    log(f"[loadorders] update check: {sum(1 for v in out.values() if v.get('update'))} of {len(out)} packages have an update, "
+        f"{sum(1 for v in out.values() if 'error' in v)} failed")
+    return out
+
+
+def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_version=None) -> dict:
+    """Re-downloads + installs `full_name` at Thunderstore's current latest
+    version, in place (the framework included). New files overwrite the
+    tree's, files the old version tracked that the new one doesn't are
+    deleted (config kept, as always); the mod's on-disk state is preserved
+    (an inactive or toggled-off mod comes back disabled). Returns
+    {"manifest", "entry", "updated": bool} - updated False when the
+    installed version already is the latest (nothing touched). ValueError
+    for a package not in this load order; ThunderstoreError / PackageError
+    from the fetch/install."""
+    manifest = load_load_order(app_root, slug)
+    entry = installed(manifest).get(full_name)
+    if entry is None:
+        raise ValueError(f"{full_name} is not installed in this load order")
+    fw = manifest.get("framework")
+    is_framework = bool(fw) and fw["full_name"] == full_name
+    meta = ts.fetch_package(entry["namespace"], entry["name"], app_version)
+    latest = ts.latest_ref(meta)
+    if not ts.is_newer(latest.version, entry["version"]):
+        log(f"[loadorders] {slug}: {full_name} {entry['version']} is current (latest {latest.version}), nothing to update")
+        return {"manifest": manifest, "entry": entry, "updated": False}
+    on_disk_enabled = is_framework or (
+        entry["enabled"] and any(e["full_name"] == full_name for e in manifest["active"]))
+    root = tree_root(app_root, slug)
+    new = _fetch_and_install(app_root, slug, latest, framework=is_framework, app_version=app_version)
+    if not on_disk_enabled:
+        bx.set_files_enabled(root, new["files"], False)
+    stale = [f for f in entry["files"] if f not in set(new["files"])]
+    if stale:
+        res = bx.remove_files(root, stale)
+        log(f"[loadorders] {slug}: {full_name} update dropped {len(stale)} files of {entry['version']}: {res}")
+    new_entry = {**entry, **new, "enabled": entry["enabled"], "online_source": entry.get("online_source", True)}
+    if is_framework:
+        manifest["framework"] = new_entry
+    else:
+        for key in ("active", "inactive"):
+            manifest[key] = [new_entry if e["full_name"] == full_name else e for e in manifest[key]]
+    log(f"[loadorders] {slug}: updated {full_name} {entry['version']} -> {latest.version}"
+        f"{' (framework)' if is_framework else ''}{'' if on_disk_enabled else ', kept disabled'}")
+    return {"manifest": _write(app_root, slug, manifest), "entry": new_entry, "updated": True}
+
+
+def copy_load_order(app_root, slug, new_name: str) -> dict:
+    """Duplicates a load order's whole tree (files + manifest, enabled/
+    disabled state included) under a new name. Returns the new manifest."""
+    src = load_load_order(app_root, slug)  # validates the source first
+    display, new_slug = _allocate(app_root, new_name)
+    dst = tree_root(app_root, new_slug)
+    try:
+        shutil.copytree(tree_root(app_root, slug), dst, dirs_exist_ok=True)
+    except Exception:
+        remove_tree_best_effort(dst)
+        raise
+    now = _now()
+    manifest = {**{k: v for k, v in src.items() if k != "slug"}, "name": display, "created_at": now}
+    log(f"[loadorders] copied {slug!r} -> {new_slug!r} ({display!r})")
+    return _write(app_root, new_slug, manifest)
+
+
+def delete_load_order(app_root, slug) -> dict:
+    """Removes the load order's whole folder (tree and manifest). Permanent -
+    the caller confirms first. Best effort: a file the running game holds
+    open is reported in the result's "skipped", not raised."""
+    root = tree_root(app_root, slug)  # assert_slug: never remove a path built from an unchecked slug
+    res = remove_tree_best_effort(root)
+    log(f"[loadorders] deleted {slug!r}: {res}")
+    return res

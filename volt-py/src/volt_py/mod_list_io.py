@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+from . import net
 from .applog import log
 from .fsutil import read_text
 from .ids import clean_ids
@@ -261,7 +262,7 @@ def _request(req: urllib.request.Request) -> tuple[int, bytes]:
     reaching the site at all raises OSError."""
     log(f"rentry: {req.get_method()} {req.full_url} (timeout {RENTRY_TIMEOUT_S}s)")
     try:
-        with urllib.request.urlopen(req, timeout=RENTRY_TIMEOUT_S) as res:
+        with net.urlopen(req, timeout=RENTRY_TIMEOUT_S) as res:
             status, body = res.status, res.read()
     except urllib.error.HTTPError as err:
         status, body = err.code, b""

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QMainWindow
 from volt_py.app_root import resolve_base_root
 from volt_py.screens.game_select import GameSelectScreen
 from volt_py.screens.rimworld_main_screen import RimWorldMainScreen
+from volt_py.screens.valheim_main_screen import ValheimMainScreen
 
 DEFAULT_SIZE = (1600, 900)
 MIN_SIZE = (1000, 600)
@@ -69,9 +70,11 @@ class MainWindow(QMainWindow):
         # gameActivate IPC): RimWorldMainScreen resolves its own APP-ROOT and
         # starts its log. setCentralWidget hides the game-select screen and
         # deleteLater()s it, so this is safe to run from the tile's own
-        # click/key handler. Only RimWorld's tile is enabled today.
+        # click/key handler. RimWorld's and Valheim's tiles are enabled today.
         if slug == "rimworld":
             self.setCentralWidget(RimWorldMainScreen())
+        elif slug == "valheim":
+            self.setCentralWidget(ValheimMainScreen())
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
