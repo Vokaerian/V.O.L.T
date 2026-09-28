@@ -8,6 +8,7 @@
 /.claude/
 cleanup.bat
 dev-py.bat
+release.bat
 
 # Scratch / task workspace.
 /temp/
