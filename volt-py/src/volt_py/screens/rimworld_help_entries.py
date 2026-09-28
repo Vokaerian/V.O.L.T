@@ -46,6 +46,16 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
             "It's greyed out until a config folder is set in Settings."
         ),
     },
+    {
+        "name": "Paths: Load order folder",
+        "short": "Opens the selected load order's own folder in your file explorer.",
+        "long": (
+            "This is the \"Load order\" link next to \"Paths:\" at the top of the window. Each load order is "
+            "saved as its own folder inside VOLT's load-orders folder, holding its loadorder.json. It's greyed "
+            "out until a load order is selected, and works even before a game folder is set. Hover it to see "
+            "the full path."
+        ),
+    },
     # ---- load-order bar ----
     {
         "name": "Load order picker",

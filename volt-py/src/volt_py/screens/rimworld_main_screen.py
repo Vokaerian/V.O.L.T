@@ -960,6 +960,9 @@ class RimWorldMainScreen(QWidget):
         self.game_link.clicked.connect(lambda: self._open_folder(self.game_dir))
         self.mods_link.clicked.connect(lambda: self._open_folder(self.game_dir / "Mods"))
         self.config_link.clicked.connect(lambda: self._open_folder(self.config_dir))
+        self.load_order_link.clicked.connect(
+            lambda: self.current_load_order and self._open_folder(self._load_order_dir())
+        )
         self.rescan_button.clicked.connect(lambda: self.rescan())
         # Every real Active change (double-click move in/out, drag-drop commit)
         # goes through one of these model signals; the *AboutTo* ones fire
@@ -999,6 +1002,20 @@ class RimWorldMainScreen(QWidget):
         self.scan_issues_button.clicked.connect(lambda: self._show_scan_issues())
         self.issues_button.clicked.connect(lambda: self._show_validation())  # unscoped (App.jsx setIssuesOpen({}))
         self.download_bar.toggled.connect(lambda: self._toggle_download_pause())
+
+    def _load_order_dir(self) -> Path | None:
+        """The open load order's own folder (load-orders/<slug>), else None."""
+        if self.current_load_order is None:
+            return None
+        return load_orders.load_orders_root(self.app_root) / self.current_load_order
+
+    def _apply_load_order_link(self) -> None:
+        """Paths: Load order - enabled/tooltip follow current_load_order only
+        (not the game path: the folder lives under app_root). Called at both
+        places current_load_order is assigned."""
+        path = self._load_order_dir()
+        self.load_order_link.setEnabled(path is not None)
+        self.load_order_link.setToolTip(str(path) if path else "")
 
     @staticmethod
     def _open_folder(path: Path) -> None:
@@ -1698,6 +1715,7 @@ class RimWorldMainScreen(QWidget):
         picker.setCurrentIndex(slugs.index(slug) if slug else -1)
         picker.blockSignals(False)
         self.current_load_order = slug
+        self._apply_load_order_link()
         log(
             f"load-order picker reloaded: {len(entries)} load orders, current={slug} "
             f"(requested={select_slug}, last saved={last})"
@@ -1716,6 +1734,7 @@ class RimWorldMainScreen(QWidget):
             return
         log(f"load order selected: {self.current_load_order} -> {slug}")
         self.current_load_order = slug
+        self._apply_load_order_link()
         self._settings.update({"last_load_order": slug})
         self._apply_current_load_order_to_panes()
         self._apply_load_order_state()
@@ -2740,6 +2759,11 @@ class RimWorldMainScreen(QWidget):
         row.addWidget(self.mods_link)
         row.addWidget(_label("/", muted=True))
         row.addWidget(self.config_link)
+        # Plain gap, not "/": the load order's folder isn't nested under the
+        # game folder like the three above, it's under VOLT's own load-orders/.
+        row.addSpacing(16 - GAP)
+        self.load_order_link = _button("Load order", variant="link")  # disabled with no load order open
+        row.addWidget(self.load_order_link)
         row.addSpacing(16 - GAP)  # .path-link-last margin-right: 16px
 
         self.storefront_tag = QLabel("Steam")
