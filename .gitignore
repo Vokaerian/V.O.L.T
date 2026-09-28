@@ -7,16 +7,10 @@
 /tools/
 /.claude/
 cleanup.bat
-dev.bat
 dev-py.bat
 
 # Scratch / task workspace.
 /temp/
-
-# App runtime data, dependencies, build output -- regenerated, never committed.
-/src/node_modules/
-/src/dev-app-root/
-/src/dist/
 
 # Python rewrite (volt-py) -- venv/cache/dev-runtime are regenerated, never committed.
 /volt-py/.venv/
