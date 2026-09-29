@@ -19,7 +19,11 @@ against the live site 2026-09-28 (the handoff has the probes):
   404 {"detail": "Invalid page."}, a bad ordering = HTTP 400. Orderings:
   ORDERINGS. `included_categories` takes a category *id* (a slug is a 400).
   Without deprecated / nsfw the site's own defaults are False (the `next`
-  URL echoes them) - passed explicitly anyway.
+  URL echoes them) - passed explicitly anyway. deprecated=True / nsfw=True
+  INCLUDE those packages alongside the rest (not "only them"; probed
+  2026-09-29: Valheim most-downloaded counts 6740 False/False, 12121
+  True/False, 6776 False/True, 12201 True/True) - the browser's "Show
+  deprecated" / "Show NSFW" toggles.
 - GET /api/cyberstorm/community/<community>/filters/ -> {package_categories:
   [{id, name, slug}], sections: [...]}.
 - GET /api/cyberstorm/listing/<community>/<ns>/<name>/ -> the package's
@@ -28,7 +32,8 @@ against the live site 2026-09-28 (the handoff has the probes):
   icon_url, is_active}], download_count, rating_count, size, website_url,
   latest_version_number, full_version_name, version_created (last
   updated), package_created (first uploaded), dependant_count,
-  has_changelog, categories, description, icon_url, version_count.
+  has_changelog, categories, description, icon_url, version_count,
+  is_deprecated.
 - GET /api/cyberstorm/package/<ns>/<name>/versions/ -> [{version_number,
   datetime_created, download_count, download_url}] (unsorted; sorted here).
 The documented experimental endpoints used alongside:
@@ -87,8 +92,9 @@ CHAIN_LIMIT = 40  # dependency_chain stops resolving past this many packages (a 
 SHAPE_MESSAGE = "Thunderstore's mod listing has changed shape; VOLT's mod browser needs an update."
 
 
-def listing_url(community: str, *, query: str = "", ordering: str = DEFAULT_ORDERING, category=None, page: int = 1) -> str:
-    params = {"ordering": ordering, "page": page, "deprecated": "False", "nsfw": "False"}
+def listing_url(community: str, *, query: str = "", ordering: str = DEFAULT_ORDERING, category=None, page: int = 1,
+                deprecated: bool = False, nsfw: bool = False) -> str:
+    params = {"ordering": ordering, "page": page, "deprecated": str(bool(deprecated)), "nsfw": str(bool(nsfw))}
     if query:
         params["q"] = query
     if category:
@@ -207,7 +213,7 @@ def _listing(item, what: str) -> dict:
 
 
 def list_packages(community: str, *, query: str = "", ordering: str = DEFAULT_ORDERING, category=None,
-                  page: int = 1, app_version=None) -> dict:
+                  page: int = 1, deprecated: bool = False, nsfw: bool = False, app_version=None) -> dict:
     """One page of the SITE's listing: {"count": total matching packages
     (pinned ones included - the site counts them), "pages": total site
     pages, "page": this page, "results": [listing dicts, pinned packages
@@ -221,7 +227,8 @@ def list_packages(community: str, *, query: str = "", ordering: str = DEFAULT_OR
     if not isinstance(page, int) or page < 1:
         raise ValueError(f"Not a page number: {page!r}")
     what = f"mod listing (page {page})"
-    data = _get_json(listing_url(community, query=query, ordering=ordering, category=category, page=page), app_version, what)
+    data = _get_json(listing_url(community, query=query, ordering=ordering, category=category, page=page,
+                                 deprecated=deprecated, nsfw=nsfw), app_version, what)
     if not isinstance(data, dict) or not isinstance(data.get("results"), list):
         raise _shape_error(what, "no results list", data)
     count = _int(data, "count", -1)
@@ -231,13 +238,14 @@ def list_packages(community: str, *, query: str = "", ordering: str = DEFAULT_OR
     shown = [r for r in results if not r["is_pinned"]]
     pages = max(1, -(-count // SITE_PAGE_SIZE))
     log(f"[browse] listing page {page}/{pages}: {len(results)} results ({len(results) - len(shown)} pinned hidden), "
-        f"{count} total, q={query!r}, ordering={ordering}, category={category}")
+        f"{count} total, q={query!r}, ordering={ordering}, category={category}, deprecated={deprecated}, nsfw={nsfw}")
     return {"count": count, "pages": pages, "page": page, "results": shown, "pinned": len(results) - len(shown),
             "last": page >= pages}
 
 
 class PagedListing:
-    """One search (community + query + ordering + category) as VOLT's pages:
+    """One search (community + query + ordering + category + the deprecated /
+    nsfw include flags) as VOLT's pages:
     every page PAGE_SIZE (16) listings long with the pinned packages
     removed, filled from as many SITE_PAGE_SIZE (20) site pages as it takes
     (each fetched once and kept: VOLT's page 1 = site page 1, page 2 =
@@ -248,8 +256,9 @@ class PagedListing:
     the lock keeps overlapping calls (a fast Next, Next) consistent."""
 
     def __init__(self, community: str, *, query: str = "", ordering: str = DEFAULT_ORDERING, category=None,
-                 app_version=None) -> None:
+                 deprecated: bool = False, nsfw: bool = False, app_version=None) -> None:
         self.community, self.query, self.ordering, self.category, self.app_version = community, query, ordering, category, app_version
+        self.deprecated, self.nsfw = deprecated, nsfw
         self._items: list[dict] = []  # every browsable listing fetched so far, in the site's order
         self._site_pages = 0  # how many site pages are in _items
         self._count = 0  # the site's count (pinned included)
@@ -263,7 +272,8 @@ class PagedListing:
 
     def _fetch_next_site_page(self) -> None:
         res = list_packages(self.community, query=self.query, ordering=self.ordering, category=self.category,
-                            page=self._site_pages + 1, app_version=self.app_version)
+                            page=self._site_pages + 1, deprecated=self.deprecated, nsfw=self.nsfw,
+                            app_version=self.app_version)
         self._site_pages = res["page"]
         self._count = res["count"]
         self._pinned += res["pinned"]
@@ -304,7 +314,7 @@ def fetch_listing_detail(community: str, namespace: str, name: str, app_version=
     """The Package Detail view's header numbers + the latest version's direct
     dependencies: {namespace, name, full_name, description, icon_url,
     download_count, rating_count, size, website_url, latest_version,
-    dependencies: [{namespace, name, full_name, version_number, description}]}."""
+    is_deprecated, dependencies: [{namespace, name, full_name, version_number, description}]}."""
     ref = ts.PackageRef(namespace, name)  # validates
     what = f"package page for {ref.full_name}"
     data = _get_json(listing_detail_url(community, ref.namespace, ref.name), app_version, what)
@@ -335,6 +345,7 @@ def fetch_listing_detail(community: str, namespace: str, name: str, app_version=
         "last_updated": _str(data, "version_created"), "first_uploaded": _str(data, "package_created"),
         "dependant_count": _int(data, "dependant_count"), "has_changelog": bool(data.get("has_changelog", False)),
         "categories": categories, "version_count": _int(data, "version_count"),
+        "is_deprecated": bool(data.get("is_deprecated", False)),
     }
     log(f"[browse] {ref.full_name}: latest {detail['latest_version']}, {len(deps)} direct deps, "
         f"{detail['download_count']} downloads")

@@ -110,7 +110,7 @@ source = { git = "https://github.com/philippj/SteamworksPy#c021d1c186084d22a2181
 
 [[package]]
 name = "volt-py"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },

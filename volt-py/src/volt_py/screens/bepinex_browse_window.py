@@ -10,7 +10,7 @@ manager screen, nothing else.
 
 Two pages in one window (a QStackedWidget, a short fade between them):
 
-  Browse   Browse Thunderstore Mods                                    [✕]
+  Browse   Browse Thunderstore Mods    [Show deprecated] [Show NSFW] [✕]
            [Search mods...             ] [Category: All v] [Sort: v]
            4-column card grid (icon, name, "by author", description,
            "⬇ downloads", Install), the cards sharing the grid's whole
@@ -19,6 +19,8 @@ Two pages in one window (a QStackedWidget, a short fade between them):
            up from the next site page - PagedListing), the grid scrolls
                       ‹ Prev   Page 1 of 337   Next ›
   Detail   [← Back to results]                                         [✕]
+           [This package has been deprecated and may no longer be ...]
+             (full width, --warn banner; only for a deprecated package)
            ┌ header card ─────────────────────────────┐ ┌ right column ─┐
            │ icon │ Name (22px)         [Version: v]  │ │ [Install X + N │
            │      │ short description                │ │  deps to <lo>] │
@@ -56,6 +58,12 @@ document - Qt's importer on its own loses everything after an unclosed
 <div> or a bare <img>. Images (prefetched on the job thread) are served
 through loadResource scaled to the README box's width (never upscaled,
 tall ones capped), and refitted on a resize.
+
+Show deprecated / Show NSFW (checkable buttons, the Edit Config Filter
+toggle's look): both off on every open (session-only, never saved); either
+one flipped reloads the listing from page 1 with the site's deprecated= /
+nsfw= set to include those packages alongside the rest. A deprecated
+card carries a red "Deprecated" pill before its name.
 
 Data (volt_py/thunderstore_browse.py): every search / sort / category
 change and page turn is one or two small requests to the site's own paged
@@ -152,6 +160,10 @@ REFIT_MS = 150  # the README re-lays its images out this long after the last res
 AGE_MONTH_DAYS, AGE_YEAR_DAYS = 30, 365  # "Last updated": days -> green, months -> yellow, years -> red
 AGE_COLORS = (theme.RDEP, theme.WARN, theme.DANGER)
 BUTTON_TEXT_PADDING = 24  # the big Install button's horizontal padding + border, for fitting its text
+# Thunderstore's own deprecated-package warning (the detail page's banner;
+# the manager's details panel shows the same text).
+DEPRECATED_BANNER = ("This package has been deprecated and may no longer be maintained. "
+                     "We recommend looking for an alternative.")
 
 
 def clamp_text(text: str, fm, width: int, max_lines: int) -> str:
@@ -445,7 +457,16 @@ class _Card(QFrame):
         self.name.set_text(listing["name"])
         self.author = _ElidedLabel("browse-small")
         self.author.set_text(f"by {listing['namespace']}")
-        names.addWidget(self.name)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(6)
+        self.deprecated_pill = None
+        if listing.get("is_deprecated"):
+            pill = self.deprecated_pill = QLabel("Deprecated")
+            pill.setProperty("role", "browse-pill")
+            pill.setProperty("state", "danger")
+            name_row.addWidget(pill, 0, Qt.AlignmentFlag.AlignVCenter)
+        name_row.addWidget(self.name, 1)
+        names.addLayout(name_row)
         names.addWidget(self.author)
         names.addStretch(1)
         head.addLayout(names, 1)
@@ -631,11 +652,13 @@ class BepInExBrowseWindow(QDialog):
         self._query = ""
         self._ordering = INITIAL_ORDERING
         self._category = None  # a category id, or None for all
+        self._deprecated = False  # Show deprecated / Show NSFW: include them (session-only, off on open)
+        self._nsfw = False
         self._page = 1
         self._pages = 1
         self._gen = 0  # bumped per listing request; a reply from an older one is dropped
-        self._page_cache: dict[tuple, dict] = {}  # (query, ordering, category, page) -> PagedListing.page result
-        self._listings: dict[tuple, tb.PagedListing] = {}  # (query, ordering, category) -> its PagedListing
+        self._page_cache: dict[tuple, dict] = {}  # (query, ordering, category, deprecated, nsfw, page) -> PagedListing.page result
+        self._listings: dict[tuple, tb.PagedListing] = {}  # (query, ordering, category, deprecated, nsfw) -> its PagedListing
         self._cards: list[_Card] = []
         self._categories: list[dict] = []
         self._installing: str | None = None  # full_name of the install / switch in flight
@@ -686,6 +709,8 @@ class BepInExBrowseWindow(QDialog):
         self.copy_button.clicked.connect(lambda _=False: self._copy_package_name())
         self.retry_button.clicked.connect(lambda _=False: self._retry_detail())
         self.close_button.clicked.connect(lambda _=False: self.reject())
+        self.show_deprecated.toggled.connect(lambda _on: self._filters_changed())
+        self.show_nsfw.toggled.connect(lambda _on: self._filters_changed())
         self.detail_close_button.clicked.connect(lambda _=False: self.reject())
 
         log(f"browse window opened ({game.community}, load order {load_order_name!r})")
@@ -704,6 +729,15 @@ class BepInExBrowseWindow(QDialog):
         title = QLabel("Browse Thunderstore Mods")
         title.setProperty("role", "modal-title")
         header.addWidget(title, 1)
+        self.show_deprecated = QPushButton("Show deprecated")
+        self.show_nsfw = QPushButton("Show NSFW")
+        for button in (self.show_deprecated, self.show_nsfw):
+            button.setProperty("variant", "config-filter")  # theme.py: the Edit Config Filter toggle's checked look
+            button.setCheckable(True)
+            button.setAutoDefault(False)
+            header.addWidget(button)
+        self.show_deprecated.setToolTip("Include deprecated mods in the results")
+        self.show_nsfw.setToolTip("Include mods marked NSFW in the results")
         self.close_button = _close_button()
         header.addWidget(self.close_button)
         layout.addLayout(header)
@@ -787,6 +821,11 @@ class BepInExBrowseWindow(QDialog):
         self.detail_close_button = _close_button()
         header.addWidget(self.detail_close_button)
         layout.addLayout(header)
+        self.detail_deprecated = QLabel(DEPRECATED_BANNER)
+        self.detail_deprecated.setProperty("role", "config-banner")  # theme.py: --warn on a 14% --warn wash
+        self.detail_deprecated.setWordWrap(True)
+        self.detail_deprecated.setVisible(False)
+        layout.addWidget(self.detail_deprecated)
 
         body = QHBoxLayout()  # left: header card + tabs | right: the facts column
         body.setSpacing(MODAL_GAP)
@@ -979,6 +1018,9 @@ class BepInExBrowseWindow(QDialog):
     def _filters_changed(self) -> None:
         self._category = self.category_combo.currentData()
         self._ordering = self.sort_combo.currentData() or INITIAL_ORDERING
+        self._deprecated = self.show_deprecated.isChecked()
+        self._nsfw = self.show_nsfw.isChecked()
+        log(f"browse: filters -> category={self._category}, {self._ordering}, deprecated={self._deprecated}, nsfw={self._nsfw}")
         self._page = 1
         self._load_page()
 
@@ -1020,22 +1062,24 @@ class BepInExBrowseWindow(QDialog):
         self._run_job("browse-categories", lambda report: tb.list_categories(community, app_version), done)
 
     def _load_page(self) -> None:
-        key = (self._query, self._ordering, self._category, self._page)
+        key = (self._query, self._ordering, self._category, self._deprecated, self._nsfw, self._page)
         self._gen += 1
         gen = self._gen
         cached = self._page_cache.get(key)
         if cached is not None:
-            log(f"browse: page {self._page} from the window's cache (q={self._query!r}, {self._ordering}, category={self._category})")
+            log(f"browse: page {self._page} from the window's cache (q={self._query!r}, {self._ordering}, "
+                f"category={self._category}, deprecated={self._deprecated}, nsfw={self._nsfw})")
             self._show_page(cached)
             return
         self._clear_cards()
         self._show_message("Loading...")
         self._set_pagination(False)
-        query, ordering, category, page = key
-        listing = self._listings.get(key[:3])
+        query, ordering, category, deprecated, nsfw, page = key
+        listing = self._listings.get(key[:5])
         if listing is None:
-            listing = self._listings[key[:3]] = tb.PagedListing(
-                self.game.community, query=query, ordering=ordering, category=category, app_version=self.app_version)
+            listing = self._listings[key[:5]] = tb.PagedListing(
+                self.game.community, query=query, ordering=ordering, category=category,
+                deprecated=deprecated, nsfw=nsfw, app_version=self.app_version)
 
         def job(report):
             return listing.page(page)
@@ -1264,6 +1308,7 @@ class BepInExBrowseWindow(QDialog):
         gen = self._detail_gen
         log(f"browse: detail {listing['full_name']}")
         self.detail_name.set_text(listing["name"])
+        self.detail_deprecated.setVisible(bool(listing.get("is_deprecated")))
         self.detail_description.setText(listing["description"] or "")
         self._set_links(listing["namespace"], "")
         self.detail_stats.setText(stats_text(listing["download_count"], listing["rating_count"], listing["size"]))
@@ -1346,6 +1391,7 @@ class BepInExBrowseWindow(QDialog):
             self._versions = res["versions"]
             self._has_changelog = self._detail["has_changelog"]
             d = self._detail
+            self.detail_deprecated.setVisible(bool(d.get("is_deprecated") or listing.get("is_deprecated")))
             self.detail_description.setText(d["description"] or listing["description"] or "")
             self.detail_stats.setText(stats_text(d["download_count"], d["rating_count"], d["size"]))
             if d["icon_url"] and d["icon_url"] != listing["icon_url"]:

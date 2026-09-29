@@ -99,7 +99,9 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
             "removed or updated, and on Rescan. While updates are waiting the button turns yellow and shows how "
             "many; click it to update them all. \"Up to date\" means none are waiting; \"Update check failed · "
             "Retry\" means Thunderstore couldn't be reached - click to try again. Updating never changes which "
-            "mods are switched on."
+            "mods are switched on. The same check spots mods deprecated on Thunderstore: their rows get a red "
+            "Deprecated pill before the name (in either list) and the details panel a yellow warning that the mod "
+            "may no longer be maintained, until a later check finds it no longer deprecated."
         ),
     },
     {
@@ -171,8 +173,9 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
         "long": (
             "The pill at the right end of every Active row except the framework's. Off keeps the mod in the "
             "list, at its position, but its files are disabled when you Save - a quick, reversible way to "
-            "leave one mod out for a test. Blue means on. The framework row has no toggle: a load order can't "
-            "start without it."
+            "leave one mod out for a test. Blue means on. A switched-off row shows a yellow Disabled pill before "
+            "its name, and the name turns grey and struck through. The framework row has no toggle: a load "
+            "order can't start without it."
         ),
     },
     {
@@ -256,7 +259,10 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
             "with its own Install) and Changelog, plus the latest version's facts and categories on the right - the "
             "version selector in the header decides what the big Install button installs, and it says how many "
             "extra packages come along. Back to results, Esc or Backspace return to the grid where you left it; "
-            "the X (or Esc on the grid) closes the browser."
+            "the X (or Esc on the grid) closes the browser. Show deprecated and Show NSFW, next to the X, add "
+            "those mods to the results alongside the rest (both start off each time the browser opens); a "
+            "deprecated mod's card has a red Deprecated pill, and its page opens with a yellow warning that it "
+            "may no longer be maintained."
         ),
     },
     {

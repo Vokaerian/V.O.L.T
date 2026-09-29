@@ -4,7 +4,7 @@ one client serves Valheim, Lethal Company, R.E.P.O. alike.
 
 - fetch_package(namespace, name): GET /api/experimental/package/<ns>/<name>/
   -> the package's metadata (latest.version_number / download_url /
-  dependencies, date_updated, ...). The bulk /api/v1/package/ dump is
+  dependencies, date_updated, is_deprecated, ...). The bulk /api/v1/package/ dump is
   deliberately never called (tens of MB, unpaginated); the mod browser's
   paged listing calls live in thunderstore_browse.py (stage 3f), which
   reuses this module's request / error / cache pieces.
@@ -20,7 +20,7 @@ one client serves Valheim, Lethal Company, R.E.P.O. alike.
   §3): "2.31.0" is newer than "2.30.2", "5.4.2351" than "5.4.2333".
 - read_meta_cache / write_meta_cache: <APP-ROOT>/cache/package-meta.json -
   what the last update check learned per package (latest version,
-  date_updated, checked_at), keyed by full_name, so the manager's rows show
+  date_updated, deprecated, checked_at), keyed by full_name, so the manager's rows show
   a last-updated date before (or without) this run's check.
 
 Pure Python, no Qt; urllib through the `env` seam (steam_web_api.py's
@@ -250,7 +250,7 @@ def meta_cache_path(app_root) -> Path:
 
 
 def read_meta_cache(app_root) -> dict[str, dict]:
-    """full_name -> {"latest_version", "date_updated", "checked_at"} from the
+    """full_name -> {"latest_version", "date_updated", "deprecated", "checked_at"} from the
     last update check; {} when there is none or it can't be read."""
     try:
         with open(meta_cache_path(app_root), encoding="utf-8") as f:

@@ -545,7 +545,8 @@ QLabel[role="config-meta"] {{
     font-family: {_MONO_CSS};
     font-size: 11px;
 }}
-/* the raw-text fallback's banner: --warn text on a 14% --warn wash */
+/* the raw-text fallback's banner: --warn text on a 14% --warn wash (also the
+   deprecated-package banner: Browse Mods' detail page, the manager's details) */
 QLabel[role="config-banner"] {{
     background: {_alpha(WARN, 0.14)};
     border-radius: {RADIUS}px;
@@ -854,6 +855,11 @@ QLabel[role="browse-pill"][state="get"] {{
 QLabel[role="browse-pill"][state="warn"] {{
     background: {_alpha(WARN, 0.14)};
     color: {WARN};
+}}
+/* a deprecated card's "Deprecated" pill: the same pill in --danger */
+QLabel[role="browse-pill"][state="danger"] {{
+    background: {_alpha(DANGER, 0.14)};
+    color: {DANGER};
 }}
 /* a Versions row: a rule under each, the rows' hover wash; the header row plain */
 QFrame[role="browse-vrow"] {{

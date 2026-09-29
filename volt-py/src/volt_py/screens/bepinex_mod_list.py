@@ -11,7 +11,12 @@ drag-reorder preview/animation are all inherited unchanged. What differs:
   - Rows are CARD_HEIGHT (54px) tall, two lines: the mod's display name on
     line 1 (13px, --text), a "⚠" in --warn after it when an update is
     available and a "✕" in --danger when a dependency is missing (its
-    tooltip names it); "v<version> · <last updated>" on line 2 (12px,
+    tooltip names it); before the name, Thunderstore Mod Manager's status
+    pills - mod_list.py's .row-badge box (paint_row_badge): "Disabled" in
+    --warn on an Active row whose toggle is off (the name then --muted and
+    struck through), "Deprecated" in --danger on a package Thunderstore
+    marks deprecated (RowInfo.disabled / .deprecated; Disabled first when
+    both); "v<version> · <last updated>" on line 2 (12px,
     --muted; --warn reading "update available" when there is one). The
     base paint still draws the card (theme.py's ::item rules: background,
     hover, selected, radius, margins) - initStyleOption blanks the item
@@ -53,12 +58,16 @@ from volt_py.applog import log
 from volt_py.screens.mod_list import (
     DIMMED_ROW_OPACITY,
     DISABLED_BUTTON_OPACITY,
+    BADGE_HEIGHT,
     DRAGGED_ROW_OPACITY,
     MARK_DIM,
     MARK_MATCH,
     ModListView,
     ModRowDelegate,
+    badge_font,
+    badge_width,
     paint_match_bar,
+    paint_row_badge,
 )
 
 # The mockup's .vh-row and children (px).
@@ -80,6 +89,8 @@ WARN_GLYPH = "⚠"
 ERROR_GLYPH = "✕"
 UPDATE_GLYPH = "↑"
 PINNED_TEXT = "Pinned"
+DISABLED_TEXT = "Disabled"  # the status pills before the name (RowInfo.disabled / .deprecated)
+DEPRECATED_TEXT = "Deprecated"
 
 
 class RowInfo(NamedTuple):
@@ -95,6 +106,8 @@ class RowInfo(NamedTuple):
     error: str | None = None  # "✕" after the name, with this tooltip (a missing dependency)
     busy: bool = False  # this mod's update is in flight: its button disabled
     update_tip: str = ""  # the update button's tooltip ("Update Jotunn to 2.31.0")
+    disabled: bool = False  # "Disabled" pill + muted struck-through name (an Active row toggled off)
+    deprecated: bool = False  # "Deprecated" pill (Thunderstore marks the package deprecated)
 
 
 def card_rect(rect, viewport) -> QRect:
@@ -231,12 +244,23 @@ def paint_row_content(painter: QPainter, rect, info: RowInfo, view: "BepInExModL
     mark_font = bold_font(name_font)
     km = QFontMetrics(mark_font)
     marks_w = sum(km.horizontalAdvance(g) + NAME_GAP for g, _ in marks)
-    name = nm.elidedText(info.name, Qt.TextElideMode.ElideRight, max(0, width - marks_w))
+    pills = [(t, c) for t, c, on in ((DISABLED_TEXT, theme.WARN, info.disabled),
+                                     (DEPRECATED_TEXT, theme.DANGER, info.deprecated)) if on]
+    bfont = badge_font(view)
+    x = left
+    for text, color in pills:  # before the name, never shrunk (like the marks)
+        w = badge_width(bfont, text)
+        paint_row_badge(painter, QRectF(x, top + (nm.height() - BADGE_HEIGHT) / 2, w, BADGE_HEIGHT), bfont, text, color)
+        x += w + NAME_GAP
+    name_w = max(0, left + width - x - marks_w)
+    if info.disabled:
+        name_font.setStrikeOut(True)
+    name = nm.elidedText(info.name, Qt.TextElideMode.ElideRight, name_w)
     painter.setFont(name_font)
-    painter.setPen(QColor(theme.TEXT))
-    line1 = QRect(left, top, width, nm.height())
+    painter.setPen(QColor(theme.MUTED if info.disabled else theme.TEXT))
+    line1 = QRect(x, top, name_w, nm.height())
     painter.drawText(line1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
-    x = left + nm.horizontalAdvance(name) + NAME_GAP
+    x += nm.horizontalAdvance(name) + NAME_GAP
     painter.setFont(mark_font)
     for glyph, color in marks:
         w = km.horizontalAdvance(glyph)

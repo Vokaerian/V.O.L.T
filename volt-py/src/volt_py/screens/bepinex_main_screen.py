@@ -43,9 +43,12 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     added / removed / updated and on Rescan; the load-order bar's "Update
     all" button carries the live count (warn-outline while > 0; "Up to
     date" / "Checking for updates..." / "Update check failed · Retry"
-    otherwise). What it learns per package (latest version, date_updated)
-    is kept in <APP-ROOT>/cache/package-meta.json, so rows show a
-    last-updated date before this run's check finishes.
+    otherwise). What it learns per package (latest version, date_updated,
+    deprecated) is kept in <APP-ROOT>/cache/package-meta.json, so rows show
+    a last-updated date (and the "Deprecated" pill / the details panel's
+    deprecated banner) before this run's check finishes; a package never
+    checked shows neither. An Active row toggled off shows the "Disabled"
+    pill (bepinex_mod_list.py).
   - Paths: Game (the install), Load order (load-orders/<slug>/) and BepInEx
     (its BepInEx/ subfolder); the latter two follow the picker and are
     disabled with no load order open.
@@ -161,7 +164,7 @@ from volt_py.applog import clip, init_log, log
 from volt_py.bepinex_install import BEPINEX_DIR, PackageError
 from volt_py.mods import natural_key
 from volt_py.paths import norm
-from volt_py.screens.bepinex_browse_window import BepInExBrowseWindow
+from volt_py.screens.bepinex_browse_window import DEPRECATED_BANNER, BepInExBrowseWindow
 from volt_py.screens.bepinex_config_window import BepInExConfigWindow
 from volt_py.screens.bepinex_issues_window import BepInExIssuesWindow
 from volt_py.screens.bepinex_mod_list import BepInExModListView, RowInfo
@@ -342,8 +345,9 @@ def _details_text(rich: bool = False) -> QLabel:
 
 
 class ThunderstoreDetailsPanel(QFrame):
-    """The mockup's .details: the package icon (BepInEx/plugins/<Team-Package>/
-    icon.png, when installed), Name / Author / Version ("2.30.2 installed
+    """The mockup's .details: a deprecated package's warn banner (the Browse
+    Mods page's, DEPRECATED_BANNER) at the top, the package icon
+    (BepInEx/plugins/<Team-Package>/icon.png, when installed), Name / Author / Version ("2.30.2 installed
     (2.31.0 available)" in --warn when newer) / Last updated / Website (a
     link) and the description. details_panel.py's DetailsPanel is
     RimWorld-shaped (authors, path, package id, About/Preview.png), so this
@@ -365,6 +369,11 @@ class ThunderstoreDetailsPanel(QFrame):
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(8)
+        self.details_deprecated = QLabel(DEPRECATED_BANNER)
+        self.details_deprecated.setProperty("role", "config-banner")  # theme.py: --warn on a 14% --warn wash
+        self.details_deprecated.setWordWrap(True)
+        self.details_deprecated.setVisible(False)
+        body_layout.addWidget(self.details_deprecated)
         self.details_icon = QLabel()
         self.details_icon.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         body_layout.addWidget(self.details_icon)
@@ -398,12 +407,13 @@ class ThunderstoreDetailsPanel(QFrame):
         self._icon_source = None
 
     def show_entry(self, entry: dict | None, *, latest: str | None = None, date_updated=None,
-                   icon: Path | None = None, framework: bool = False) -> None:
+                   icon: Path | None = None, framework: bool = False, deprecated: bool = False) -> None:
         shown = entry is not None
         self.details_empty.setVisible(not shown)
         self.details_body.setVisible(shown)
         if not shown:
             return
+        self.details_deprecated.setVisible(deprecated)
         f = self.details_fields
         f["name"].setText(entry["display_name"] or entry["name"])
         f["author"].setText(entry["namespace"])
@@ -1454,6 +1464,8 @@ class BepInExMainScreen(QWidget):
             error="\n".join(errors) or None,
             busy=mod_id in self._updating,
             update_tip=f"Update {self._display_name(mod_id)} to {m.get('latest_version')}" if update else "",
+            disabled=in_active and not pinned and not self._toggles[mod_id],
+            deprecated=bool(m.get("deprecated")),
         )
 
     def _row_tooltip(self, mod_id: str) -> str | None:
@@ -1487,7 +1499,7 @@ class BepInExMainScreen(QWidget):
         m = self._meta.get(mod_id) or {}
         self.details_panel.show_entry(
             e, latest=m.get("latest_version"), date_updated=m.get("date_updated"),
-            icon=self._mod_icon(e), framework=mod_id == self._framework,
+            icon=self._mod_icon(e), framework=mod_id == self._framework, deprecated=bool(m.get("deprecated")),
         )
 
     def _mod_folder(self, entry: dict) -> Path | None:
@@ -1665,7 +1677,8 @@ class BepInExMainScreen(QWidget):
             if "error" in r:
                 self._check_errors[name] = r["error"]
                 continue
-            self._meta[name] = {"latest_version": r["latest_version"], "date_updated": r["date_updated"], "checked_at": now}
+            self._meta[name] = {"latest_version": r["latest_version"], "date_updated": r["date_updated"],
+                                "deprecated": r.get("deprecated", False), "checked_at": now}
         ts.write_meta_cache(self.app_root, self._meta)
         count = len(self._updatable())
         log(f"update check done: {count} updates, {len(self._check_errors)} failed")

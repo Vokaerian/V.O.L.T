@@ -527,7 +527,8 @@ def set_mod_enabled(app_root, slug, full_name: str, enabled: bool) -> dict:
 def check_updates(manifest: dict, app_version=None) -> dict[str, dict]:
     """One Thunderstore metadata fetch per installed package with
     online_source (framework included): full_name -> {"latest_version",
-    "date_updated", "update": bool} or {"error": str} (that package's
+    "date_updated", "update": bool, "deprecated": bool (the same reply's
+    is_deprecated)} or {"error": str} (that package's
     fetch failed - the rest still get checked). Pure network + compare,
     nothing written; the caller keeps/caches the result."""
     out = {}
@@ -544,6 +545,7 @@ def check_updates(manifest: dict, app_version=None) -> dict[str, dict]:
             "latest_version": latest,
             "date_updated": meta.get("date_updated") if isinstance(meta.get("date_updated"), str) else None,
             "update": ts.is_newer(latest, entry["version"]),
+            "deprecated": bool(meta.get("is_deprecated")),
         }
     log(f"[loadorders] update check: {sum(1 for v in out.values() if v.get('update'))} of {len(out)} packages have an update, "
         f"{sum(1 for v in out.values() if 'error' in v)} failed")
