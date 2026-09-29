@@ -5,9 +5,16 @@ swapping in that game's screen. One game per run, not persisted, no way back
 (TODO.md #30, Electron parity). RimWorld's and Valheim's tiles are enabled so far.
 
 Layout (top to bottom, centered, in a QScrollArea - CSS overflow-y: auto):
-the "V. O. L. T." header, a 64x3 accent bar, the subtitle, the "Select a game"
+the "V. O. L. T." header, a 64x2 copper rule, the subtitle, the "Select a game"
 caption, then the tiles in a FlowLayout (flex-wrap, centered rows, 28px gap,
 1440px max row width).
+
+Circuit (design step 3.4): the rule is copper (blue stays the hover ring),
+the caption a painters.TerminalLabel with a copper rule both sides, the
+Coming-soon badge mono terminal caps on a --well, the scrim over the cover
+only (the name under it was 1.83:1), and every tile sits on the cached rest
+shadow (painters.install_shadows on the grid's host), hidden while a tile's
+own hover shadow effect runs.
 
 GameTile draws its own card frame (background, border, hover ring) in
 paintEvent so the hover state can be animated: border color, the 1px accent
@@ -59,7 +66,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import theme
+from volt_py import painters, theme
 from volt_py.screens.flow_layout import FlowLayout
 
 # volt_py/assets/covers/<slug>.jpg (this module is volt_py/screens/game_select.py).
@@ -95,7 +102,7 @@ LIFT_PX = 3  # hover transform: translateY(-3px)
 RING_PX = 1  # hover box-shadow: 0 0 0 1px var(--accent)
 
 # ---- hover animation (transition: ... .15s ease) ----
-HOVER_MS = 150
+HOVER_MS = theme.MOTION  # 150
 SHADOW_OFFSET_Y = 10  # box-shadow: 0 10px 24px rgba(0, 0, 0, 0.55)
 SHADOW_BLUR = 24
 SHADOW_ALPHA = 0.55
@@ -106,6 +113,7 @@ GRID_MAX_WIDTH = 1440
 PAD_V = 56
 PAD_H = 80
 CAPTION_TO_GRID = 26
+CAPTION_WIDTH = 420  # the SELECT A GAME caption with its rules (step 3.4)
 
 
 def _css_ease() -> QEasingCurve:
@@ -229,14 +237,16 @@ class GameTile(QWidget):
         else:
             self.setCursor(Qt.CursorShape.ForbiddenCursor)  # cursor: not-allowed
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            # .game-tile-scrim: inset 0 over the whole card (inside the border);
-            # sized in _relayout().
+            # .game-tile-scrim: over the cover only (step 3.4; inside the
+            # border, above the cover's rule); sized in _relayout().
             scrim = QFrame(self._body)
             scrim.setProperty("role", "game-tile-scrim")
             self._scrim = scrim
             scrim_layout = QVBoxLayout(scrim)
             scrim_layout.setContentsMargins(0, 0, 0, 0)
-            badge = _spaced_label("Coming soon", "game-tile-badge", 1.2)
+            badge = QLabel("Coming soon")  # COMING SOON: caps + spacing on the terminal font
+            badge.setProperty("role", "game-tile-badge")
+            badge.setFont(painters.terminal_font(10, painters.TERMINAL_SPACING))
             scrim_layout.addWidget(badge, 0, Qt.AlignmentFlag.AlignCenter)
             scrim.raise_()
 
@@ -273,7 +283,7 @@ class GameTile(QWidget):
         self._cover.setGeometry(0, 0, inner_w, cover_h)
         self._name.setGeometry(0, cover_h, inner_w, inner_h - cover_h)
         if self._scrim is not None:
-            self._scrim.setGeometry(0, 0, inner_w, inner_h)
+            self._scrim.setGeometry(0, 0, inner_w, COVER_HEIGHT)
         if inner_w != self._cover_width and self._cover_source is not None:
             self._cover_width = inner_w
             self._cover.setPixmap(
@@ -292,7 +302,14 @@ class GameTile(QWidget):
         return self._progress
 
     def _set_progress(self, value: float) -> None:
+        was_resting = self._progress == 0
         self._progress = value
+        host = self.parentWidget()
+        if was_resting != (value == 0) and host is not None:
+            # the rest shadow (painted by the host) hides while the hover
+            # effect's shadow shows, and comes back at rest
+            reach = painters.RAISED_REACH
+            host.update(self.geometry().adjusted(-reach, -reach, reach, reach))
         self._place_body()
         if self._shadow is not None:
             color = QColor(Qt.GlobalColor.black)
@@ -302,6 +319,11 @@ class GameTile(QWidget):
         self.update()
 
     progress = Property(float, _get_progress, _set_progress)
+
+    def rest_shadow_target(self) -> QWidget | None:
+        """The card's body for the host's rest shadow, None while the tile is
+        (partly) highlighted - its QGraphicsDropShadowEffect shows then."""
+        return self._body if self._progress == 0 else None
 
     def _card_rect(self) -> QRect:
         """The card's outer box (border included) at the current lift."""
@@ -326,6 +348,9 @@ class GameTile(QWidget):
         self._animation.stop()
         distance = abs(target - self._progress)
         if distance == 0:
+            return
+        if not theme.animations_enabled():  # Settings > Animations / Windows' Animation effects off
+            self._set_progress(target)
             return
         # Reversing mid-transition takes proportionally less time, as CSS's
         # reversed transitions do.
@@ -442,7 +467,7 @@ class GameSelectScreen(QWidget):
         column.addSpacing(16)
         accent_bar = QFrame()
         accent_bar.setProperty("role", "game-select-accent-bar")
-        accent_bar.setFixedSize(64, 3)
+        accent_bar.setFixedSize(64, 2)
         column.addWidget(accent_bar, 0, Qt.AlignmentFlag.AlignHCenter)
         column.addSpacing(14)
         # text-transform: uppercase in the CSS; typed pre-uppercased here.
@@ -450,7 +475,9 @@ class GameSelectScreen(QWidget):
         column.addWidget(subtitle, 0, Qt.AlignmentFlag.AlignHCenter)
 
         column.addSpacing(44)
-        column.addWidget(_spaced_label("SELECT A GAME", "game-select-caption", 2.5), 0, Qt.AlignmentFlag.AlignHCenter)
+        caption = painters.TerminalLabel("Select a game", rule="both")
+        caption.setFixedWidth(CAPTION_WIDTH)
+        column.addWidget(caption, 0, Qt.AlignmentFlag.AlignHCenter)
         column.addSpacing(CAPTION_TO_GRID - slack_top)
 
         # .game-select-grid + .game-tile's flex sizing, every width shifted by
@@ -469,11 +496,14 @@ class GameSelectScreen(QWidget):
         # `content` up front, so no tile is ever briefly a top-level window
         # (the enabled tile carries a QGraphicsEffect).
         column.addLayout(grid)
+        tiles = []
         for game in GAMES:
             tile = GameTile(game, content)
             if game.enabled:
                 tile.activated.connect(self.gameSelected)
             grid.addWidget(tile)
+            tiles.append(tile)
+        painters.install_shadows(content, lambda: [b for b in (t.rest_shadow_target() for t in tiles) if b is not None])
         column.addStretch(1)  # content stays top-aligned in a tall window
 
         scroll = QScrollArea()

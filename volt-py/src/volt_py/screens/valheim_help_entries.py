@@ -19,7 +19,9 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
             "General shows the game folder with a Browse button, plus Autodetect to find your Steam install for "
             "you. It's the only path Valheim needs: every load order keeps its mods and their BepInEx config in "
             "its own folder under VOLT's data folder, never inside the game. Troubleshooting opens VOLT's log "
-            "file (or the one from the previous run), which is handy when reporting a problem."
+            "file (or the one from the previous run), which is handy when reporting a problem. Its Clean cache "
+            "button deletes downloaded mod files that no load order uses any more, to free up space - a "
+            "Thunderstore mod just downloads again if you install it later."
         ),
     },
     {
@@ -87,6 +89,7 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
         "long": (
             "The ↺ button that appears next to \"Unsaved changes\" whenever the lists differ from what's saved. "
             "Each click restores the lists (order, membership and toggles) from before the previous change. "
+            "Ctrl+Z does the same, except while you're typing in a text box (there it undoes the typing). "
             "There's no redo."
         ),
     },
@@ -175,7 +178,8 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
             "list, at its position, but its files are disabled when you Save - a quick, reversible way to "
             "leave one mod out for a test. Blue means on. A switched-off row shows a yellow Disabled pill before "
             "its name, and the name turns grey and struck through. The framework row has no toggle: a load "
-            "order can't start without it."
+            "order can't start without it. Enable all / Disable all (under Export...) set every Active toggle at "
+            "once - still unsaved until Save, one Undo puts them back, and the framework always stays on."
         ),
     },
     {
@@ -255,10 +259,11 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
             "downloaded until you press Install. A card's Install button adds that mod (and any dependencies it "
             "needs) to the Active list, exactly like Add mod, and the browser stays open so you can keep going. "
             "Click a card itself for the mod's page: Details (its README, with the dependency check underneath), "
-            "Required (each dependency and whether it's already in the load order), Versions (every release, each "
+            "Required (each dependency and whether it's already in the load order - click one to open its own page), Versions (every release, each "
             "with its own Install) and Changelog, plus the latest version's facts and categories on the right - the "
             "version selector in the header decides what the big Install button installs, and it says how many "
-            "extra packages come along. Back to results, Esc or Backspace return to the grid where you left it; "
+            "extra packages come along. Back to results, Esc or Backspace go one step back - to the mod you came "
+            "from through Required, else to the grid where you left it; "
             "the X (or Esc on the grid) closes the browser. Show deprecated and Show NSFW, next to the X, add "
             "those mods to the results alongside the rest (both start off each time the browser opens); a "
             "deprecated mod's card has a red Deprecated pill, and its page opens with a yellow warning that it "
@@ -277,7 +282,9 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
             "the mods the file has switched off. A file made for another game is refused. Mod files never travel in "
             "the file itself, so an import needs an internet connection. \"Import from code...\" takes a profile code "
             "instead - VOLT's, r2modman's or Thunderstore Mod Manager's - downloads that profile from Thunderstore and "
-            "then imports it exactly the same way."
+            "then imports it exactly the same way. \"Local mod (.zip)...\" is different: it installs one mod from "
+            "a Thunderstore package zip on your computer into the open load order (added to Active, its missing "
+            "dependencies downloaded), marked as a local package that's never checked for updates."
         ),
     },
     {
@@ -292,7 +299,9 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
             "they're downloaded again on import. \"Export as code...\" uploads the same profile to Thunderstore's public "
             "profile-sharing service (after asking you to confirm - anyone with the code can fetch it, and it can't be "
             "taken back) and shows a short code with a Copy button; VOLT, r2modman and Thunderstore Mod Manager can all "
-            "import it."
+            "import it. \"Dependency strings...\" lists the framework and every switched-on Active mod as "
+            "\"Team-Package-Version\" lines, ready to copy into a modpack's manifest.json (locally imported mods "
+            "aren't on Thunderstore, so they're left out)."
         ),
     },
     {

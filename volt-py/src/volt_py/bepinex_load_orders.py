@@ -27,7 +27,8 @@ Manifest (schema_version 1):
   "version": "2.30.0", "display_name": "Jotunn", "description": "...", "website_url": "...",
   "dependencies": ["denikson-BepInExPack_Valheim-5.4.2333", ...],  # as declared, informational
   "enabled": true,               # active-list toggle; always true for framework/inactive-irrelevant
-  "online_source": true,         # false once 8b's local import exists: skip update checks
+  "online_source": true,         # false = imported from a local zip (THUNDERSTORE.md §8b):
+                                 #   never update-checked; absent in older manifests = true
   "installed_at": "<ISO>",
   "files": ["BepInEx/plugins/ValheimModding-Jotunn/Jotunn.dll", ...]  # tree-relative, enabled names
 }
@@ -56,6 +57,18 @@ builds on this module's two pinning hooks: create_load_order(framework_
 version=) and install_mod(pins=, fallback_latest=) reproduce a profile's
 exact versions, falling back to Thunderstore's latest (and saying so) for a
 version that's gone.
+
+Import local mod (THUNDERSTORE.md §8b): inspect_local_package() validates a
+locally picked Thunderstore-shaped zip (the dialog's preview) and
+import_local_mod() installs it - the zip copied into the shared package
+cache under its Team-Package-Version key, then install_mod()'s own path
+(already-installed / framework guard, routing, append to Active, missing
+dependencies from Thunderstore), the entry recorded online_source: false.
+
+Clean cache (THUNDERSTORE.md §8c): clean_package_cache() deletes every
+cached package zip no load order references (framework, active or
+inactive); the pure unreferenced_cache_files() decides which. An unreadable
+manifest aborts it with nothing deleted.
 """
 
 import os
@@ -394,7 +407,7 @@ def create_load_order(app_root, name: str, game: ThunderstoreGame, app_version=N
 
 
 def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None, *,
-                pins: dict[str, str] | None = None, fallback_latest: bool = False) -> dict:
+                pins: dict[str, str] | None = None, fallback_latest: bool = False, target_installer=None) -> dict:
     """Installs `target` (a PackageRef or "Team-Package[-Version]" string) into
     the load order, appended to the active list enabled, after any of its
     declared dependencies not yet installed (recursively, latest versions -
@@ -407,7 +420,10 @@ def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None
     (ThunderstoreError / PackageError). With `fallback_latest`, a pinned
     version that can't be fetched (gone from Thunderstore) is replaced by
     the package's latest and recorded in "fallbacks" instead of failing;
-    without it (the browser's Versions tab), a pinned version is exact."""
+    without it (the browser's Versions tab), a pinned version is exact.
+    `target_installer(ref) -> entry` replaces the target's own fetch +
+    install (import_local_mod: the picked zip instead of a download);
+    dependencies still come from Thunderstore."""
     ref = target if isinstance(target, ts.PackageRef) else ts.PackageRef.parse(target)
     manifest = load_load_order(app_root, slug)
     have = installed(manifest)
@@ -423,7 +439,9 @@ def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None
         if r.version is None and pins and pins.get(r.full_name):
             r = r.with_version(pins[r.full_name])
         try:
-            if fallback_latest:
+            if is_target and target_installer is not None:
+                entry, fell_back = target_installer(r), False
+            elif fallback_latest:
                 entry, fell_back = _fetch_pinned_or_latest(app_root, slug, r, framework=False, app_version=app_version)
             else:
                 entry, fell_back = _fetch_and_install(app_root, slug, r, framework=False, app_version=app_version), False
@@ -450,6 +468,104 @@ def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None
     visit(ref, True)
     log(f"[loadorders] {slug}: installed {[e['full_name'] for e in done]}, {len(problems)} problems, {len(fallbacks)} fallbacks")
     return {"installed": done, "problems": problems, "fallbacks": fallbacks}
+
+
+# ---- Import local mod (THUNDERSTORE.md §8b) ----
+LOCAL_NAMESPACE = "Local"  # the owner when neither the file name nor manifest.json names a usable one
+
+
+def inspect_local_package(zip_path) -> dict:
+    """Validates a locally picked package zip - no network, nothing written.
+    Returns {"ref": versioned PackageRef (the identity it installs under),
+    "manifest": the parsed manifest.json, "owner_source": "filename" |
+    "author" | "fallback", "files": entry count}. PackageError (kinds as
+    bepinex_install's: "bad-zip", "no-manifest", "parse-error", "bad-path")
+    for anything that can't be installed - the dialog shows its message.
+
+    Identity: name + version always come from manifest.json (and must be a
+    valid Thunderstore name / major.minor.patch - the cache key and every
+    dependency string rely on it). The owner (namespace) comes from the file
+    name when it is Thunderstore's own download name "Owner-Name-Version.zip"
+    (or "Owner-Name.zip") whose Name matches the manifest's - so a real
+    Thunderstore zip keeps the identity other mods' dependency strings use;
+    else manifest.json's non-standard "author" field if it's a valid
+    namespace; else LOCAL_NAMESPACE."""
+    path = Path(zip_path)
+    if not path.is_file():
+        raise bx.PackageError("bad-zip", path, f"Not a file: {path}")
+    with bx.PackageSource(path) as src:
+        manifest = bx.read_manifest(src)
+        n_files = len(src.files())
+    name, version = manifest["name"], manifest["version_number"]
+    try:
+        ts.PackageRef(LOCAL_NAMESPACE, name)
+    except ValueError:
+        raise bx.PackageError("parse-error", path, f"manifest.json's name {name!r} isn't a valid Thunderstore package "
+                                                   "name (letters, digits and _ only)") from None
+    if ts.version_key(version) == (-1,):
+        raise bx.PackageError("parse-error", path, f"manifest.json's version_number {version!r} isn't a "
+                                                   "major.minor.patch version")
+    owner, source = None, "fallback"
+    try:
+        from_file = ts.PackageRef.parse(path.stem)
+        if from_file.name.lower() == name.lower():
+            owner, source = from_file.namespace, "filename"
+            if from_file.version and from_file.version != version:
+                log(f"[loadorders] local import {path.name}: file name says {from_file.version}, manifest.json "
+                    f"{version} - the manifest wins")
+    except ValueError:
+        pass
+    if owner is None and isinstance(manifest.get("author"), str):
+        try:
+            owner, source = ts.PackageRef(manifest["author"].strip(), name).namespace, "author"
+        except ValueError:
+            pass
+    ref = ts.PackageRef(owner or LOCAL_NAMESPACE, name, version)
+    log(f"[loadorders] local import {path}: {ref.key} (owner from {source}), {n_files} files, "
+        f"{len(manifest['dependencies'])} dependencies")
+    return {"ref": ref, "manifest": manifest, "owner_source": source, "files": n_files}
+
+
+def _cache_local_zip(app_root, zip_path, ref: ts.PackageRef) -> Path:
+    """Copies the picked zip into the shared package cache as <key>.zip
+    (temp sibling + os.replace, like a download). An existing cached zip of
+    that exact key is replaced: the cache then holds what this tree got."""
+    dest = ts.package_cache_dir(app_root) / f"{ref.key}.zip"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    had = dest.stat().st_size if dest.is_file() else None
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.part")
+    try:
+        shutil.copyfile(zip_path, tmp)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+    log(f"[loadorders] local import: {zip_path} -> {dest} ({dest.stat().st_size} bytes"
+        f"{'' if had is None else f', replaced a cached {had}-byte zip of the same version'})")
+    return dest
+
+
+def import_local_mod(app_root, slug, game: ThunderstoreGame, zip_path, app_version=None) -> dict:
+    """Installs a locally picked package zip into the load order exactly as
+    install_mod() installs a download (same already-installed / framework
+    guard, same routing, appended to Active enabled, its missing
+    dependencies from Thunderstore): only the zip's source differs. The
+    entry is recorded online_source: false (never update-checked). Returns
+    install_mod()'s dict plus "ref" (the identity it got) and
+    "owner_source"; "installed" is empty when that package is already in
+    the load order (or is the framework). PackageError for a zip that
+    can't be installed."""
+    info = inspect_local_package(zip_path)
+    ref = info["ref"]
+
+    def install_local(r: ts.PackageRef) -> dict:
+        cached = _cache_local_zip(app_root, zip_path, ref)
+        result = bx.install_package(cached, tree_root(app_root, slug), ref.full_name, framework=False)
+        return {**_make_entry(ref, result), "online_source": False}
+
+    res = install_mod(app_root, slug, game, ref, app_version, target_installer=install_local)
+    log(f"[loadorders] {slug}: local import of {zip_path} as {ref.key}: "
+        f"{'installed' if res['installed'] else 'already installed, nothing done'}")
+    return {**res, "ref": ref, "owner_source": info["owner_source"]}
 
 
 def remove_mod(app_root, slug, full_name: str) -> dict:
@@ -625,4 +741,104 @@ def delete_load_order(app_root, slug) -> dict:
     root = tree_root(app_root, slug)  # assert_slug: never remove a path built from an unchecked slug
     res = remove_tree_best_effort(root)
     log(f"[loadorders] deleted {slug!r}: {res}")
+    return res
+
+
+# ---- Clean cache (THUNDERSTORE.md §8c) ----
+def unreferenced_cache_files(file_names, manifests) -> dict[str, list[str]]:
+    """Pure (no I/O): sorts the shared package cache's file names (bare names
+    of the files directly in cache/packages/) against every load order's
+    manifest (normalized, as load_load_order returns them). Returns
+    {"remove": [...], "keep": [...], "ignored": [...]}, each sorted:
+    - keep: "<Team-Package-Version>.zip" whose key is the framework / an
+      active / an inactive entry's full_name + version in any manifest. An
+      entry whose version isn't major.minor.patch keeps every cached version
+      of its full_name (its exact key can't be built - never guess).
+    - remove: every other "<Team-Package-Version>.zip".
+    - ignored: anything else (a download's "<key>.zip.<pid>.part" temp file,
+      a stray file) - never removed.
+    Compared case-insensitively: on Windows "A.zip" and "a.zip" are one file."""
+    keys, any_version = set(), set()
+    for m in manifests:
+        for e in installed(m).values():
+            if ts.version_key(e.get("version")) == (-1,):
+                any_version.add(e["full_name"].lower())
+            else:
+                keys.add(f"{e['full_name']}-{e['version']}".lower())
+    out = {"remove": [], "keep": [], "ignored": []}
+    for name in sorted(file_names, key=str.lower):
+        ref = None
+        if name.lower().endswith(".zip"):
+            try:
+                ref = ts.PackageRef.parse(name[:-4])
+            except ValueError:
+                pass
+        if ref is None or ref.version is None:
+            out["ignored"].append(name)
+        elif ref.key.lower() in keys or ref.full_name.lower() in any_version:
+            out["keep"].append(name)
+        else:
+            out["remove"].append(name)
+    return out
+
+
+def clean_package_cache(app_root) -> dict:
+    """Clean cache: deletes every cached package zip that no load order of
+    this game (every load order under this APP-ROOT) references, active or
+    inactive list or framework (unreferenced_cache_files). If any load
+    order's manifest can't be read, nothing is deleted - never sweep on
+    incomplete information. The caller makes sure no install / download is
+    running meanwhile (the screen's busy state).
+    Returns {"unreadable": [{"slug", "error"}] (non-empty = aborted, nothing
+    deleted), "load_orders": count read, "removed": [(name, bytes)],
+    "freed": bytes, "failed": [(name, error)], "kept": [names], "ignored":
+    [names]}. OSError if a folder itself can't be listed."""
+    res = {"unreadable": [], "load_orders": 0, "removed": [], "freed": 0, "failed": [], "kept": [], "ignored": []}
+    manifests = []
+    try:
+        dirs = sorted(e.name for e in os.scandir(load_orders_root(app_root)) if e.is_dir())
+    except FileNotFoundError:
+        dirs = []
+    for slug in dirs:
+        if not is_valid_slug(slug):  # list_load_orders' rule: never a load order VOLT can open
+            log(f"[cache] clean: skipping {slug!r} (not a load order folder name)")
+            continue
+        try:
+            m = load_load_order(app_root, slug)
+        except Exception as err:
+            res["unreadable"].append({"slug": slug, "error": str(err) or repr(err)})
+            log(f"[cache] clean: load order {slug!r} can't be read: {err!r}")
+            continue
+        manifests.append(m)
+        refs = [f"{e['full_name']}-{e['version']}" for e in installed(m).values()]
+        log(f"[cache] clean: load order {slug!r} references {len(refs)} packages: {refs}")
+    res["load_orders"] = len(manifests)
+    if res["unreadable"]:
+        log(f"[cache] clean ABORTED, nothing deleted: {len(res['unreadable'])} unreadable load order(s): {res['unreadable']}")
+        return res
+    cache = ts.package_cache_dir(app_root)
+    try:
+        entries = list(os.scandir(cache))
+    except FileNotFoundError:
+        entries = []
+    names = [e.name for e in entries if e.is_file(follow_symlinks=False)]
+    others = [e.name for e in entries if not e.is_file(follow_symlinks=False)]  # a folder / link: left alone
+    plan = unreferenced_cache_files(names, manifests)
+    res["kept"], res["ignored"] = plan["keep"], sorted(plan["ignored"] + others)
+    log(f"[cache] clean {cache}: {len(manifests)} load orders read, {len(names)} files - {len(plan['keep'])} kept "
+        f"{plan['keep']}, {len(plan['remove'])} to remove, {len(res['ignored'])} left alone {res['ignored']}")
+    for name in plan["remove"]:
+        p = cache / name
+        try:
+            size = p.stat().st_size
+            p.unlink()
+        except OSError as err:
+            res["failed"].append((name, str(err) or repr(err)))
+            log(f"[cache] clean: FAILED to remove {name}: {err!r}")
+            continue
+        res["removed"].append((name, size))
+        res["freed"] += size
+        log(f"[cache] clean: removed {name} ({size} bytes)")
+    log(f"[cache] clean done: removed {len(res['removed'])} ({res['freed']} bytes freed), "
+        f"{len(res['failed'])} failed, {len(res['kept'])} kept")
     return res

@@ -31,7 +31,8 @@ Two pages in one window (a QStackedWidget, a short fade between them):
            ┌ tab body ────────────────────────────────┐ │ Downloads     │
            │ Details: the README (images included),   │ │ Likes / Size  │
            │   the ✓/↓/⚠ dependency block under it    │ │ Dependants ↗  │
-           │ Required: one rich row per dependency    │ │ Categories    │
+           │ Required: one rich row per dependency,   │ │ Categories    │
+           │   a click opens that package's page      │ │               │
            │ Versions: version · date · downloads ·   │ │  [chip] [chip]│
            │   [Install x.y.z] / Installed on the     │ └───────────────┘
            │   version this load order has            │
@@ -96,8 +97,17 @@ Every request runs on a job thread the screen provides (`run_job`, its
 _run_job) so the window never blocks; the screen's own busy lock (one
 mutating job at a time) is honored through `is_busy`.
 
+A Required row opens that dependency's own page in place (the listing
+detail job like a card's, the package taken from the row: Owner-Name, the
+latest version - the declared one is only shown). A small history
+(_history: (listing, tab) per page left that way) makes "← Back to
+results", Esc and Backspace one level back: the previous package's page
+(refetched, on the tab it was on) while there is one, else the results;
+it is cleared whenever the results show.
+
 Keys: Esc / Backspace go one level back - from the detail page to the
-results (search, page and scroll kept, like "← Back to results"); on the
+previous package's page (above) or the results (search, page and scroll
+kept, like "← Back to results"); on the
 browse page Esc closes the window, Backspace does nothing. In the search
 box (any text field) Backspace edits the text as usual; Esc there clears
 a query first (the Edit Config window's rule) and closes only when the
@@ -107,15 +117,17 @@ box is empty.
 import threading
 from datetime import datetime, timezone
 
+import html
 import re
 
-from PySide6.QtCore import QObject, QPropertyAnimation, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPainterPath, QPixmap, QTextDocument
+from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QPainter, QPainterPath, QPalette, QPixmap, QTextDocument,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFrame,
-    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -124,13 +136,16 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QStyle,
+    QStyleOptionComboBox,
+    QStylePainter,
     QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from volt_py import theme, thunderstore as ts, thunderstore_browse as tb
+from volt_py import icons, painters, theme, thunderstore as ts, thunderstore_browse as tb
 from volt_py.applog import log
 from volt_py.screens.flow_layout import FlowLayout
 
@@ -138,15 +153,28 @@ WINDOW_SIZE = (1400, 820)  # .modal.browse-mods
 MODAL_GAP = 12  # .modal gap
 COLUMNS = 4  # was the mockup's 5; 4 wider cards per row, sharing the grid's full width (user, 2026-09-29)
 CARD_GAP = 12  # .card-grid gap
-CARD_HEIGHT = 156  # 4 rows of 4 = a page (thunderstore_browse.PAGE_SIZE); the grid scrolls at the 820px minimum
+CARD_HEIGHT = 162  # 4 rows of 4 = a page (thunderstore_browse.PAGE_SIZE); the grid scrolls at the 820px minimum.
+# 156 -> 162 in 3.2: the icon mat (+8) and the footer rule (+1 + 7 padding), less one layout gap (the
+# description now takes the stretch) - the mockup's 160px card plus 2px of slack for font metrics
 INITIAL_ORDERING = "most-downloaded"  # the sort the browser opens on (user, 2026-09-29; the mockup said Last updated)
 CARD_PADDING = 10
+CARD_FOOT_PAD = (7, 8)  # the footer's space above its button (under the rule) and the card's bottom padding (3.2)
 ICON_PX = 40  # .card-icon
-DETAIL_ICON_PX = 96  # the header card's icon
+ICON_MAT = 4  # the card icon's mat around it: 1px edge + 3px (QLabel[role="browse-icon"][mat="true"]; 3.2)
+ICON_RADIUS = 3  # the icon's corners inside the mat
+DETAIL_ICON_PX = 96  # the header card's icon (on painters.ThumbFrame's mat, 3.3)
+HEADER_PAD = 14  # the header card's padding
+HEADER_THUMB_GAP = 16  # the mat's right edge -> the text column (3.3; was the icon's 16)
+FACTS_PAD = 14  # the facts card's side padding: its rules run inset (3.3; were full-bleed)
 DEP_ICON_PX = 56  # a Required row's icon
 DESC_LINES = 3  # the card description is clamped to this many lines
 SEARCH_DEBOUNCE_MS = 300
-FADE_MS = 150  # the browse <-> detail switch (SCOPE.md §2)
+STRIP_HEIGHT = 36  # the recessed search / Category / Sort strip (3.2)
+STRIP_DIVIDER = 20  # its 1px dividers' height
+STRIP_KEY_PX, STRIP_KEY_GAP = 10, 10  # a strip combo's copper key (mono 600 caps, .14em) and its gap to the value
+PAGER_KEY_PX = 10  # the pager's copper PAGE key (terminal caps, .14em)
+PAGER_NUM_PX, PAGER_NUM_SPACING = 12, 0.06  # its mono "1 / 764" (.06em)
+MONO_HTML = ", ".join(f"'{f}'" for f in theme.MONO_FONTS)  # the mono stack for a rich-text style="" attribute
 ICON_WORKERS = 3
 CLOSE_PX = 30  # .close-btn
 VERSION_PICKER_WIDTH = 240  # the header's selector
@@ -160,6 +188,7 @@ REFIT_MS = 150  # the README re-lays its images out this long after the last res
 AGE_MONTH_DAYS, AGE_YEAR_DAYS = 30, 365  # "Last updated": days -> green, months -> yellow, years -> red
 AGE_COLORS = (theme.RDEP, theme.WARN, theme.DANGER)
 BUTTON_TEXT_PADDING = 24  # the big Install button's horizontal padding + border, for fitting its text
+INSTALLED_ICON_ROOM = 24  # the already-installed state's check icon (16) + its gap, and the 600 weight's extra width
 # Thunderstore's own deprecated-package warning (the detail page's banner;
 # the manager's details panel shows the same text).
 DEPRECATED_BANNER = ("This package has been deprecated and may no longer be maintained. "
@@ -249,14 +278,17 @@ def age_html(value, now: datetime | None = None) -> str:
 
 def fit_button_text(text: str, fm, width: int) -> tuple[str, bool]:
     """The big Install button's label, never clipped: the text as is when
-    it fits `width`; else two lines split at the last " to " (the load
-    order on the second), each elided to fit (the name line in the
-    middle, so "+ N dependencies" survives; the load order line on the
-    right). Returns (label, changed)."""
+    it fits `width`; else two lines split at the last " to " (or, for
+    "<name> is already in <lo>", the last " in "; the load order on the
+    second), each elided to fit (the name line in the middle, so
+    "+ N dependencies" survives; the load order line on the right).
+    Returns (label, changed)."""
     if fm.horizontalAdvance(text) <= width:
         return text, False
     head, sep, tail = text.rpartition(" to ")
-    lines = [head, f"to {tail}"] if sep else [text]
+    if not sep:
+        head, sep, tail = text.rpartition(" in ")
+    lines = [head, f"{sep.strip()} {tail}"] if sep else [text]
     fitted = [fm.elidedText(lines[0], Qt.TextElideMode.ElideMiddle, width)]
     if len(lines) > 1:
         fitted.append(fm.elidedText(lines[1], Qt.TextElideMode.ElideRight, width))
@@ -284,11 +316,25 @@ def _html_body(html: str) -> str:
 
 
 def stats_text(downloads: int, ratings: int, size: int) -> str:
-    """The header's green line: "⬇ 2,254,655  ·  ★ 335 ratings  ·  31.2 MB"."""
-    parts = [f"⬇ {tb.format_count(downloads)}", f"★ {tb.format_count(ratings)} rating{'s' if ratings != 1 else ''}"]
+    """The header's stats line (rich text): "[download] 2,254,655  ·  [star]
+    335 ratings  ·  31.2 MB", the drawn icons (icons.py; were the ⬇ / ★
+    glyphs, which Windows drew as color emoji) in the line's --muted."""
+    parts = [f"{icons.inline('download', theme.MUTED)} {tb.format_count(downloads)}",
+             f"{icons.inline('star', theme.MUTED)} {tb.format_count(ratings)} rating{'s' if ratings != 1 else ''}"]
     if size:
         parts.append(tb.format_size(size))
-    return "  ·  ".join(parts)
+    return "&nbsp; · &nbsp;".join(parts)
+
+
+def set_installed_look(button: QPushButton, installed: bool) -> None:
+    """Installed / already installed as a success state (theme.py's
+    QPushButton[installed="true"]:disabled: an --ok tint, --ok text) with a
+    drawn check; repolished only when it changes."""
+    if bool(button.property("installed")) == installed:
+        return
+    button.setProperty("installed", installed)
+    button.setIcon(icons.icon("check", theme.OK, theme.OK) if installed else QIcon())
+    _repolish(button)
 
 
 def link_html(url: str, text: str) -> str:
@@ -300,20 +346,25 @@ def shown_url(url: str) -> str:
 
 
 def rounded_pixmap(pixmap: QPixmap, size: int, radius: int = theme.RADIUS) -> QPixmap:
-    """The icon scaled to size x size with the card's corner radius (the
-    mockup's border-radius on the icon placeholders)."""
-    scaled = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+    """The icon scaled to size x size logical px with the card's corner
+    radius (the mockup's border-radius on the icon placeholders), rendered
+    at the app's device pixel ratio (3.2: was drawn at 1x and upscaled by
+    Qt at 125%, soft)."""
+    dpr = icons.app_dpr()
+    side = max(1, round(size * dpr))
+    scaled = pixmap.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                            Qt.TransformationMode.SmoothTransformation)
-    out = QPixmap(size, size)
+    out = QPixmap(side, side)
     out.fill(Qt.GlobalColor.transparent)
     painter = QPainter(out)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
+    path.addRoundedRect(QRectF(0, 0, side, side), radius * dpr, radius * dpr)
     painter.setClipPath(path)
-    painter.drawPixmap((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
+    painter.drawPixmap((side - scaled.width()) // 2, (side - scaled.height()) // 2, scaled)
     painter.end()
+    out.setDevicePixelRatio(dpr)
     return out
 
 
@@ -414,7 +465,8 @@ class _ClampedLabel(QLabel):
 
     def set_text(self, text: str) -> None:
         self._full = " ".join((text or "").split())
-        self.setToolTip(self._full)
+        # rich text, so Qt wraps the tooltip (a plain-text one is one screen-wide line)
+        self.setToolTip(f"<p>{html.escape(self._full)}</p>" if self._full else "")
         self._clamp()
 
     def resizeEvent(self, event) -> None:
@@ -429,7 +481,11 @@ class _ClampedLabel(QLabel):
 
 class _Card(QFrame):
     """One .card: icon | name / by author, description, ⬇ downloads | Install.
-    A click anywhere but the button opens the detail page (`opened`)."""
+    A click anywhere but the button opens the detail page (`opened`).
+    Steps 3.2 (Circuit): the icon on a --well mat, a hairline rule across the
+    card above the footer, mono downloads, and a static raised hover - the
+    QSS :hover wash + --border-hi edge, and the deeper cached shadow swapped
+    in on enter / leave (painters.set_raised; the window's shadow host)."""
 
     opened = Signal(object)  # the listing dict
     install = Signal(object)
@@ -442,13 +498,17 @@ class _Card(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(listing["full_name"])
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(CARD_PADDING, CARD_PADDING, CARD_PADDING, CARD_PADDING)
+        # no side padding here: the footer's rule runs the card's full width;
+        # the head / description / footer rows carry CARD_PADDING themselves
+        layout.setContentsMargins(0, CARD_PADDING, 0, CARD_FOOT_PAD[1])
         layout.setSpacing(6)  # .card gap
         head = QHBoxLayout()  # .card-head
+        head.setContentsMargins(CARD_PADDING, 0, CARD_PADDING, 0)
         head.setSpacing(8)
         self.icon = QLabel()
         self.icon.setProperty("role", "browse-icon")
-        self.icon.setFixedSize(ICON_PX, ICON_PX)
+        self.icon.setProperty("mat", True)  # theme.py: the --well mat around the icon
+        self.icon.setFixedSize(ICON_PX + 2 * ICON_MAT, ICON_PX + 2 * ICON_MAT)
         self.icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         head.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignTop)
         names = QVBoxLayout()
@@ -472,13 +532,17 @@ class _Card(QFrame):
         head.addLayout(names, 1)
         layout.addLayout(head)
         self.description = _ClampedLabel("browse-desc")
+        self.description.setContentsMargins(CARD_PADDING, 0, CARD_PADDING, 0)
         self.description.set_text(listing["description"])
-        layout.addWidget(self.description)
-        layout.addStretch(1)
-        foot = QHBoxLayout()  # .card-foot: space-between
+        layout.addWidget(self.description, 1, Qt.AlignmentFlag.AlignTop)  # it takes the card's slack
+        footer = QFrame()  # .card-foot: space-between, under a full-width hairline (theme.py browse-card-foot)
+        footer.setProperty("role", "browse-card-foot")
+        foot = QHBoxLayout(footer)
+        foot.setContentsMargins(CARD_PADDING, CARD_FOOT_PAD[0], CARD_PADDING, 0)
         foot.setSpacing(8)
-        self.downloads = QLabel(f"⬇ {tb.format_count(listing['download_count'])}")
-        self.downloads.setProperty("role", "browse-small")
+        self.downloads = QLabel(f"{icons.inline('download', theme.MUTED, 12)} {tb.format_count(listing['download_count'])}")
+        self.downloads.setTextFormat(Qt.TextFormat.RichText)
+        self.downloads.setProperty("role", "browse-dl")  # theme.py: mono 11px --muted
         self.downloads.setToolTip("Downloads")
         foot.addWidget(self.downloads)
         foot.addStretch(1)
@@ -488,22 +552,55 @@ class _Card(QFrame):
         self.install_button.setCursor(Qt.CursorShape.ArrowCursor)
         self.install_button.clicked.connect(lambda _=False: self.install.emit(self.listing))
         foot.addWidget(self.install_button)
-        layout.addLayout(foot)
+        layout.addWidget(footer)
 
     def set_icon(self, pixmap: QPixmap | None) -> None:
         if pixmap is None or pixmap.isNull():
             self.icon.clear()
             return
-        self.icon.setPixmap(rounded_pixmap(pixmap, ICON_PX))
+        self.icon.setPixmap(rounded_pixmap(pixmap, ICON_PX, ICON_RADIUS))
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        painters.set_raised(self, True)
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        painters.set_raised(self, False)
 
     def set_install_state(self, text: str, enabled: bool) -> None:
         self.install_button.setText(text)
         self.install_button.setEnabled(enabled)
+        set_installed_look(self.install_button, text == "Installed")
+        if bool(self.property("installed")) != (text == "Installed"):  # the card's --ok edge (theme.py)
+            self.setProperty("installed", text == "Installed")
+            _repolish(self)
 
     def mouseReleaseEvent(self, event) -> None:
         super().mouseReleaseEvent(event)
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
             self.opened.emit(self.listing)
+
+
+class _DepRow(QFrame):
+    """A Required tab row: `opened` (the row's dependency dict) on a left
+    click, the hand cursor, the hover wash (theme.py browse-row:hover) - the
+    result card's click, without its lift. Mouse only (the cards aren't
+    focusable either)."""
+
+    opened = Signal(object)
+
+    def __init__(self, dep: dict) -> None:
+        super().__init__()
+        self.dep = dep
+        self.setProperty("role", "browse-row")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(dep["full_name"])
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.opened.emit(self.dep)
 
 
 class _Readme(QTextBrowser):
@@ -587,12 +684,115 @@ def _repolish(widget: QWidget) -> None:
 
 
 def _close_button() -> QPushButton:
-    button = QPushButton("✕")  # .close-btn 30x30
+    button = QPushButton()  # .close-btn 30x30, a drawn x (icons.py; was the ✕ glyph)
+    button.setIcon(icons.icon("x"))
     button.setObjectName("browseClose")
     button.setFixedSize(CLOSE_PX, CLOSE_PX)
     button.setAutoDefault(False)
     button.setToolTip("Close")
     return button
+
+
+def _well_shade() -> QWidget:
+    """A recessed well's 7px top shade strip (theme.py QWidget#browseWellShade,
+    the 3.1 details well's), laid over the well's top edge in its grid cell."""
+    shade = QWidget()
+    shade.setObjectName("browseWellShade")
+    shade.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+    shade.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    shade.setFixedHeight(7)
+    return shade
+
+
+def _well(inner: QWidget) -> QFrame:
+    """`inner` sunk into a recessed well (3.3: the README / changelog): the
+    3.1 details well's frame (theme.py QFrame#browseWell) + its top shade."""
+    well = QFrame()
+    well.setObjectName("browseWell")
+    cell = QGridLayout(well)
+    cell.setContentsMargins(1, 1, 1, 1)
+    cell.setSpacing(0)
+    cell.addWidget(inner, 0, 0)
+    cell.addWidget(_well_shade(), 0, 0, Qt.AlignmentFlag.AlignTop)
+    return well
+
+
+def _strip_divider() -> QFrame:
+    """A 1px divider between two fields of the recessed filter strip (3.2)."""
+    line = QFrame()
+    line.setProperty("role", "strip-divider")
+    line.setFixedSize(1, STRIP_DIVIDER)
+    return line
+
+
+class _KeyCombo(QComboBox):
+    """A filter-strip combo (3.2 tweak "copper keys in combos", 0.5.10): the
+    items keep their "Category: x" / "Sort: x" text (popup, type-ahead, the
+    screen's logic unchanged); only the closed label is painted split - the
+    prefix as a copper terminal key (mono 10px 600 caps, .14em), the value in
+    the combo's own --text. Frame, hover fill, arrow, focus and the popup are
+    still drawn by the style (the QSS strip rules)."""
+
+    def __init__(self, key: str) -> None:
+        super().__init__()
+        self._key = key
+        self._key_font = QFont(list(theme.MONO_FONTS))
+        self._key_font.setPixelSize(STRIP_KEY_PX)
+        self._key_font.setWeight(QFont.Weight.DemiBold)
+        self._key_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, round(STRIP_KEY_PX * painters.TERMINAL_KEY_SPACING, 2))
+        self.setAccessibleName(key)
+
+    def _key_width(self) -> int:
+        return QFontMetrics(self._key_font).horizontalAdvance(self._key.upper()) + STRIP_KEY_GAP
+
+    def sizeHint(self) -> QSize:  # the key + gap replace the "Key: " prefix in the width
+        hint = super().sizeHint()
+        extra = self._key_width() - self.fontMetrics().horizontalAdvance(f"{self._key}: ")
+        return QSize(hint.width() + max(0, extra), hint.height())
+
+    def paintEvent(self, _event) -> None:
+        painter = QStylePainter(self)
+        opt = QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        value = opt.currentText.removeprefix(f"{self._key}: ")
+        opt.currentText = ""
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
+        field = self.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, opt, QStyle.SubControl.SC_ComboBoxEditField, self)
+        # key and value on ONE baseline, the value's (vertically centred as the
+        # style would): two AlignVCenter boxes of different font sizes put the
+        # 10px caps ~2px above the 13px value (3.4 hardware review)
+        metrics = self.fontMetrics()
+        baseline = field.top() + (field.height() - metrics.height()) // 2 + metrics.ascent()
+        painter.setFont(self._key_font)
+        painter.setPen(QColor(theme.SIGNAL if self.isEnabled() else theme.MUTED))
+        painter.drawText(QPoint(field.left(), baseline), self._key.upper())
+        left = field.left() + self._key_width()
+        painter.setFont(self.font())
+        painter.setPen(opt.palette.color(QPalette.ColorRole.ButtonText))
+        painter.drawText(QPoint(left, baseline), metrics.elidedText(value, Qt.TextElideMode.ElideRight, max(0, field.right() + 1 - left)))
+
+    def showPopup(self) -> None:
+        # 3.4 decision 4 (0.5.12 amendment): the popup as wide as its longest
+        # item. Qt widens it only by the combo's own text metrics, leaving out
+        # the ::item padding, the popup border and the scrollbar, so the longest
+        # category names elided in the middle; a view minimum width only ever
+        # widens it (never below the combo), recomputed per open (categories reload).
+        view = self.view()
+        need = view.sizeHintForColumn(0) + 2 * view.frameWidth()
+        if self.count() > self.maxVisibleItems():
+            need += view.verticalScrollBar().sizeHint().width()
+        view.setMinimumWidth(need)
+        super().showPopup()
+
+
+def _spaced_font(size_px: int, spacing_em: float):
+    """Letter-spacing only (QSS can't set it), on an otherwise empty font so
+    the label's QSS family / size / colour still apply (as painters.terminal_font)."""
+    from PySide6.QtGui import QFont
+
+    font = QFont()
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, round(size_px * spacing_em, 2))
+    return font
 
 
 def _panel(role: str = "browse-panel") -> QFrame:
@@ -667,6 +867,7 @@ class BepInExBrowseWindow(QDialog):
         self._detail_listing: dict | None = None  # the card's listing (namespace / name / icon_url / ...)
         self._detail: dict | None = None  # fetch_listing_detail's dict (the LATEST version: the right column)
         self._detail_gen = 0
+        self._history: list[tuple[dict, str]] = []  # (listing, tab) per page left via a Required row; Back pops
         self._versions: list[dict] = []  # fetch_versions rows, newest first
         self._version: str | None = None  # the selected version (the header's picker)
         self._version_meta: dict | None = None  # fetch_version of the selected version
@@ -685,7 +886,15 @@ class BepInExBrowseWindow(QDialog):
         layout.setSpacing(0)
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_browse_page())
-        self.stack.addWidget(self._build_detail_page())
+        detail_page = self._build_detail_page()
+        self.stack.addWidget(detail_page)
+        # Circuit shadows (painters.py: cached 9-slices painted behind them, no
+        # effects): the result cards, from the grid's viewport (so a card's
+        # shadow clips with the scrolled content), and the detail page's
+        # panels (header card, tab body, facts, categories).
+        painters.install_shadows(self.grid_scroll.viewport(), lambda: self._cards)
+        painters.install_shadows(detail_page, [f for f in detail_page.findChildren(QFrame)
+                                               if f.property("role") == "browse-panel"])
         layout.addWidget(self.stack, 1)
 
         width, height = WINDOW_SIZE
@@ -703,7 +912,7 @@ class BepInExBrowseWindow(QDialog):
         self.sort_combo.currentIndexChanged.connect(lambda _i: self._filters_changed())
         self.prev_button.clicked.connect(lambda _=False: self._turn_page(-1))
         self.next_button.clicked.connect(lambda _=False: self._turn_page(1))
-        self.back_button.clicked.connect(lambda _=False: self._show_browse())
+        self.back_button.clicked.connect(lambda _=False: self._go_back())
         self.version_combo.currentIndexChanged.connect(lambda _i: self._version_changed())
         self.detail_install_button.clicked.connect(lambda _=False: self._install_from_detail())
         self.copy_button.clicked.connect(lambda _=False: self._copy_package_name())
@@ -733,6 +942,7 @@ class BepInExBrowseWindow(QDialog):
         self.show_nsfw = QPushButton("Show NSFW")
         for button in (self.show_deprecated, self.show_nsfw):
             button.setProperty("variant", "config-filter")  # theme.py: the Edit Config Filter toggle's checked look
+            button.setIcon(icons.checkbox_icon())  # 3.2: a check box glyph, so "on" isn't carried by the fill alone
             button.setCheckable(True)
             button.setAutoDefault(False)
             header.addWidget(button)
@@ -742,23 +952,45 @@ class BepInExBrowseWindow(QDialog):
         header.addWidget(self.close_button)
         layout.addLayout(header)
 
-        filters = QHBoxLayout()  # .filter-row
-        filters.setSpacing(8)
+        # .filter-row as one recessed strip (3.2): the same three fields, in the
+        # same order, inside a --well frame (theme.py QFrame#browseFilterStrip:
+        # the 3.1 well + its 7px top shade) that shows their hover / focus
+        # edges; a copper ">" prompt, 1px dividers between the fields
+        self.filter_strip = QFrame()
+        self.filter_strip.setObjectName("browseFilterStrip")
+        self.filter_strip.setProperty("fieldFocus", False)  # not "focus": QWidget's read-only Q_PROPERTY (hasFocus) - setProperty on it is a no-op
+        self.filter_strip.setFixedHeight(STRIP_HEIGHT)
+        strip_cell = QGridLayout(self.filter_strip)
+        strip_cell.setContentsMargins(1, 1, 1, 1)
+        strip_cell.setSpacing(0)
+        filters = QHBoxLayout()
+        filters.setContentsMargins(0, 0, 4, 0)
+        filters.setSpacing(0)
+        prompt = QLabel(">")
+        prompt.setProperty("role", "strip-prompt")
+        filters.addWidget(prompt)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search mods...")
         self.search.setClearButtonEnabled(True)
         filters.addWidget(self.search, 1)
-        self.category_combo = QComboBox()
+        filters.addWidget(_strip_divider(), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.category_combo = _KeyCombo("Category")  # copper CATEGORY key + value
         self.category_combo.addItem("Category: All", None)
         self.category_combo.setMinimumWidth(180)
         filters.addWidget(self.category_combo)
-        self.sort_combo = QComboBox()
+        filters.addWidget(_strip_divider(), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.sort_combo = _KeyCombo("Sort")
         for value, label in tb.ORDERINGS:
             self.sort_combo.addItem(f"Sort: {label}", value)
         self.sort_combo.setCurrentIndex(max(0, self.sort_combo.findData(INITIAL_ORDERING)))
         self.sort_combo.setMinimumWidth(180)
         filters.addWidget(self.sort_combo)
-        layout.addLayout(filters)
+        for field in (self.search, self.category_combo, self.sort_combo):
+            field.setProperty("strip", True)  # theme.py: frameless inside the strip
+            field.installEventFilter(self)  # focus in / out -> the strip's [focus] edge
+        strip_cell.addLayout(filters, 0, 0)
+        strip_cell.addWidget(_well_shade(), 0, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.filter_strip)
 
         cell = QGridLayout()  # the grid with the loading / error / empty message laid over it
         cell.setContentsMargins(0, 0, 0, 0)
@@ -795,10 +1027,23 @@ class BepInExBrowseWindow(QDialog):
             button.setProperty("variant", "browse-page")
             button.setAutoDefault(False)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # the counter (3.2): "PAGE  1 / 764" - a copper key and mono numbers
+        # in a small well (theme.py QFrame#browsePager)
+        self.pager_box = QFrame()
+        self.pager_box.setObjectName("browsePager")
+        pager = QHBoxLayout(self.pager_box)
+        pager.setContentsMargins(12, 4, 12, 4)
+        pager.setSpacing(6)
+        pager_key = QLabel("Page")
+        pager_key.setProperty("role", "pager-key")
+        pager_key.setFont(painters.terminal_font(PAGER_KEY_PX, painters.TERMINAL_KEY_SPACING))
+        pager.addWidget(pager_key)
         self.page_label = QLabel("")
-        self.page_label.setProperty("muted", True)
+        self.page_label.setProperty("role", "pager-num")
+        self.page_label.setFont(_spaced_font(PAGER_NUM_PX, PAGER_NUM_SPACING))
+        pager.addWidget(self.page_label)
         pagination.addWidget(self.prev_button)
-        pagination.addWidget(self.page_label)
+        pagination.addWidget(self.pager_box)
         pagination.addWidget(self.next_button)
         pagination.addStretch(1)
         self.pagination = QWidget()
@@ -832,7 +1077,7 @@ class BepInExBrowseWindow(QDialog):
         left = QVBoxLayout()
         left.setSpacing(MODAL_GAP)
         left.addWidget(self._build_header_card())
-        left.addLayout(self._build_tab_bar())
+        left.addWidget(self._build_tab_bar())
         left.addWidget(self._build_tab_body(), 1)
         body.addLayout(left, 1)
         body.addWidget(self._build_right_column())
@@ -842,14 +1087,22 @@ class BepInExBrowseWindow(QDialog):
     def _build_header_card(self) -> QFrame:
         card = _panel()
         row = QHBoxLayout(card)
-        row.setContentsMargins(14, 14, 14, 14)
-        row.setSpacing(16)
-        self.detail_icon = QLabel()
-        self.detail_icon.setProperty("role", "browse-icon")
-        self.detail_icon.setFixedSize(DETAIL_ICON_PX, DETAIL_ICON_PX)
-        self.detail_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 3.3: the icon sits on 3.1's framed mat (painters.ThumbFrame: shadow,
+        # --well mat, copper corner ticks), a fixed box so nothing jumps while
+        # it loads (the bare mat meanwhile). The frame's own margins hold its
+        # ticks + shadow, so the row's left / top / bottom margins shrink by
+        # them and the mat's edge lands where the icon's was (14px in); the
+        # text column and the version picker keep their 14px top.
+        m_left, m_top, m_right, m_bottom = painters.THUMB_MARGINS
+        row.setContentsMargins(HEADER_PAD - m_left, HEADER_PAD - m_top, HEADER_PAD, HEADER_PAD - m_bottom)
+        row.setSpacing(HEADER_THUMB_GAP - m_right)
+        self.detail_icon = painters.ThumbFrame(empty_mat=True)
+        chrome_w, chrome_h = painters.thumb_chrome()
+        self.detail_icon.setFixedSize(DETAIL_ICON_PX + chrome_w, DETAIL_ICON_PX + chrome_h)
+        self.detail_icon.set_image(None, DETAIL_ICON_PX, DETAIL_ICON_PX)
         row.addWidget(self.detail_icon, 0, Qt.AlignmentFlag.AlignTop)
         names = QVBoxLayout()
+        names.setContentsMargins(0, m_top, 0, m_bottom)
         names.setSpacing(6)
         self.detail_name = _ElidedLabel("browse-title")
         self.detail_description = QLabel()
@@ -860,8 +1113,9 @@ class BepInExBrowseWindow(QDialog):
         self.detail_links.setTextFormat(Qt.TextFormat.RichText)
         self.detail_links.setOpenExternalLinks(True)
         self.detail_links.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
-        self.detail_stats = QLabel()  # the green line: ⬇ · ★ · size
-        self.detail_stats.setProperty("muted", True)
+        self.detail_stats = QLabel()  # the stats line: downloads · ratings · size (stats_text, rich text)
+        self.detail_stats.setProperty("role", "browse-stats")  # theme.py: mono 12px --muted (3.3)
+        self.detail_stats.setTextFormat(Qt.TextFormat.RichText)
         names.addWidget(self.detail_name)
         names.addWidget(self.detail_description)
         names.addWidget(self.detail_links)
@@ -871,22 +1125,41 @@ class BepInExBrowseWindow(QDialog):
         self.version_combo = QComboBox()  # top-right: drives Install, Required, Changelog
         self.version_combo.setFixedWidth(VERSION_PICKER_WIDTH)
         self.version_combo.setEnabled(False)
-        row.addWidget(self.version_combo, 0, Qt.AlignmentFlag.AlignTop)
+        picker = QVBoxLayout()  # only to keep the picker's 14px top (the row's top margin is the frame's)
+        picker.setContentsMargins(0, m_top, 0, 0)
+        picker.addWidget(self.version_combo)
+        picker.addStretch(1)
+        row.addLayout(picker)
         return card
 
-    def _build_tab_bar(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
-        bar.setSpacing(4)
+    def _build_tab_bar(self) -> QWidget:
+        # A bare row widget (no margins, fixed height: the same geometry as the
+        # layout it used to be) so the sliding underline has its own overlay host.
+        row = QWidget()
+        row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        bar = QHBoxLayout(row)
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(0)  # 3.3: the tabs' bottom edges are the strip's rule, unbroken
         self.tab_buttons: dict[str, QPushButton] = {}
         for key, label in TABS:
             button = QPushButton(label)
             button.setProperty("variant", "browse-tab")
             button.setAutoDefault(False)
-            button.clicked.connect(lambda _=False, key=key: self._select_tab(key))
+            button.clicked.connect(lambda _=False, key=key: self._select_tab(key, animate=True))
             bar.addWidget(button)
             self.tab_buttons[key] = button
-        bar.addStretch(1)
-        return bar
+        rule = QFrame()  # the rest of the strip's 1px rule, to the right edge (theme.py QFrame#browseTabRule)
+        rule.setObjectName("browseTabRule")
+        bar.addWidget(rule, 1)
+        # the selected tab's --accent underline, slid between tabs (phase 4 M2;
+        # the selected button's own QSS underline is transparent)
+        self.tab_indicator = painters.TabIndicator(row, self._tab_band)
+        return row
+
+    def _tab_band(self):
+        """The selected tab button's box in the tab row (TabIndicator), None while hidden."""
+        button = self.tab_buttons.get(self._tab)
+        return button.geometry() if button is not None and button.isVisible() else None
 
     def _build_tab_body(self) -> QFrame:
         frame = _panel()
@@ -913,13 +1186,17 @@ class BepInExBrowseWindow(QDialog):
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.setSpacing(10)
         self.readme = _Readme("browseReadme")
-        details_layout.addWidget(self.readme, 1)
+        details_layout.addWidget(_well(self.readme), 1)  # 3.3: the README sunk into a recessed well
         divider = QFrame()
         divider.setObjectName("browseDivider")
         divider.setFixedHeight(1)
         details_layout.addWidget(divider)
+        # the dependency block (3.3): a REQUIRES terminal label (side rule)
+        # over a muted sub-line - what the block holds, or its state
+        self.deps_title = painters.TerminalLabel("Requires", rule="side")
+        details_layout.addWidget(self.deps_title)
         self.deps_label = QLabel()
-        self.deps_label.setProperty("muted", True)
+        self.deps_label.setProperty("role", "browse-dep-sub")
         details_layout.addWidget(self.deps_label)
         self.deps_box = QWidget()
         self.deps_layout = QVBoxLayout(self.deps_box)
@@ -939,9 +1216,9 @@ class BepInExBrowseWindow(QDialog):
         self.versions_layout.setContentsMargins(0, 0, 0, 0)
         self.versions_layout.setSpacing(0)
         self.tab_stack.addWidget(_scroll(versions))
-        # 4: Changelog
+        # 4: Changelog (in the README's well too)
         self.changelog = _Readme("browseReadme")
-        self.tab_stack.addWidget(self.changelog)
+        self.tab_stack.addWidget(_well(self.changelog))
         return frame
 
     def _build_right_column(self) -> QWidget:
@@ -965,17 +1242,25 @@ class BepInExBrowseWindow(QDialog):
         self.package_name_edit.setObjectName("browsePackageName")
         self.package_name_edit.setReadOnly(True)
         copy_row.addWidget(self.package_name_edit, 1)
-        self.copy_button = QPushButton("⧉")
+        self.copy_button = QPushButton()  # a drawn copy icon (icons.py; was the ⧉ glyph)
+        self.copy_button.setIcon(icons.icon("copy"))
         self.copy_button.setObjectName("browseCopy")
         self.copy_button.setAutoDefault(False)
         self.copy_button.setToolTip("Copy the package name")
         copy_row.addWidget(self.copy_button)
         layout.addWidget(copybox)
         # the facts rows
+        # the facts as a terminal table (3.3): a PACKAGE label, copper
+        # terminal-caps keys (the details-key role), mono values
         facts = _panel()
         rows = QVBoxLayout(facts)
-        rows.setContentsMargins(0, 4, 0, 4)
+        rows.setContentsMargins(FACTS_PAD, 10, FACTS_PAD, 4)
         rows.setSpacing(0)
+        package = painters.TerminalLabel("Package", rule="side")
+        package.setProperty("size", "pane")  # theme.py: the pane-title size (11px), .16em
+        package.setFont(painters.terminal_font(painters.TERMINAL_PANE_PX, painters.TERMINAL_SPACING))
+        package.setContentsMargins(0, 0, 0, 4)
+        rows.addWidget(package)
         self.fact_values: dict[str, QLabel] = {}
         for key, title in (("latest", "Latest version"), ("updated", "Last updated"), ("uploaded", "First uploaded"),
                            ("downloads", "Downloads"), ("likes", "Likes"), ("size", "Size"), ("dependants", "Dependants")):
@@ -983,14 +1268,19 @@ class BepInExBrowseWindow(QDialog):
             row.setProperty("role", "browse-fact")
             row.setProperty("last", key == "dependants")
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(10, 6, 10, 6)
+            row_layout.setContentsMargins(0, 8, 0, 8)
             row_layout.setSpacing(8)
             label = QLabel(title)
-            label.setProperty("muted", True)
+            label.setProperty("role", "details-key")  # theme.py: copper mono 11px 600
+            label.setFont(painters.terminal_font(painters.TERMINAL_KEY_PX, painters.TERMINAL_KEY_SPACING))
             value = QLabel("-")
             value.setProperty("role", "browse-fact-value")
             value.setTextFormat(Qt.TextFormat.RichText if key in ("dependants", "updated") else Qt.TextFormat.PlainText)
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            # a long value wraps under itself (right-aligned) instead of being
+            # clipped at the left: "2021-04-30 (5 years ago)" didn't fit the
+            # 300px column beside FIRST UPLOADED (3.4 hardware review)
+            value.setWordWrap(True)
             if key == "dependants":
                 value.setOpenExternalLinks(True)
                 value.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
@@ -1004,8 +1294,7 @@ class BepInExBrowseWindow(QDialog):
         cats_layout = QVBoxLayout(cats)
         cats_layout.setContentsMargins(14, 12, 14, 12)
         cats_layout.setSpacing(8)
-        title = QLabel("Categories")
-        title.setProperty("role", "pane-title")
+        title = painters.TerminalLabel("Categories", rule=False)  # a Circuit terminal label (role pane-title)
         cats_layout.addWidget(title)
         self.chips_box = QWidget()
         self.chips_layout = FlowLayout(self.chips_box, horizontal_spacing=CHIP_GAP, vertical_spacing=CHIP_GAP, center_rows=False)
@@ -1063,6 +1352,7 @@ class BepInExBrowseWindow(QDialog):
 
     def _load_page(self) -> None:
         key = (self._query, self._ordering, self._category, self._deprecated, self._nsfw, self._page)
+        painters.stop_fades(self.grid_scroll.parentWidget())  # a newer load: end a running arrival fade, no ghost
         self._gen += 1
         gen = self._gen
         cached = self._page_cache.get(key)
@@ -1097,7 +1387,9 @@ class BepInExBrowseWindow(QDialog):
                 self._load_page()
                 return
             self._page_cache[key] = result
-            self._show_page(result)
+            # the cards replace "Loading..." under a MOTION_FAST crossfade (a cached page stays instant)
+            painters.crossfade(self.grid_scroll.parentWidget(), lambda: self._show_page(result),
+                               theme.MOTION_FAST, self.grid_scroll.geometry())
 
         self._run_job(PAGE_JOB, job, done)
 
@@ -1140,7 +1432,8 @@ class BepInExBrowseWindow(QDialog):
 
     def _set_pagination(self, ready: bool) -> None:
         self.pagination.setVisible(True)
-        self.page_label.setText(f"Page {self._page} of {self._pages}" if ready else "")
+        self.page_label.setText(f"{self._page} / {self._pages}" if ready else "")
+        self.pager_box.setVisible(ready)
         self.prev_button.setEnabled(ready and self._page > 1)
         self.next_button.setEnabled(ready and self._page < self._pages)
 
@@ -1164,6 +1457,9 @@ class BepInExBrowseWindow(QDialog):
             target.set_icon(pixmap)
             return
         label, size = target
+        if size is None:  # the detail header's ThumbFrame (3.3): the raw icon, shrunk into its box
+            label.set_image(pixmap if pixmap is not None and not pixmap.isNull() else None, DETAIL_ICON_PX, DETAIL_ICON_PX)
+            return
         if pixmap is None or pixmap.isNull():
             label.clear()
         else:
@@ -1180,7 +1476,7 @@ class BepInExBrowseWindow(QDialog):
             if card.listing["icon_url"] == url:
                 self._apply_icon(card, pixmap)
         if self._detail_listing and self._detail_listing["icon_url"] == url:
-            self._apply_icon((self.detail_icon, DETAIL_ICON_PX), pixmap)
+            self._apply_icon((self.detail_icon, None), pixmap)
         for icon_url, label in self._dep_icons:
             if icon_url == url:
                 self._apply_icon((label, DEP_ICON_PX), pixmap)
@@ -1211,11 +1507,14 @@ class BepInExBrowseWindow(QDialog):
                 if have is not None and version == have:
                     button.setText("Installed")  # the one this load order has
                     button.setEnabled(False)
+                    set_installed_look(button, True)
                 elif self._installing == full and version == self._installing_version:
                     button.setText("Installing..." if have is None else "Switching...")
+                    set_installed_look(button, False)
                     button.setEnabled(False)
                 else:
                     button.setText(f"Install {version}")
+                    set_installed_look(button, False)
                     button.setEnabled(idle)
 
     def _install_listing(self, listing: dict) -> None:
@@ -1311,12 +1610,15 @@ class BepInExBrowseWindow(QDialog):
         self.detail_deprecated.setVisible(bool(listing.get("is_deprecated")))
         self.detail_description.setText(listing["description"] or "")
         self._set_links(listing["namespace"], "")
-        self.detail_stats.setText(stats_text(listing["download_count"], listing["rating_count"], listing["size"]))
-        self.detail_icon.clear()
-        self._show_icon((self.detail_icon, DETAIL_ICON_PX), listing["icon_url"])
+        # a Required row's listing has no numbers yet (_open_dependency): blank until the job fills them
+        self.detail_stats.setText(stats_text(listing["download_count"], listing["rating_count"], listing["size"])
+                                  if "download_count" in listing else "")
+        self.detail_icon.set_image(None, DETAIL_ICON_PX, DETAIL_ICON_PX)
+        self._show_icon((self.detail_icon, None), listing["icon_url"])
         self._set_version_combo(None, "Version: loading...")
         self._set_facts(None)
         self.package_name_edit.setText(listing["full_name"])
+        self.package_name_edit.setCursorPosition(0)  # show the Team- start, not the scrolled-to end (a long name)
         self._set_chips([])
         self._clear_tabs()
         self._select_tab(self._tab if keep_tab else "details")
@@ -1330,6 +1632,25 @@ class BepInExBrowseWindow(QDialog):
         if self._detail_listing is not None:
             log(f"browse: retry {self._detail_listing['full_name']}")
             self._open_detail(self._detail_listing, keep_tab=True)
+
+    def _open_dependency(self, dep: dict) -> None:
+        """A Required row: that package's page in place (its latest version,
+        like a card), the page being left pushed on _history for Back."""
+        if self._detail_listing is not None:
+            self._history.append((self._detail_listing, self._tab))
+        log(f"browse: Required row -> {dep['full_name']} ({len(self._history)} back)")
+        self._open_detail({"namespace": dep["namespace"], "name": dep["name"], "full_name": dep["full_name"],
+                           "description": dep["description"], "icon_url": dep["icon_url"], "is_deprecated": False})
+
+    def _go_back(self) -> None:
+        """Back / Esc / Backspace on the detail page: the previous package's
+        page (on the tab it was on) while _history has one, else the results."""
+        if not self._history:
+            self._show_browse()
+            return
+        listing, self._tab = self._history.pop()
+        log(f"browse: back to {listing['full_name']} ({len(self._history)} back)")
+        self._open_detail(listing, keep_tab=True)
 
     def _run_detail_job(self, gen: int, listing: dict, *, version: str | None) -> None:
         """The detail job. version=None: the whole page (listing detail,
@@ -1380,7 +1701,10 @@ class BepInExBrowseWindow(QDialog):
                     self._set_version_combo(None, "Version: unavailable")
                 self._apply_detail_button()
                 return
-            self._show_detail(payload["ok"])
+            if self.stack.currentIndex() == 1:  # the content replaces "Loading..." under a MOTION_FAST crossfade
+                painters.crossfade(self.stack, lambda: self._show_detail(payload["ok"]), theme.MOTION_FAST)
+            else:
+                self._show_detail(payload["ok"])
 
         self._run_job(f"browse-detail-{ns}-{name}" + (f"-{version}" if version else ""), job, done)
 
@@ -1396,10 +1720,11 @@ class BepInExBrowseWindow(QDialog):
             self.detail_stats.setText(stats_text(d["download_count"], d["rating_count"], d["size"]))
             if d["icon_url"] and d["icon_url"] != listing["icon_url"]:
                 listing["icon_url"] = d["icon_url"]
-                self._show_icon((self.detail_icon, DETAIL_ICON_PX), listing["icon_url"])
+                self._show_icon((self.detail_icon, None), listing["icon_url"])
             self._set_version_combo(self._versions, None)
             self._set_facts(d)
             self.package_name_edit.setText(d["full_version_name"])
+            self.package_name_edit.setCursorPosition(0)  # show the Team- start, not the scrolled-to end (a long name)
             self._set_chips(d["categories"])
             self._fill_versions_tab()
             self.tab_buttons["changelog"].setVisible(self._has_changelog)
@@ -1446,9 +1771,11 @@ class BepInExBrowseWindow(QDialog):
 
     # ---- detail: the pieces ----
     def _set_links(self, namespace: str, website: str) -> None:
-        parts = [link_html(tb.team_page_url(self.game.community, namespace), f"👥 {namespace}")]
+        # the drawn people / link icons (icons.py; were the 👥 / 🔗 emoji), link-blue like the text
+        parts = [link_html(tb.team_page_url(self.game.community, namespace),
+                           f"{icons.inline('people', theme.ACCENT)} {namespace}")]
         if website:
-            parts.append(link_html(website, f"🔗 {shown_url(website)}"))
+            parts.append(link_html(website, f"{icons.inline('link', theme.ACCENT)} {shown_url(website)}"))
         self.detail_links.setText("&nbsp;&nbsp;&nbsp;&nbsp;".join(parts))
 
     def _set_version_combo(self, versions: list[dict] | None, placeholder: str | None) -> None:
@@ -1509,15 +1836,23 @@ class BepInExBrowseWindow(QDialog):
             QGuiApplication.clipboard().setText(text)
             log(f"browse: copied {text!r}")
 
-    def _select_tab(self, key: str) -> None:
+    def _select_tab(self, key: str, *, animate: bool = False) -> None:
+        """animate (a tab clicked): the underline slides and the page
+        crossfades (MOTION_FAST); a programmatic switch (a new mod, a load)
+        snaps both."""
         self._tab = key
         for k, button in self.tab_buttons.items():
             selected = k == key
             if button.property("selected") != selected:
                 button.setProperty("selected", selected)
                 _repolish(button)
+        self.tab_indicator.moved(animate)
         if self._version_meta is not None:  # loaded: show the tab; loading / error keep the status page
-            self.tab_stack.setCurrentIndex(TAB_INDEX[key])
+            index = TAB_INDEX[key]
+            if animate and index != self.tab_stack.currentIndex():
+                painters.crossfade(self.tab_stack, lambda: self.tab_stack.setCurrentIndex(index), theme.MOTION_FAST)
+            else:
+                self.tab_stack.setCurrentIndex(index)
 
     def _show_status(self, text: str, *, error: bool) -> None:
         self.detail_message.setText(text)
@@ -1548,18 +1883,23 @@ class BepInExBrowseWindow(QDialog):
         self._chain = chain
         _clear_layout(self.deps_layout)
         if chain is None:
-            self.deps_label.setText("Requires: checking dependencies...")
+            self.deps_label.setText("checking dependencies...")
             return
-        rows = ([("✓", n, "already installed", None) for n in chain["satisfied"]]
-                + [("↓", n, "will be downloaded and installed too", "browse-dep-missing") for n in chain["missing"]]
-                + [("⚠", n, msg, "browse-dep-problem") for n, msg in chain["problems"]])
+        # the marks are drawn icons (icons.py) in each row's text color
+        rows = ([("check", n, "already installed", None) for n in chain["satisfied"]]
+                + [("arrow-down", n, "will be downloaded and installed too", "browse-dep-missing") for n in chain["missing"]]
+                + [("warn", n, msg, "browse-dep-problem") for n, msg in chain["problems"]])
+        mark_color = {None: theme.TEXT, "browse-dep-missing": theme.ACCENT, "browse-dep-problem": theme.WARN}
         if not rows:
-            self.deps_label.setText("Requires: nothing else - no dependencies.")
+            self.deps_label.setText("nothing else - no dependencies.")
             return
-        self.deps_label.setText("Requires (installed automatically with this mod):")
+        self.deps_label.setText("installed automatically with this mod")
         for mark, name, text, role in rows:
-            label = QLabel(f"{mark} {name} — {text}")
-            label.setTextFormat(Qt.TextFormat.PlainText)
+            # 3.3: the name mono 12px (in the row's colour), the state --muted
+            label = QLabel(f"{icons.inline(mark, mark_color[role])} "
+                           f'<span style="font-family: {MONO_HTML}; font-size: 12px">{html.escape(name)}</span> '
+                           f'<span style="color: {theme.MUTED}">— {html.escape(text)}</span>')
+            label.setTextFormat(Qt.TextFormat.RichText)
             label.setWordWrap(True)
             if role:
                 label.setProperty("role", role)
@@ -1599,8 +1939,8 @@ class BepInExBrowseWindow(QDialog):
             self.required_layout.addStretch(1)
             return
         for r in rows:
-            row = QFrame()
-            row.setProperty("role", "browse-row")
+            row = _DepRow(r)
+            row.opened.connect(lambda dep: self._open_dependency(dep))
             layout = QHBoxLayout(row)
             layout.setContentsMargins(12, 12, 12, 12)
             layout.setSpacing(14)
@@ -1689,6 +2029,7 @@ class BepInExBrowseWindow(QDialog):
         listing = self._detail_listing
         button = self.detail_install_button
         if listing is None:
+            set_installed_look(button, False)
             self._set_button_text(button, "Install")
             button.setEnabled(False)
             return
@@ -1696,23 +2037,26 @@ class BepInExBrowseWindow(QDialog):
         have = self._installed_version(full)
         latest = self._latest_version()
         idle = self._installing is None and not self._is_busy()
+        installed = False
         if self._installing == full:
             text, enabled = f"{'Updating' if have is not None else 'Installing'} {name}...", False
         elif full == self._framework or (have is not None and (not latest or not ts.is_newer(latest, have))):
             text, enabled = f"{name} is already in {lo}", False
+            installed = True
         elif have is not None:
             text, enabled = f"Update {name} to {latest} in {lo}", idle
         elif self._chain is None:
             text, enabled = install_label(name, 0, lo), False  # until the dependency chain is known
         else:
             text, enabled = install_label(name, len(self._chain["missing"]), lo), idle
-        self._set_button_text(button, text)
+        set_installed_look(button, installed)  # before the fit: the check + bold take room
+        self._set_button_text(button, text, reserve=INSTALLED_ICON_ROOM if installed else 0)
         button.setEnabled(enabled)
 
     @staticmethod
-    def _set_button_text(button: QPushButton, text: str) -> None:
+    def _set_button_text(button: QPushButton, text: str, reserve: int = 0) -> None:
         width = button.width() if button.width() > 50 else RIGHT_COLUMN_WIDTH
-        label, changed = fit_button_text(text, button.fontMetrics(), width - BUTTON_TEXT_PADDING)
+        label, changed = fit_button_text(text, button.fontMetrics(), width - BUTTON_TEXT_PADDING - reserve)
         button.setText(label)
         button.setToolTip(text if changed else "")
 
@@ -1720,9 +2064,23 @@ class BepInExBrowseWindow(QDialog):
     def _show_browse(self) -> None:
         self._detail_gen += 1  # a detail reply arriving now is dropped
         self._detail_listing = None
+        self._history.clear()
         self._switch(0)
         self._apply_install_state()
         self.grid_scroll.setFocus()  # not the search box: Esc closes / Backspace idles from here
+
+    def eventFilter(self, obj, event) -> bool:
+        """The filter strip's focus edge (3.2): lit while the search box or a
+        combo has focus - kept while a combo's own drop-down is open (that
+        focus-out has the Popup reason and the combo gets focus back)."""
+        kind = event.type()
+        if kind in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            if not (kind == QEvent.Type.FocusOut and event.reason() == Qt.FocusReason.PopupFocusReason):
+                on = kind == QEvent.Type.FocusIn
+                if self.filter_strip.property("fieldFocus") != on:
+                    self.filter_strip.setProperty("fieldFocus", on)
+                    _repolish(self.filter_strip)
+        return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:
         """Esc / Backspace: one level back (module docstring)."""
@@ -1730,8 +2088,8 @@ class BepInExBrowseWindow(QDialog):
         on_detail = self.stack.currentIndex() == 1
         if key == Qt.Key.Key_Escape:
             if on_detail:
-                log("browse: Esc -> back to results")
-                self._show_browse()
+                log("browse: Esc -> one level back")
+                self._go_back()
                 event.accept()
                 return
             if self.search.hasFocus() and self.search.text():
@@ -1745,26 +2103,25 @@ class BepInExBrowseWindow(QDialog):
                 super().keyPressEvent(event)  # a text field's own Backspace (it normally never reaches here)
                 return
             if on_detail:
-                log("browse: Backspace -> back to results")
-                self._show_browse()
+                log("browse: Backspace -> one level back")
+                self._go_back()
             event.accept()
             return
         super().keyPressEvent(event)
 
     def _switch(self, index: int) -> None:
-        """Shows a page with a short fade in (SCOPE.md §2: no instant cuts)."""
-        page = self.stack.widget(index)
-        self.stack.setCurrentIndex(index)
-        effect = QGraphicsOpacityEffect(page)
-        effect.setOpacity(0.0)
-        page.setGraphicsEffect(effect)
-        animation = QPropertyAnimation(effect, b"opacity", page)
-        animation.setDuration(FADE_MS)
-        animation.setStartValue(0.0)
-        animation.setEndValue(1.0)
-        animation.finished.connect(lambda: page.setGraphicsEffect(None))
-        animation.start()
-        self._fade = animation  # replaced by the next switch (the page owns it either way)
+        """Shows a page under a MOTION crossfade (SCOPE.md §2: no instant
+        cuts; phase 4 M1 - a snapshot of the page leaving fades out over the
+        page arriving, which gets no effect). Detail -> detail (a Required
+        row, Back to the previous package, Retry: _open_detail while the
+        detail page shows): the page is already refilled, so it fades in from
+        the window's --panel instead; the content then crossfades over
+        "Loading..." when the job lands (_run_detail_job, which ends this
+        fade first - painters.stop_fades)."""
+        if index == self.stack.currentIndex():
+            painters.fade_in(self.stack, theme.PANEL, theme.MOTION)
+            return
+        painters.crossfade(self.stack, lambda: self.stack.setCurrentIndex(index), theme.MOTION)
 
     # ---- lifecycle ----
     def done(self, result: int) -> None:

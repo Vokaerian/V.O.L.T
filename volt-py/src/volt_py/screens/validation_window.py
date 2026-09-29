@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import theme
+from volt_py import painters, theme
 from volt_py.applog import log
 from volt_py.screens.details_panel import DetailsPanel
 
@@ -300,10 +300,11 @@ class ValidationWindow(QDialog):
         detail = QVBoxLayout(inner)
         detail.setContentsMargins(10, 10, 10, 10)
         detail.setSpacing(0)  # .modal p { margin: 0 }
-        self._heading = QLabel()  # h3
+        # h3 as a copper side-rule terminal heading (design step 3.4); a
+        # heading too long for the pane wraps (then without its rule)
+        self._heading = painters.TerminalLabel(rule="heading")
         self._heading.setTextFormat(Qt.TextFormat.PlainText)
         self._heading.setWordWrap(True)
-        self._heading.setProperty("role", "validation-heading")
         self._heading.setContentsMargins(0, 0, 0, 6)  # h3 margin: 0 0 6px
         self._text = _wrapped()
         detail.addWidget(self._heading)

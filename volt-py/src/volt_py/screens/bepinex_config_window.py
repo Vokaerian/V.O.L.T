@@ -761,7 +761,7 @@ class BepInExConfigWindow(QDialog):
         row.setSpacing(6)
         self.search_box = QFrame()
         self.search_box.setObjectName("configSearchBox")
-        self.search_box.setProperty("focus", False)
+        self.search_box.setProperty("fieldFocus", False)  # not "focus": QWidget's read-only Q_PROPERTY (hasFocus) - setProperty on it is a no-op
         inner = QHBoxLayout(self.search_box)
         inner.setContentsMargins(10, 2, 6, 2)
         inner.setSpacing(4)
@@ -884,6 +884,9 @@ class BepInExConfigWindow(QDialog):
             y = widget.mapTo(self.form_scroll.widget(), QPoint(0, 0)).y() - SCROLL_LEAD
             y = max(0, min(y, bar.maximum()))
             self._scroll_anim.stop()
+            if not theme.animations_enabled():  # Settings > Animations: Off = a plain jump
+                bar.setValue(y)
+                return
             self._scroll_anim.setStartValue(bar.value())
             self._scroll_anim.setEndValue(y)
             self._scroll_anim.start()
@@ -926,7 +929,7 @@ class BepInExConfigWindow(QDialog):
                 self._clear_query()  # an empty field leaves Esc to the dialog (Close)
                 return True
             if kind in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
-                self.search_box.setProperty("focus", kind == QEvent.Type.FocusIn)
+                self.search_box.setProperty("fieldFocus", kind == QEvent.Type.FocusIn)
                 _repolish(self.search_box)
         return super().eventFilter(obj, event)
 
@@ -1303,7 +1306,8 @@ class BepInExConfigWindow(QDialog):
         box = QMessageBox(QMessageBox.Icon.Question, "Unsaved changes",
                           f"Discard unsaved changes to {self._current.rel}?", QMessageBox.StandardButton.Cancel, self)
         discard = box.addButton("Discard changes", QMessageBox.ButtonRole.AcceptRole)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(discard)  # Enter confirms (user decision 2026-09-29)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)  # Esc still cancels
         box.exec()
         confirmed = box.clickedButton() is discard
         log(f"edit config: discard prompt for {self._current.rel} -> {'discard' if confirmed else 'cancel'}")
@@ -1358,7 +1362,8 @@ class BepInExConfigWindow(QDialog):
                           "needs it writes a fresh default one the next time the load order runs.",
                           QMessageBox.StandardButton.Cancel, self)
         delete = box.addButton("Delete", QMessageBox.ButtonRole.AcceptRole)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(delete)  # Enter confirms (user decision 2026-09-29)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)  # Esc still cancels
         box.exec()
         if box.clickedButton() is not delete:
             log(f"edit config: delete {f.rel}: cancelled")

@@ -149,7 +149,7 @@ class _Track(QWidget):
             return  # already there, or already heading there
         self._animation.stop()
         self._target = target
-        if not animate:
+        if not animate or not theme.animations_enabled():  # Settings > Animations: Off = the fill jumps
             self._set_fill(target)
             return
         self._animation.setStartValue(self._fill)

@@ -35,9 +35,15 @@ DEFAULTS = {
     "steam_acquire_via": None,
     "skip_sync_confirm": False,  # True once "Don't ask me again" was ticked in Sync to Steam's heads-up dialog
     "share_dir": None,  # folder of the last Import / Export file pick (Thunderstore games' .r2z profiles)
+    # Settings > General > Animations (phase 4): 'windows' = follow Windows'
+    # "Animation effects", 'on' / 'off' override it (theme.animations_enabled).
+    # Per game like every key here (there is no app-wide settings file); a
+    # file from before 0.5.14 has no key and loads as 'windows'.
+    "animations": "windows",
 }
 
 ACQUIRE_VIA = ("steamcmd", "steamworks", "gog")
+ANIMATIONS = ("windows", "on", "off")
 
 
 def effective_acquire_via(stored, game_source) -> str:
@@ -139,6 +145,18 @@ class SettingsStore:
         if via not in ACQUIRE_VIA:
             raise ValueError(f"Unknown download method: {via}")
         return self.update({"steam_acquire_via": via})["steam_acquire_via"]
+
+    def set_animations(self, mode: str) -> str:
+        """Settings > General > Animations. Returns the stored value."""
+        if mode not in ANIMATIONS:
+            raise ValueError(f"Unknown animation mode: {mode}")
+        return self.update({"animations": mode})["animations"]
+
+
+def effective_animations(stored) -> str:
+    """The animation mode in effect: the stored one, 'windows' for a missing
+    or hand-edited value."""
+    return stored if stored in ANIMATIONS else "windows"
 
 
 def _rule_mod(mod) -> str:

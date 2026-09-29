@@ -447,6 +447,36 @@ def dump_manifest(doc: dict) -> str:
     return _yaml().safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
 
 
+def dependency_strings(manifest: dict, active) -> dict:
+    """Export... > Dependency strings... (THUNDERSTORE.md §8d): one
+    `"Team-Package-Version",` line per mod a modpack's manifest.json
+    `dependencies` array would list - the pinned framework first, then each
+    Active mod that is switched on, in `active`'s order (save_load_order's
+    argument shape: the screen's on-screen list, unsaved edits included).
+    Switched-off Active mods and the Inactive list are left out, and so is
+    a local import (online_source: false - no Thunderstore identity to
+    depend on) or an entry without a major.minor.patch version, counted
+    instead. Returns {"lines", "local", "invalid"}."""
+    have = lo.installed(manifest)
+    fw = manifest.get("framework")
+    picked = [fw] if fw else []
+    for item in active:
+        name, enabled = (item.get("full_name"), item.get("enabled", True)) if isinstance(item, dict) else (item, True)
+        if enabled and name in have and have[name] is not fw:
+            picked.append(have[name])
+    lines, local, invalid = [], 0, 0
+    for e in picked:
+        if not e.get("online_source", True):
+            local += 1
+            continue
+        try:
+            lines.append(f'"{ts.PackageRef(e["namespace"], e["name"], e["version"]).key}",')
+        except ValueError:
+            log(f"[share] dependency strings: {e['full_name']} has no usable version ({e.get('version')!r}); left out")
+            invalid += 1
+    return {"lines": lines, "local": local, "invalid": invalid}
+
+
 def build_profile_zip(app_root, slug, game: lo.ThunderstoreGame, out, *, active=None, inactive=None, app_version=None) -> dict:
     """Writes the load order's .r2z into `out` (a path or a binary file
     object). Returns {"mods", "files", "config_files"}. ValueError /

@@ -88,7 +88,8 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "name": "Undo (↺)",
         "short": "Undoes your last change to the Active list.",
         "long": (
-            "The ↺ button only shows while there are unsaved changes. Each click steps back one change: a "
+            "The ↺ button only shows while there are unsaved changes; Ctrl+Z does the same as clicking it, "
+            "except in a text box, where it undoes your typing. Each click steps back one change: a "
             "drag, a mod moved in or out, a Sort, and so on. There's no redo, and changes to the Inactive list "
             "alone aren't tracked. Saving clears the undo history."
         ),

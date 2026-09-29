@@ -3,11 +3,13 @@
 import sys
 from importlib.metadata import version
 
-from PySide6.QtCore import QSettings, QTimer
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import QRectF, QSettings, QTimer
+from PySide6.QtGui import QPainter, QResizeEvent
 from PySide6.QtWidgets import QMainWindow
 
+from volt_py import theme
 from volt_py.app_root import resolve_base_root
+from volt_py.painters import crossfade, paint_dots
 from volt_py.screens.game_select import GameSelectScreen
 from volt_py.screens.rimworld_main_screen import RimWorldMainScreen
 from volt_py.screens.valheim_main_screen import ValheimMainScreen
@@ -71,10 +73,29 @@ class MainWindow(QMainWindow):
         # starts its log. setCentralWidget hides the game-select screen and
         # deleteLater()s it, so this is safe to run from the tile's own
         # click/key handler. RimWorld's and Valheim's tiles are enabled today.
+        # The screen is built first (its synchronous scan, and its Settings >
+        # Animations mode applied), then swapped in under a MOTION_SCREEN
+        # crossfade of the game-select snapshot (painters.crossfade: phase 4
+        # M1; the new screen and its mod lists are live at once, no effect).
         if slug == "rimworld":
-            self.setCentralWidget(RimWorldMainScreen())
+            screen = RimWorldMainScreen()
         elif slug == "valheim":
-            self.setCentralWidget(ValheimMainScreen())
+            screen = ValheimMainScreen()
+        else:
+            return
+        old = self.centralWidget()
+        area = old.geometry() if old is not None else None
+        crossfade(self, lambda: self.setCentralWidget(screen), theme.MOTION_SCREEN, area)
+
+    def paintEvent(self, event) -> None:
+        # The Circuit dot grid over the window's --bg (the QSS fills the --bg
+        # first): one cached device-pixel tile, tiled over the dirty rect
+        # (painters.paint_dots). The screens are transparent, their panels
+        # opaque - so it shows around and between them.
+        super().paintEvent(event)
+        painter = QPainter(self)
+        paint_dots(painter, QRectF(event.rect()))
+        painter.end()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

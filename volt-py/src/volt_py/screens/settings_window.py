@@ -4,12 +4,18 @@
 - General: the game / local mods / config folder paths (the game folder's
   storefront tag; Browse... for the game and config folders - local mods is
   always <game folder>/Mods, so it has none), then Autodetect paths.
-- Steam: "Download mods via:" - the three exclusive mod-acquisition modes
+- Steam: "Download via" - the three exclusive mod-acquisition modes
   (settings steam_acquire_via; unset = auto: 'gog' for a GOG install, else
   'steamcmd' - settings.effective_acquire_via), then Check for missing
   Workshop mods.
 - Troubleshooting: Open log file (<app_root>/volt.log, applog.py) and Open
   previous log file (volt.log.prev, disabled when there isn't one).
+
+General also ends with ANIMATIONS (phase 4, animations_row, shared with the
+Thunderstore games' window): Windows (default: follow Windows' "Animation
+effects") / On / Off, saved at once (settings.json "animations", this game's)
+and applied app-wide (theme.set_animation_mode); the tabs themselves slide
+their underline and crossfade their pages (painters.animate_tabs).
 
 Opened from the paths bar's Settings button (RimWorldMainScreen._show_settings).
 Browse / Autodetect are the screen's own (on_browse / on_autodetect: they
@@ -20,7 +26,9 @@ directly (SettingsStore.set_steam_acquire_via), as the Rules window saves its
 own edits.
 
 Tabs: a plain QTabWidget styled by theme.py (QDialog#settings), in place of
-the Electron window's row of tab buttons over a panel.
+the Electron window's row of tab buttons over a panel - since design step 3.4
+the Browse Mods detail's underline tabs (underline_tabs paints the rule past
+the last tab), and the path / option labels are copper terminal keys (_key).
 
 Check for missing Workshop mods calls the screen's handler (on_check_missing:
 RimWorldMainScreen._check_missing_workshop): every not-found Workshop row of
@@ -36,8 +44,10 @@ is no log file, so both log buttons are disabled.
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -49,10 +59,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import paths
+from volt_py import painters, paths, theme
 from volt_py.applog import log
 from volt_py.screens.flow_layout import FlowLayout
-from volt_py.settings import ACQUIRE_VIA, SettingsStore, effective_acquire_via
+from volt_py.settings import ACQUIRE_VIA, ANIMATIONS, SettingsStore, effective_acquire_via, effective_animations
 
 SOURCE_LABEL = {"steam": "Steam", "gog": "GOG", "manual": "Manual"}
 # SettingsWindow.jsx ACQUIRE_OPTIONS: (mode, label, tooltip), verbatim.
@@ -82,11 +92,18 @@ CHECK_MISSING_TOOLTIP = (
     "Download every mod in the active list that isn't found on disk but has a Workshop id, via the method chosen above"
 )
 NO_LOG_TOOLTIP = "No log file: logging is only on in development builds."
+# General > Animations: (mode, label, tooltip); modes = settings.ANIMATIONS.
+ANIMATION_OPTIONS = (
+    ("windows", "Windows", "Follow Windows' own \"Animation effects\" setting (Settings > Accessibility > Visual effects)"),
+    ("on", "On", "Always animate screen, page and tab changes"),
+    ("off", "Off", "No animations: every change is instant"),
+)
+assert tuple(mode for mode, _, _ in ANIMATION_OPTIONS) == ANIMATIONS
 NO_PREV_LOG_TOOLTIP = "No previous log yet (created on the next launch)"
 
 # .modal.settings-window: 900 x 600, at most the viewport minus 32px.
 WINDOW_SIZE = (900, 600)
-PATH_LABEL_WIDTH = 100  # .path-label: width 100px
+PATH_LABEL_WIDTH = 118  # .path-label (step 3.4: 118px, the mockup's key column - CONFIG FOLDER in copper caps is ~106px)
 GAP = 8  # .path-row / .button-row / .settings-panel gap
 
 
@@ -108,6 +125,78 @@ def _muted(text: str) -> QLabel:
     label = QLabel(text)
     label.setProperty("muted", True)
     return label
+
+
+def _key(text: str) -> QLabel:
+    """A path / option label as a copper terminal key (step 3.4): the details
+    readout's key (theme.py QLabel[role="details-key"]: mono 11px 600
+    copper, 6.1:1 on the --panel-2 page) with its caps + spacing font."""
+    label = QLabel(text)
+    label.setProperty("role", "details-key")
+    label.setFont(painters.terminal_font(painters.TERMINAL_KEY_PX, painters.TERMINAL_KEY_SPACING))
+    return label
+
+
+class _TabRule(QObject):
+    """underline_tabs' filter (the QTabWidget's Paint events): the 1px
+    --border rule across the tab row, at the height of the tabs' own bottom
+    edges (the tab's rect less its SETTINGS_TABS_GAP bottom margin), drawn
+    before the tab bar paints over it - so it runs on past the last tab,
+    under the selected tab's 2px --accent underline. Logical px, like the
+    QSS edges it continues."""
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.Paint:
+            bar = obj.tabBar()
+            if bar.count():
+                tab = bar.tabRect(0)
+                y = bar.y() + tab.y() + tab.height() - theme.SETTINGS_TABS_GAP - 1
+                painter = QPainter(obj)
+                painter.fillRect(QRectF(0, y, obj.width(), 1), QColor(theme.BORDER))
+                painter.end()
+        return False
+
+
+def underline_tabs(tabs: QTabWidget) -> None:
+    """Settings' tab row as the 3.3 underline tabs (theme.py QTabWidget#settingsTabs),
+    with the phase-4 motion: the sliding underline + page crossfade
+    (painters.animate_tabs; call before adding the tabs)."""
+    tabs.installEventFilter(_TabRule(tabs))
+    painters.animate_tabs(tabs)
+
+
+def animations_row(settings: SettingsStore, parent: QWidget) -> QHBoxLayout:
+    """General's ANIMATIONS row (both Settings windows): the copper key in the
+    path key column, then Windows / On / Off (the stored mode checked); a
+    click saves it (settings.set_animations) and applies it app-wide at once
+    (theme.set_animation_mode). A failed save warns via log only - the choice
+    still applies for this run."""
+    row = QHBoxLayout()
+    row.setSpacing(GAP)
+    name = _key("Animations")
+    name.setFixedWidth(PATH_LABEL_WIDTH)
+    row.addWidget(name)
+    group = QButtonGroup(parent)  # exclusive, whatever other radios share the page
+    current = effective_animations(settings.get().get("animations"))
+    for mode, label, hint in ANIMATION_OPTIONS:
+        radio = QRadioButton(label)
+        radio.setToolTip(hint)
+        radio.setChecked(mode == current)
+        radio.toggled.connect(lambda checked, mode=mode: checked and _set_animations(settings, mode))
+        group.addButton(radio)
+        row.addWidget(radio)
+    row.addStretch(1)
+    return row
+
+
+def _set_animations(settings: SettingsStore, mode: str) -> None:
+    theme.set_animation_mode(mode)
+    try:
+        settings.set_animations(mode)
+    except (OSError, ValueError) as err:
+        log(f"settings: animations {mode} FAILED to save: {err!r}")
+        return
+    log(f"settings: animations set to {mode}")
 
 
 def _button_row(*buttons: QPushButton) -> QHBoxLayout:
@@ -213,6 +302,7 @@ class SettingsWindow(QDialog):
         self.tabs.setObjectName("settingsTabs")
         self.tabs.tabBar().setDrawBase(False)  # no base line under the tabs: they sit apart from the panel
         self.tabs.tabBar().setExpanding(False)
+        underline_tabs(self.tabs)
         self.tabs.addTab(self._build_general(), "General")
         self.tabs.addTab(self._build_steam(), "Steam")
         self.tabs.addTab(self._build_troubleshooting(), "Troubleshooting")
@@ -246,7 +336,7 @@ class SettingsWindow(QDialog):
         ):
             row = QHBoxLayout()  # .path-row
             row.setSpacing(GAP)
-            name = _muted(label)  # .path-label
+            name = _key(label)  # .path-label: a copper terminal key (step 3.4)
             name.setFixedWidth(PATH_LABEL_WIDTH)
             row.addWidget(name)
             row.addWidget(value, 1)
@@ -255,6 +345,7 @@ class SettingsWindow(QDialog):
             layout.addLayout(row)
         self.autodetect_button = _button("Autodetect paths")
         layout.addLayout(_button_row(self.autodetect_button))
+        layout.addLayout(animations_row(self._settings, page))
         layout.addStretch(1)
 
         self.game_browse.clicked.connect(lambda: self._browse("game"))
@@ -267,7 +358,7 @@ class SettingsWindow(QDialog):
         # The radio row wraps (flex-wrap in the .jsx): three options plus the
         # GOG note can outgrow the window's width.
         flow = FlowLayout(horizontal_spacing=GAP, vertical_spacing=GAP, center_rows=False)
-        flow.addWidget(_muted("Download mods via:"))
+        flow.addWidget(_key("Download via"))  # a copper terminal key (step 3.4; was "Download mods via:")
         # Siblings under one parent: Qt keeps them mutually exclusive (autoExclusive).
         self.acquire_radios: dict[str, QRadioButton] = {}
         for mode, label, hint in ACQUIRE_OPTIONS:

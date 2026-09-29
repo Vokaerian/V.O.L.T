@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import bepinex_load_orders as lo
+from volt_py import bepinex_load_orders as lo, painters
 from volt_py.applog import log
 
 WINDOW_SIZE = (900, 600)  # the Warnings and errors / Scan issues window
@@ -198,10 +198,11 @@ class BepInExIssuesWindow(QDialog):
         detail = QVBoxLayout(inner)
         detail.setContentsMargins(10, 10, 10, 10)
         detail.setSpacing(8)
-        self._heading = QLabel()
+        # a copper side-rule terminal heading (design step 3.4); wraps (without
+        # its rule) if ever too long for the pane
+        self._heading = painters.TerminalLabel(rule="heading")
         self._heading.setTextFormat(Qt.TextFormat.PlainText)
         self._heading.setWordWrap(True)
-        self._heading.setProperty("role", "validation-heading")
         self._text = _wrapped()
         self._package = _wrapped(role="scan-mono")  # the dependency's full_name, mono
         self.install_button = QPushButton("Install")

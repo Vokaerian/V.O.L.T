@@ -98,7 +98,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtCore import QByteArray, QItemSelectionModel, QObject, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -115,15 +115,17 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from volt_py import (
-    community_rules, download_state, load_orders, mod_decorations, mod_list_io, mods, mods_config, paths, sort,
-    steam_client, steam_cmd, steam_ops, steam_web_api, theme, validation,
+    community_rules, download_state, icons, load_orders, mod_decorations, mod_list_io, mods, mods_config, painters,
+    paths, sort, steam_client, steam_cmd, steam_ops, steam_web_api, theme, validation,
 )
 from volt_py.app_root import GAME_SLUG, resolve_app_root
 from volt_py.applog import clip, init_log, log
@@ -246,12 +248,13 @@ def _panel() -> QFrame:
 
 
 def _issue_count_html(warnings: int, errors: int) -> str:
-    """ActionsColumn.jsx's issue-count label: ⚠︎ N · ✕ M, the icons in --warn /
-    --danger, the dot --muted."""
+    """ActionsColumn.jsx's issue-count label: [warn] N · [x] M, the drawn
+    icons (icons.py; were the ⚠︎ / ✕ glyphs, which Windows drew as a color
+    emoji) in --warn / --danger, the dot --muted."""
     return (
-        f'<span style="color:{theme.WARN}">⚠︎</span> {warnings} '
+        f'{icons.inline("warn", theme.WARN)} {warnings} '
         f'<span style="color:{theme.MUTED}">·</span> '
-        f'<span style="color:{theme.DANGER}">✕</span> {errors}'
+        f'{icons.inline("x", theme.DANGER)} {errors}'
     )
 
 
@@ -614,6 +617,9 @@ class RimWorldMainScreen(QWidget):
         self._community_rules_thread.start()
         log(f"community rules: background lookup started (thread {self._community_rules_thread.name})")
         self._settings = SettingsStore()
+        # Settings > General > Animations, app-wide from here on (phase 4)
+        theme.set_animation_mode(self._settings.get()["animations"])
+        log(f"animations: {self._settings.get()['animations']}")
         self.current_load_order: str | None = None  # slug
         # App.jsx baselineActive/history: dirty = Active ids != baseline (order
         # matters); _history = pre-change Active snapshots, most recent last.
@@ -976,6 +982,7 @@ class RimWorldMainScreen(QWidget):
         for signal in (active_model.rowsInserted, active_model.rowsRemoved, active_model.rowsMoved):
             signal.connect(lambda *_: self._apply_load_order_state())
         self.undo_button.clicked.connect(lambda: self._undo())
+        QShortcut(QKeySequence(QKeySequence.StandardKey.Undo), self).activated.connect(lambda: self._undo_shortcut())
         # One selection across both panes (App.jsx keeps a single selected id).
         self.inactive_list.selectionModel().selectionChanged.connect(
             lambda *_: self._on_selection_changed(self.inactive_list, self.active_list)
@@ -1050,11 +1057,12 @@ class RimWorldMainScreen(QWidget):
         notice.raise_()
 
     def _confirm(self, title: str, message: str, *, confirm_label: str) -> bool:
-        """A question box with `confirm_label` / Cancel (Cancel is the default
-        and Esc), logged like _warn. True if confirmed."""
+        """A question box with `confirm_label` / Cancel (the confirm button is
+        the default, Esc = Cancel), logged like _warn. True if confirmed."""
         box = QMessageBox(QMessageBox.Icon.Question, title, message, QMessageBox.StandardButton.Cancel, self)
         confirm = box.addButton(confirm_label, QMessageBox.ButtonRole.AcceptRole)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(confirm)  # Enter confirms (user decision 2026-09-29)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)  # Esc still cancels
         box.exec()
         confirmed = box.clickedButton() is confirm
         log(f"confirm shown: {title}: {message} -> {confirm_label if confirmed else 'Cancel'}")
@@ -1063,7 +1071,7 @@ class RimWorldMainScreen(QWidget):
     def _confirm_sync(self) -> bool:
         """Sync to Steam's heads-up before a real sync starts (never for a
         refused / nothing-to-sync click): what to expect, a "Don't ask me
-        again" checkbox, Cancel (the default, and Esc) / Sync. True if Sync
+        again" checkbox, Cancel (Esc) / Sync (the default). True if Sync
         was clicked; Sync with the box ticked stores skip_sync_confirm, so
         _sync_to_steam skips this from then on. Cancel stores nothing, ticked
         or not. Logged like _confirm."""
@@ -1089,11 +1097,11 @@ class RimWorldMainScreen(QWidget):
         buttons.setSpacing(8)
         buttons.addStretch(1)
         cancel = QPushButton("Cancel")
-        cancel.setDefault(True)  # Enter = Cancel, like _confirm; Esc rejects (QDialog default)
         cancel.clicked.connect(dialog.reject)
         buttons.addWidget(cancel)
         sync = QPushButton("Sync")
         sync.setProperty("variant", "primary")
+        sync.setDefault(True)  # Enter = Sync, like _confirm; Esc rejects (QDialog default)
         sync.clicked.connect(dialog.accept)
         buttons.addWidget(sync)
         layout.addLayout(buttons)
@@ -1207,6 +1215,21 @@ class RimWorldMainScreen(QWidget):
         )
         self._show_details(None)
         self._highlight_dependencies(None)
+
+    def _undo_shortcut(self) -> None:
+        """Ctrl+Z: exactly the undo button's click, and only while it could be
+        clicked - shown (this screen showing, something to undo) and enabled
+        (not busy). A focused text field keeps its own Ctrl+Z (Qt hands it
+        the key first - ShortcutOverride - and this check covers the rest),
+        and a list drag under way ignores it (the button can't be clicked
+        mid-drag either)."""
+        button = self.undo_button
+        if (not button.isVisible() or not button.isEnabled()
+                or isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QPlainTextEdit))
+                or self.active_list._drag_state is not None or self.inactive_list._drag_state is not None):
+            return
+        log("undo: Ctrl+Z")
+        button.click()
 
     def _undo(self) -> None:
         """Restores the most recent pre-change Active list. Not itself undoable; no redo."""
@@ -2770,6 +2793,7 @@ class RimWorldMainScreen(QWidget):
         self.storefront_tag.setProperty("role", "tag")
         row.addWidget(self.storefront_tag)
         self.version_label = _label(f"V. O. L. T. v{version('volt-py')}", muted=True)
+        self.version_label.setProperty("role", "wordmark")  # theme.py: the Circuit wordmark
         row.addWidget(self.version_label)
         row.addStretch(1)
         self.help_button = _button("Help")  # far right: the Help window (_show_help)
@@ -2805,7 +2829,7 @@ class RimWorldMainScreen(QWidget):
         self.undo_button = _button("↺")  # ↺
         self.undo_button.setObjectName("undoButton")
         self.undo_button.setFixedSize(24, 24)
-        self.undo_button.setToolTip("Undo the most recent change to the active list")
+        self.undo_button.setToolTip("Undo the most recent change to the active list (Ctrl+Z)")
         self.undo_button.setVisible(False)
         row.addWidget(self.undo_button)
 
@@ -2848,7 +2872,14 @@ class RimWorldMainScreen(QWidget):
         self._no_game = self._build_no_game_message()
         row.addWidget(self._no_game, 1)
 
-        row.addWidget(self._build_actions_column())
+        actions = self._build_actions_column()
+        row.addWidget(actions)
+        # Circuit panel shadows (painters.py: a cached 9-slice this screen
+        # paints behind the four panels; the lists themselves are untouched)
+        # and the dot grid inside the empty details pane.
+        painters.install_shadows(self, (self.details_panel, self.inactive_list, self.active_list, actions))
+        panel = self.details_panel
+        painters.install_empty_grid(panel, lambda: panel.details_empty.isVisibleTo(panel), over_default=True)
         return row
 
     # .center-message (App.jsx no-game branch). The text's first sentence
@@ -3032,8 +3063,7 @@ class RimWorldMainScreen(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        title_label = QLabel(title)
-        title_label.setProperty("role", "pane-title")
+        title_label = painters.TerminalLabel(title)  # a Circuit terminal label (role pane-title)
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
 
@@ -3103,6 +3133,8 @@ class RimWorldMainScreen(QWidget):
         mod_list.setEnabled(False)
         mod_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         mod_list.customContextMenuRequested.connect(lambda pos: self._show_mod_menu(mod_list, search, pos))
+        # the dot grid inside the list while it shows no rows (painters.py)
+        painters.install_empty_grid(mod_list.viewport(), lambda: painters.list_is_empty(mod_list))
         # .list-empty (absolute, inset 12px, centered, --muted) over the list:
         # both in one grid cell, the label on top and click-through.
         list_cell = QGridLayout()
@@ -3223,6 +3255,9 @@ class RimWorldMainScreen(QWidget):
         row = QHBoxLayout(footer)
         row.setContentsMargins(BAR_SIDE, 4, BAR_SIDE, 14)  # .statusbar padding: 4px 12px 14px
         row.setSpacing(0)  # no gap: .dl-bar brings its own margin-left
+        prompt = QLabel(">")  # the copper terminal prompt (design step 3.4)
+        prompt.setProperty("role", "status-prompt")
+        row.addWidget(prompt)
         self.status_text = _StatusText()
         row.addWidget(self.status_text, 1)
         self.download_bar = DownloadBar()

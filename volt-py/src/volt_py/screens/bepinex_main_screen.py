@@ -62,6 +62,9 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     list, the panes refreshed), and the window stays open for the next
     one. "Add mod..." (a Team-Package name or a thunderstore.io package
     URL) stays as the power-user shortcut (user decision 2026-09-28).
+  - Enable all / Disable all (THUNDERSTORE.md §8a): two links under
+    Export... that set every Active mod's toggle at once (never the
+    framework's, never list membership) - one unsaved edit, one undo step.
   - Import... / Export... (stage 3e; volt_py/bepinex_share.py): the
     load order as an r2modman / Thunderstore Mod Manager `.r2z` profile
     file, so VOLT and TMM users can swap load orders. Both buttons open the
@@ -84,6 +87,17 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     for the code (whitespace / a pasted URL tolerated, validated before
     any request), downloads it as a job into <APP-ROOT>/cache/profiles/,
     then runs the file import unchanged (name prompt, job, summary).
+    "Local mod (.zip)..." (THUNDERSTORE.md §8b) is the menu's odd one out:
+    one mod from a Thunderstore-shaped zip on disk into the OPEN load
+    order (screens/bepinex_local_import_dialog.py picks + validates it,
+    bepinex_load_orders.import_local_mod installs it) - _install_package's
+    job and refresh, so it lands in Active like a download, never an
+    unsaved change; recorded online_source: false (no update check).
+    "Dependency strings..." (THUNDERSTORE.md §8d) is read-only: the
+    framework + every switched-on Active mod (on-screen, unsaved edits
+    included) as `"Team-Package-Version",` lines for a modpack's
+    manifest.json, in the code dialog's shape (read-only box, Copy, Close;
+    bepinex_share.dependency_strings; local imports left out, counted).
   - Modded (stage 3c; volt_py/bepinex_launch.py has the mechanism; the
     button was "Run" until v0.4.27 - the method is still _run, the log
     prefix still `run:`): the open load order's Doorstop loader files are
@@ -136,13 +150,13 @@ from importlib.metadata import version
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -151,14 +165,17 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, bepinex_share as share, paths, theme, thunderstore as ts
+from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, bepinex_share as share, icons, painters, paths, theme
+from volt_py import thunderstore as ts
 from volt_py.app_root import resolve_app_root
 from volt_py.applog import clip, init_log, log
 from volt_py.bepinex_install import BEPINEX_DIR, PackageError
@@ -167,7 +184,9 @@ from volt_py.paths import norm
 from volt_py.screens.bepinex_browse_window import DEPRECATED_BANNER, BepInExBrowseWindow
 from volt_py.screens.bepinex_config_window import BepInExConfigWindow
 from volt_py.screens.bepinex_issues_window import BepInExIssuesWindow
+from volt_py.screens.bepinex_local_import_dialog import LocalModDialog
 from volt_py.screens.bepinex_mod_list import BepInExModListView, RowInfo
+from volt_py.screens.details_panel import details_key
 from volt_py.screens.bepinex_settings_window import BepInExSettingsWindow
 from volt_py.screens.help_window import HelpWindow
 from volt_py.screens.rimworld_main_screen import (
@@ -197,6 +216,11 @@ EXPORT_TOOLTIP = (
     "Save the open load order as a .r2z profile file - its mod list (with versions and on/off state) and its "
     "BepInEx config files, no mod files - readable by VOLT and by r2modman / Thunderstore Mod Manager."
 )
+ENABLE_ALL_TOOLTIP = "Switch every mod in the Active list on (an unsaved change, like a single toggle - Save applies it)."
+DISABLE_ALL_TOOLTIP = (
+    "Switch every mod in the Active list off, except the framework (an unsaved change, like a single toggle - "
+    "Save applies it). The mods stay in the Active list."
+)
 IMPORT_CODE_TOOLTIP = (
     "Import a load order from a profile code (r2modman / Thunderstore Mod Manager's or VOLT's): the profile is "
     "downloaded from Thunderstore and imported as a new load order, exactly like a file."
@@ -215,7 +239,15 @@ IMPORT_CODE_PROMPT = (
     "Paste the profile code - from VOLT, r2modman or Thunderstore Mod Manager (their \"Export as code\"). "
     "The profile is downloaded from Thunderstore and becomes a new load order.\n\nCode:"
 )
+DEP_STRINGS_TOOLTIP = (
+    "List the open load order's mods as Thunderstore dependency strings (\"Team-Package-Version\") to copy into a "
+    "modpack's manifest.json - the framework and every switched-on Active mod, as shown on screen."
+)
 SHARE_FILTER = "Load order profiles (*.r2z);;All files (*)"
+IMPORT_LOCAL_TOOLTIP = (
+    "Install one mod from a Thunderstore package zip on this computer into the open load order - for a mod "
+    "that isn't (or is no longer) on Thunderstore. It's never checked for updates."
+)
 BROWSE_TOOLTIP = "Browse Thunderstore's {game} mods and install them into the open load order."
 # The two launch buttons' tooltips ({game} = the game module's NAME).
 MODDED_TOOLTIP = "Launch {game} with this load order's mods (BepInEx)."
@@ -238,25 +270,25 @@ def _play_polygon(size: float) -> QPolygonF:
 
 
 @functools.cache
-def _play_icon() -> QIcon:
+def _play_icon(color: str = theme.TEXT, disabled: str = theme.MUTED) -> QIcon:
     """The play triangle on the Modded / Vanilla buttons, drawn by Qt itself
-    (no asset): theme.TEXT for QIcon.Mode.Normal and the same at half
-    alpha for QIcon.Mode.Disabled, so it dims exactly like the disabled
-    button text (theme.py's QPushButton:disabled uses _half(TEXT)); Qt
-    picks the Disabled pixmap itself whenever the button is disabled.
-    Rendered at 2x (as _eye_icon), shown at PLAY_ICON_PX. Cached: one
-    icon, shared by both buttons."""
+    (no asset), in the button's own label colors so it matches the text:
+    `color` for QIcon.Mode.Normal, `disabled` for QIcon.Mode.Disabled (Qt
+    picks that pixmap itself whenever the button is disabled). The defaults
+    are the plain / vanilla button's (theme.py: --text, --muted when
+    disabled); Modded, a primary, passes theme.INK / theme.DISABLED_FILL_TEXT.
+    Rendered at 2x (as _eye_icon), shown at PLAY_ICON_PX. Cached per color
+    pair."""
     icon = QIcon()
     size = PLAY_ICON_PX * 2
-    for mode, alpha in ((QIcon.Mode.Normal, 1.0), (QIcon.Mode.Disabled, 0.5)):
-        color = QColor(theme.TEXT)
-        color.setAlphaF(alpha)
+    for mode, value in ((QIcon.Mode.Normal, color), (QIcon.Mode.Disabled, disabled)):
+        color_ = QColor(value)
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color)
+        painter.setBrush(color_)
         painter.drawPolygon(_play_polygon(size))
         painter.end()
         icon.addPixmap(pixmap, mode)
@@ -344,6 +376,13 @@ def _details_text(rich: bool = False) -> QLabel:
     return label
 
 
+# The ascent difference alone left the keys 6 device px (~5 px) above their
+# values' baseline at 125% on hardware (0.5.9): the selectable value labels
+# lay their text out lower than a plain label does. Measured correction;
+# re-check on a second DPR (step 3.1 amendment).
+_KEY_BASELINE_NUDGE = 5
+
+
 class ThunderstoreDetailsPanel(QFrame):
     """The mockup's .details: a deprecated package's warn banner (the Browse
     Mods page's, DEPRECATED_BANNER) at the top, the package icon
@@ -351,7 +390,14 @@ class ThunderstoreDetailsPanel(QFrame):
     (2.31.0 available)" in --warn when newer) / Last updated / Website (a
     link) and the description. details_panel.py's DetailsPanel is
     RimWorld-shaped (authors, path, package id, About/Preview.png), so this
-    is its own class with the same frame and layout."""
+    is its own class with the same frame and layout.
+
+    Step 3.1 (DESIGN.md §15, v0.5.9) makes it a Circuit readout, same
+    widgets in the same order: the icon on a framed mat
+    (painters.ThumbFrame), copper terminal keys with a 1px rule between the
+    rows (a grid, so key and value cells share each row's height and the
+    rule runs unbroken), and the description in a recessed well that takes
+    the pane's leftover height."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -374,27 +420,58 @@ class ThunderstoreDetailsPanel(QFrame):
         self.details_deprecated.setWordWrap(True)
         self.details_deprecated.setVisible(False)
         body_layout.addWidget(self.details_deprecated)
-        self.details_icon = QLabel()
-        self.details_icon.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        body_layout.addWidget(self.details_icon)
+        self.details_icon = painters.ThumbFrame()  # the icon on its framed mat (step 3.1)
+        self.details_icon.setVisible(False)
+        body_layout.addWidget(self.details_icon, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        form = QFormLayout()  # .details-grid
-        form.setHorizontalSpacing(10)
-        form.setVerticalSpacing(4)
+        form = QGridLayout()  # .details-grid, as a readout: rows between rules, no gaps
+        form.setHorizontalSpacing(0)
+        form.setVerticalSpacing(0)
+        form.setColumnStretch(1, 1)
+        # the mockup's key column: 2px row padding + a 106px key (.dkey), so
+        # the values line up at 108px whatever the widest key measures
+        form.setColumnMinimumWidth(0, 108)
         self.details_fields: dict[str, QLabel] = {}
-        for key, title, rich in (
+        keys: list[QLabel] = []
+        for row, (key, title, rich) in enumerate((
             ("name", "Name", False),
             ("author", "Author", False),
             ("version", "Version", True),
             ("updated", "Last updated", False),
             ("website", "Website", True),
-        ):
+        )):
+            label = details_key(title)
+            label.setProperty("readout", True)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             value = self.details_fields[key] = _details_text(rich)
-            form.addRow(_label(title, muted=True), value)
+            value.setProperty("role", "details-value")
+            value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            for cell in (label, value):
+                cell.setProperty("first", row == 0)
+            form.addWidget(label, row, 0)
+            form.addWidget(value, row, 1)
+            keys.append(label)
         body_layout.addLayout(form)
+        # Baseline-align each key with its value's first line: the mono key
+        # has a smaller ascent than the 13px value (the rules stay aligned -
+        # this only pads the key's text down inside its cell).
+        first_value = self.details_fields["name"]
+        first_value.ensurePolished()
+        for label in keys:
+            label.ensurePolished()
+            drop = first_value.fontMetrics().ascent() - label.fontMetrics().ascent()
+            label.setContentsMargins(0, max(0, drop) + _KEY_BASELINE_NUDGE, 0, 0)
 
+        # the description's recessed well (theme.py QFrame#detailsWell): the
+        # scroll area inside the 1px border, the 7px top shade strip over it
         self.details_description = _details_text()
+        self.details_description.setObjectName("detailsWellText")
         self.details_description.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        well = QFrame()
+        well.setObjectName("detailsWell")
+        well_layout = QGridLayout(well)
+        well_layout.setContentsMargins(1, 1, 1, 1)
+        well_layout.setSpacing(0)
         scroll = QScrollArea()
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
@@ -402,7 +479,14 @@ class ThunderstoreDetailsPanel(QFrame):
         scroll.setWidget(self.details_description)
         scroll.viewport().setAutoFillBackground(False)
         self.details_description.setAutoFillBackground(False)
-        body_layout.addWidget(scroll, 1)
+        well_layout.addWidget(scroll, 0, 0)
+        shade = QWidget()
+        shade.setObjectName("detailsWellShade")
+        shade.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        shade.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        shade.setFixedHeight(7)
+        well_layout.addWidget(shade, 0, 0, Qt.AlignmentFlag.AlignTop)
+        body_layout.addWidget(well, 1)
         layout.addWidget(body, 1)
         self._icon_source = None
 
@@ -442,14 +526,11 @@ class ThunderstoreDetailsPanel(QFrame):
         if pixmap is None or pixmap.isNull():
             self.details_icon.setVisible(False)
             return
-        from PySide6.QtCore import QSize
-
         # A 256x256 Thunderstore icon: at most 35% of the panel's height, as
-        # DetailsPanel's preview (.details-preview max-height: 35%).
-        box = QSize(self.width() - 20, int(self.height() * 0.35))
-        if pixmap.width() > box.width() or pixmap.height() > box.height():
-            pixmap = pixmap.scaled(box, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        self.details_icon.setPixmap(pixmap)
+        # DetailsPanel's preview (.details-preview max-height: 35%) - the
+        # frame's mat / margins included; ThumbFrame shrinks, never grows.
+        chrome_w, chrome_h = painters.thumb_chrome()
+        self.details_icon.set_image(pixmap, self.width() - 20 - chrome_w, int(self.height() * 0.35) - chrome_h)
         self.details_icon.setVisible(True)
 
     def resizeEvent(self, event) -> None:
@@ -538,6 +619,9 @@ class BepInExMainScreen(QWidget):
         self._log_path: Path | None = init_log(self.app_root)
         log(f"app root: {self.app_root} ({self.game_name})")
         self._settings = SettingsStore(self.app_root)
+        # Settings > General > Animations, app-wide from here on (phase 4)
+        theme.set_animation_mode(self._settings.get()["animations"])
+        log(f"animations: {self._settings.get()['animations']}")
         self._meta: dict[str, dict] = ts.read_meta_cache(self.app_root)
         log(f"package metadata cache: {len(self._meta)} packages")
         self._connect_signals()
@@ -639,7 +723,8 @@ class BepInExMainScreen(QWidget):
         log("settings window opened")
         BepInExSettingsWindow(
             self.game_name, self._paths_state, self._browse_path, self._autodetect_paths, self._warn,
-            self._log_path, self,
+            self._log_path, self, app_root=self.app_root, is_busy=lambda: self._busy is not None,
+            settings=self._settings,
         ).exec()
         log("settings window closed")
 
@@ -691,6 +776,8 @@ class BepInExMainScreen(QWidget):
         self.new_button.setEnabled(ready)
         self.import_button.setEnabled(ready)  # creates a new load order: the game is all it needs
         self.export_button.setEnabled(ready and has_lo)
+        self.enable_all_button.setEnabled(ready and has_lo and not all(self._toggles.values()))
+        self.disable_all_button.setEnabled(ready and has_lo and any(self._toggles.values()))
         self.copy_button.setEnabled(ready and has_lo)
         self.rescan_button.setEnabled(ready and has_lo)
         self.add_mod_button.setEnabled(ready and has_lo)
@@ -723,7 +810,7 @@ class BepInExMainScreen(QWidget):
         if self._checking:
             text, enabled, variant, tip = "Checking for updates...", False, "", ""
         elif count:
-            text, enabled, variant = f"⚠ {count} update{'s' if count != 1 else ''} · Update all", self._busy is None, "warn-outline"
+            text, enabled, variant = f"{count} update{'s' if count != 1 else ''} · Update all", self._busy is None, "warn-outline"
             tip = "Download and install the latest version of every mod in this load order that has one."
         elif self._check_errors and self.current_load_order is not None:
             first = next(iter(self._check_errors.values()))
@@ -733,6 +820,9 @@ class BepInExMainScreen(QWidget):
         else:
             text, enabled, variant, tip = "Update all", False, "", ""
         button.setText(text)
+        # the drawn warning icon (icons.py) before "N updates" - was a "⚠"
+        # in the text, which Windows drew as a color emoji
+        button.setIcon(icons.icon("warn", theme.WARN, theme.DISABLED_WARN) if variant == "warn-outline" else QIcon())
         button.setEnabled(enabled)
         button.setToolTip(tip)
         if button.property("variant") != variant:
@@ -764,6 +854,8 @@ class BepInExMainScreen(QWidget):
         self.import_button.clicked.connect(lambda: self._show_action_menu(self.import_button, self._import_menu_items()))
         self.export_button.clicked.connect(lambda: self._show_action_menu(self.export_button, self._export_menu_items()))
         self.add_mod_button.clicked.connect(lambda: self._add_mod())
+        self.enable_all_button.clicked.connect(lambda: self._set_all_toggles(True))
+        self.disable_all_button.clicked.connect(lambda: self._set_all_toggles(False))
         self.browse_button.clicked.connect(lambda: self._browse_mods())
         active_model = self.active_list.mod_model
         for signal in (active_model.rowsAboutToBeInserted, active_model.rowsAboutToBeRemoved,
@@ -772,6 +864,7 @@ class BepInExMainScreen(QWidget):
         for signal in (active_model.rowsInserted, active_model.rowsRemoved, active_model.rowsMoved):
             signal.connect(lambda *_: self._apply_load_order_state())
         self.undo_button.clicked.connect(lambda: self._undo())
+        QShortcut(QKeySequence(QKeySequence.StandardKey.Undo), self).activated.connect(lambda: self._undo_shortcut())
         self.inactive_list.selectionModel().selectionChanged.connect(
             lambda *_: self._on_selection_changed(self.inactive_list, self.active_list)
         )
@@ -854,7 +947,8 @@ class BepInExMainScreen(QWidget):
     def _confirm(self, title: str, message: str, *, confirm_label: str) -> bool:
         box = QMessageBox(QMessageBox.Icon.Question, title, message, QMessageBox.StandardButton.Cancel, self)
         confirm = box.addButton(confirm_label, QMessageBox.ButtonRole.AcceptRole)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(confirm)  # Enter confirms (user decision 2026-09-29)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)  # Esc still cancels
         box.exec()
         confirmed = box.clickedButton() is confirm
         log(f"confirm shown: {title}: {message} -> {confirm_label if confirmed else 'Cancel'}")
@@ -950,6 +1044,21 @@ class BepInExMainScreen(QWidget):
     def _active_ids(self) -> list[str]:
         """The Active list's mod ids, the framework left out."""
         return [n for n in self.active_list.mod_ids() if n != self._framework]
+
+    def _undo_shortcut(self) -> None:
+        """Ctrl+Z: exactly the undo button's click, and only while it could be
+        clicked - shown (this screen showing, something to undo) and enabled
+        (not busy). A focused text field keeps its own Ctrl+Z (Qt hands it
+        the key first - ShortcutOverride - and this check covers the rest),
+        and a list drag under way ignores it (the button can't be clicked
+        mid-drag either)."""
+        button = self.undo_button
+        if (not button.isVisible() or not button.isEnabled()
+                or isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QPlainTextEdit))
+                or self.active_list._drag_state is not None or self.inactive_list._drag_state is not None):
+            return
+        log("undo: Ctrl+Z")
+        button.click()
 
     def _undo(self) -> None:
         if not self._history:
@@ -1121,6 +1230,7 @@ class BepInExMainScreen(QWidget):
         return [
             ("Import from file...", self._import_file, True, IMPORT_TOOLTIP),
             ("Import from code...", self._import_code, True, IMPORT_CODE_TOOLTIP),
+            ("Local mod (.zip)...", self._import_local_mod, self.current_load_order is not None, IMPORT_LOCAL_TOOLTIP),
         ]
 
     def _export_menu_items(self) -> list[tuple]:
@@ -1128,6 +1238,7 @@ class BepInExMainScreen(QWidget):
         return [
             ("Export to file...", self._export_file, True, EXPORT_TOOLTIP),
             ("Export as code...", self._export_code, True, EXPORT_CODE_TOOLTIP),
+            ("Dependency strings...", self._show_dependency_strings, self.current_load_order is not None, DEP_STRINGS_TOOLTIP),
         ]
 
     def _show_action_menu(self, button: QPushButton, items: list[tuple]) -> None:
@@ -1319,6 +1430,35 @@ class BepInExMainScreen(QWidget):
 
         self._run_job(f"fetch-code-{code}", job, done)
 
+    def _import_local_mod(self) -> None:
+        """Import... > Local mod (.zip)... (THUNDERSTORE.md §8b): the dialog
+        picks and validates a package zip (a bad one is reported there, a
+        package already in this load order refused there), then
+        _install_package runs bepinex_load_orders.import_local_mod as its
+        job - appended to Active and the baseline like any install (never
+        an unsaved change, so no discard prompt), dependencies from
+        Thunderstore, the update check re-run."""
+        if self.current_load_order is None or self._busy is not None:
+            return
+        slug = self.current_load_order
+        log(f"import local mod: dialog opened for {slug} ({self.load_order_picker.currentText()!r})")
+
+        def blocked(ref: ts.PackageRef) -> str | None:
+            if ref.full_name == self._framework or ref.full_name == self.ts_game.framework_package:
+                return f"{ref.full_name} is this load order's framework package - it's always installed."
+            if ref.full_name in self._entries:
+                return f"{ref.full_name} is already in this load order (v{self._entries[ref.full_name]['version']})."
+            return None
+
+        dialog = LocalModDialog(lo.inspect_local_package, blocked, self._share_dir(), parent=self)
+        if not dialog.exec() or dialog.payload is None:
+            log("import local mod: cancelled")
+            return
+        path, ref = dialog.payload["path"], dialog.payload["ref"]
+        self._remember_share_dir(path)
+        log(f"import local mod: {path} -> {slug} as {ref.key} (owner from {dialog.payload['info']['owner_source']})")
+        self._install_package(ref, local_zip=path)
+
     def _export_code(self) -> None:
         """Export as code...: confirm (every time - it's an upload to a
         public service), then the on-screen lists as a .r2z uploaded to
@@ -1363,6 +1503,7 @@ class BepInExMainScreen(QWidget):
         text.setWordWrap(True)
         layout.addWidget(text)
         field = QLineEdit(code)
+        field.setObjectName("profileCode")  # the recessed well, mono (theme.py, design step 3.4)
         field.setReadOnly(True)
         field.selectAll()
         layout.addWidget(field)
@@ -1372,7 +1513,59 @@ class BepInExMainScreen(QWidget):
         buttons.addButton(QDialogButtonBox.StandardButton.Close).clicked.connect(dialog.accept)
         layout.addWidget(buttons)
         dialog.setMinimumWidth(460)
+        # adjustSize() would take the wrapped label's height at its narrower
+        # hint width, leaving empty space once the 460 minimum widens it:
+        # size the height for the width the dialog actually gets.
+        dialog.ensurePolished()
+        width = max(460, dialog.sizeHint().width())
+        dialog.resize(width, dialog.heightForWidth(width))
         log(f"code dialog shown for {lo_name!r}: {code}")
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _show_dependency_strings(self) -> None:
+        """Export... > Dependency strings... (THUNDERSTORE.md §8d): the
+        framework + every switched-on Active mod (the on-screen list, unsaved
+        edits included) as `"Team-Package-Version",` lines in a read-only
+        box with Copy - the code dialog's shape. Local imports are left out
+        and counted."""
+        if self.current_load_order is None or self._manifest is None:
+            return
+        lo_name = self.load_order_picker.currentText()
+        res = share.dependency_strings(self._manifest, self._save_lists()[0])
+        lines, n = res["lines"], len(res["lines"])
+        log(f"dependency strings for {self.current_load_order} ({lo_name!r}): {n} listed, {res['local']} local omitted, "
+            f"{res['invalid']} without a version omitted{' (unsaved edits included)' if self._dirty() else ''}")
+        intro = (f"{n} dependency string{'' if n == 1 else 's'} for \"{lo_name}\" (the framework and every switched-on "
+                 "Active mod) - paste into a modpack manifest.json's dependencies array.")
+        if res["local"]:
+            intro += f" {res['local']} local mod{'' if res['local'] == 1 else 's'} omitted (not on Thunderstore)."
+        if res["invalid"]:
+            intro += f" {res['invalid']} mod{'' if res['invalid'] == 1 else 's'} without a valid version omitted."
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Dependency strings")
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(GAP)
+        label = _label(intro)
+        label.setTextFormat(Qt.TextFormat.PlainText)  # the load order's name is data
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        text = "\n".join(lines)
+        if lines:
+            field = QPlainTextEdit(text)
+            field.setReadOnly(True)
+            field.setProperty("mono", True)  # theme.py: the config window's raw box, mono 12px
+            field.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            layout.addWidget(field)
+        else:
+            layout.addWidget(_label("Nothing to list.", muted=True))
+        buttons = QDialogButtonBox()
+        copy = buttons.addButton("Copy", QDialogButtonBox.ButtonRole.ActionRole)
+        copy.setEnabled(bool(lines))
+        copy.clicked.connect(lambda: self._copy_text(text, f"Copied {n} dependency string{'' if n == 1 else 's'}."))
+        buttons.addButton(QDialogButtonBox.StandardButton.Close).clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.setMinimumWidth(460)
         dialog.exec()
         dialog.deleteLater()
 
@@ -1550,6 +1743,21 @@ class BepInExMainScreen(QWidget):
         self._history.append(self._snapshot())
         self._toggles[mod_id] = on
         log(f"toggle: {mod_id} {'on' if on else 'off'} (unsaved)")
+        self._apply_load_order_state()
+
+    def _set_all_toggles(self, on: bool) -> None:
+        """Enable all / Disable all (THUNDERSTORE.md §8a): every Active mod's
+        toggle at once - the framework has none, so it's never switched off.
+        One unsaved edit, one undo step; nothing to change = no edit at all."""
+        what = "enable all" if on else "disable all"
+        changing = [n for n, v in self._toggles.items() if v != on]
+        if self.current_load_order is None or self._busy is not None or not changing:
+            log(f"{what}: ignored ({'no load order' if self.current_load_order is None else 'busy' if self._busy else 'nothing to change'})")
+            return
+        self._history.append(self._snapshot())
+        for n in changing:
+            self._toggles[n] = on
+        log(f"{what}: {len(changing)} mod{'s' if len(changing) != 1 else ''} switched {'on' if on else 'off'} (unsaved)")
         self._apply_load_order_state()
 
     # ---- dependency presence (THUNDERSTORE.md §3) ----
@@ -1853,10 +2061,13 @@ class BepInExMainScreen(QWidget):
 
         self._run_job(f"switch-{full_name}", job, done)
 
-    def _install_package(self, ref: ts.PackageRef, on_done=None, parent: QWidget | None = None) -> None:
+    def _install_package(self, ref: ts.PackageRef, on_done=None, parent: QWidget | None = None, *,
+                         local_zip: Path | None = None) -> None:
         """Installs `ref` (its pinned version, else the latest) plus its
         dependencies into the open load order as a job (install_mod), then
         refreshes the panes - Add mod... and the browser's Install alike.
+        With `local_zip` the job is import_local_mod (Import local mod: that
+        zip instead of a download, same everything else).
         `on_done(payload)` runs last, on the GUI thread, when given;
         warnings are parented to `parent` (the browser) when given."""
         if self.current_load_order is None or self._busy is not None:
@@ -1864,31 +2075,38 @@ class BepInExMainScreen(QWidget):
             if on_done is not None:
                 on_done({"error": "The screen is busy." if self._busy else "No load order is open."})
             return
-        self._set_busy(f"Installing {ref.full_name}...")
+        source = f" from {local_zip.name}" if local_zip else ""
+        self._set_busy(f"Installing {ref.full_name}{source}...")
         slug = self.current_load_order
 
         def job(report):
+            if local_zip is not None:
+                return lo.import_local_mod(self.app_root, slug, self.ts_game, local_zip, self.app_version)
             return lo.install_mod(self.app_root, slug, self.ts_game, ref, self.app_version)
 
         def done(payload: dict) -> None:
             self._set_busy(None)
             if "error" in payload:
                 self._refresh_after_change()  # a dependency may have landed before the target failed
-                self._warn(f"Couldn't install {ref.full_name}", payload["error"], parent)
+                self._warn(f"Couldn't install {ref.full_name}{source}", payload["error"], parent)
                 self.status_text.set_status_text(f"Couldn't install {ref.full_name}.", "error")
                 if on_done is not None:
                     on_done(payload)
                 return
             res = payload["ok"]
             new = [e["full_name"] for e in res["installed"]]
-            log(f"add mod: installed {new}, {len(res['problems'])} problems")
+            log(f"add mod: installed {new}{source}, {len(res['problems'])} problems")
             self._absorb_installed(new)
             if res["problems"]:
                 self._warn("Some dependencies couldn't be installed",
                            "\n".join(f"{p.get('package', '?')}: {p.get('message', '')}" for p in res["problems"]), parent)
             extra = len(new) - 1
-            self.status_text.set_status_text(
-                f"Installed {ref.full_name}" + (f" and {extra} dependenc{'ies' if extra != 1 else 'y'}" if extra > 0 else "") + ".")
+            if not new:  # already installed (install_mod's guard) - nothing changed
+                self.status_text.set_status_text(f"{ref.full_name} is already in this load order.")
+            else:
+                self.status_text.set_status_text(
+                    f"Installed {ref.full_name}{source}"
+                    + (f" and {extra} dependenc{'ies' if extra != 1 else 'y'}" if extra > 0 else "") + ".")
             self._start_update_check(force=True)
             if on_done is not None:
                 on_done(payload)
@@ -2186,6 +2404,7 @@ class BepInExMainScreen(QWidget):
         self.storefront_tag.setProperty("role", "tag")
         row.addWidget(self.storefront_tag)
         self.version_label = _label(f"V. O. L. T. v{self.app_version}", muted=True)
+        self.version_label.setProperty("role", "wordmark")  # theme.py: the Circuit wordmark
         row.addWidget(self.version_label)
         row.addStretch(1)
         self.help_button = _button("Help")
@@ -2221,7 +2440,7 @@ class BepInExMainScreen(QWidget):
         self.undo_button = _button("↺")
         self.undo_button.setObjectName("undoButton")
         self.undo_button.setFixedSize(24, 24)
-        self.undo_button.setToolTip("Undo the most recent change to the active list")
+        self.undo_button.setToolTip("Undo the most recent change to the active list (Ctrl+Z)")
         self.undo_button.setVisible(False)
         row.addWidget(self.undo_button)
         row.addStretch(1)
@@ -2248,7 +2467,14 @@ class BepInExMainScreen(QWidget):
         row.addWidget(self._grid, 1)
         self._no_game = self._build_no_game_message()
         row.addWidget(self._no_game, 1)
-        row.addWidget(self._build_actions_column())
+        actions = self._build_actions_column()
+        row.addWidget(actions)
+        # Circuit panel shadows (painters.py: a cached 9-slice this screen
+        # paints behind the four panels; the lists themselves are untouched)
+        # and the dot grid inside the empty details pane.
+        painters.install_shadows(self, (self.details_panel, self.inactive_list, self.active_list, actions))
+        panel = self.details_panel
+        painters.install_empty_grid(panel, lambda: panel.details_empty.isVisibleTo(panel), over_default=True)
         return row
 
     def _build_no_game_message(self) -> QWidget:
@@ -2281,8 +2507,7 @@ class BepInExMainScreen(QWidget):
         layout = QVBoxLayout(pane)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        title_label = QLabel(title)
-        title_label.setProperty("role", "pane-title")
+        title_label = painters.TerminalLabel(title)  # a Circuit terminal label (role pane-title)
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
         search = QLineEdit()
@@ -2317,6 +2542,10 @@ class BepInExMainScreen(QWidget):
         mod_list.setEnabled(False)
         mod_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         mod_list.customContextMenuRequested.connect(lambda pos: self._show_mod_menu(mod_list, pos))
+        # the dot grid inside the list while it shows no rows (painters.py)
+        painters.install_empty_grid(mod_list.viewport(), lambda: painters.list_is_empty(mod_list))
+        if draggable:  # the Active list: the copper load-order rail (painters.py; DESIGN.md §3.2)
+            painters.install_rail(mod_list)
         list_cell = QGridLayout()
         list_cell.setContentsMargins(0, 0, 0, 0)
         list_cell.addWidget(mod_list, 0, 0)
@@ -2347,14 +2576,41 @@ class BepInExMainScreen(QWidget):
         self.import_button.setToolTip(IMPORT_TOOLTIP)
         self.export_button = _button("Export...")
         self.export_button.setToolTip(EXPORT_TOOLTIP)
+        # Enable all / Disable all: a row of links right under Export...
+        # (THUNDERSTORE.md §8a, placed by the user 2026-09-28)
+        self.enable_all_button = _button("Enable all", variant="link")
+        self.enable_all_button.setToolTip(ENABLE_ALL_TOOLTIP)
+        self.disable_all_button = _button("Disable all", variant="link")
+        self.disable_all_button.setToolTip(DISABLE_ALL_TOOLTIP)
+        bulk_row = QHBoxLayout()
+        bulk_row.setSpacing(GAP)
+        bulk_row.addWidget(self.enable_all_button)
+        bulk_row.addWidget(self.disable_all_button)
         self.rescan_button = _button("Rescan")
         self.rescan_button.setToolTip("Re-read the open load order from disk and check for updates again.")
         self.add_mod_button = _button("Add mod...", variant="accent-outline")
         self.add_mod_button.setToolTip("Install a Thunderstore package (and its dependencies) into the open load order.")
         self.browse_button = _button("Browse Mods...", variant="accent-outline")
         self.browse_button.setToolTip(BROWSE_TOOLTIP.format(game=self.game_name))
-        layout.addLayout(self._group(self.import_button, self.export_button, self.rescan_button,
-                                     self.add_mod_button, self.browse_button))
+        # Group labels (step 3.1, DESIGN.md §15 decision 6: LOAD ORDER over
+        # Import, GET MODS over Add mod, LAUNCH over Save): copper terminal
+        # labels with a side rule, inserted into the existing groups - no
+        # button moves, the stretch pays for their height.
+        self.group_labels = [painters.TerminalLabel(t, rule="side") for t in ("Load order", "Get mods", "Launch")]
+        for label in self.group_labels:
+            # the mockup's .glabel is a 12px box with margin-bottom -2px (6px
+            # to its button under the groups' 8px spacing); a layout can't
+            # overlap, so a 10px box: the same 6px, text / rule 1px higher
+            # (caps only - nothing hangs below the baseline to clip)
+            label.setFixedHeight(10)
+        top = self._group(self.import_button, self.export_button)
+        top.insertWidget(0, self.group_labels[0])
+        top.addLayout(bulk_row)
+        top.addWidget(self.rescan_button)
+        top.addWidget(self.group_labels[1])
+        for button in (self.add_mod_button, self.browse_button):
+            top.addWidget(button)
+        layout.addLayout(top)
         layout.addStretch(1)
         self.issues_button = _button("", variant="issue-count")
         self.issues_button.setToolTip("Show warnings and errors")
@@ -2374,9 +2630,12 @@ class BepInExMainScreen(QWidget):
         self.run_button = _button("Modded", variant="primary")
         for button, tip in ((self.vanilla_button, VANILLA_TOOLTIP), (self.run_button, MODDED_TOOLTIP)):
             button.setToolTip(tip.format(game=self.game_name))
-            button.setIcon(_play_icon())
+            # the triangle in the button's label color (dark ink on the primary Modded)
+            button.setIcon(_play_icon(theme.INK, theme.DISABLED_FILL_TEXT) if button is self.run_button else _play_icon())
             button.setIconSize(QSize(PLAY_ICON_PX, PLAY_ICON_PX))
-        layout.addLayout(self._group(self.save_button, self.vanilla_button, self.run_button))
+        launch = self._group(self.save_button, self.vanilla_button, self.run_button)
+        launch.insertWidget(0, self.group_labels[2])
+        layout.addLayout(launch)
         return column
 
     @staticmethod
@@ -2405,6 +2664,9 @@ class BepInExMainScreen(QWidget):
         row = QHBoxLayout(footer)
         row.setContentsMargins(BAR_SIDE, 4, BAR_SIDE, 14)
         row.setSpacing(0)
+        prompt = QLabel(">")  # the copper terminal prompt (design step 3.4)
+        prompt.setProperty("role", "status-prompt")
+        row.addWidget(prompt)
         self.status_text = _StatusText()
         row.addWidget(self.status_text, 1)
         column.addWidget(footer)

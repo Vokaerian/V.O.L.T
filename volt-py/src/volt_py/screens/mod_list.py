@@ -571,8 +571,8 @@ DIMMED_ROW_OPACITY = 0.35
 # .row.dependency / .row.dependent's inset bars are the same width.
 MATCH_BAR_WIDTH = 3
 # .row-badge (styles.css; box-sizing: border-box): 10px bold text in a 13px
-# line, 3px side padding, 1px --official border, 2px radius, min-width 14px.
-BADGE_TEXT = "L"
+# line, 3px side padding, 1px border, 2px radius, min-width 14px.
+BADGE_TEXT = "L"  # the Official badge's width reference: the old "L" + padding; the glyph is a drawn check
 DDS_BADGE_TEXT = ".dds"  # .row-badge.dds-leftover: same box, --muted border + text
 ROW_WARN_TEXT = "!"  # .row-warn: plain text, bold, --warn, the row's font size
 BADGE_FONT_PX = 10
@@ -580,16 +580,19 @@ BADGE_HEIGHT = 15  # line-height 13 + the 1px border top and bottom
 BADGE_MIN_WIDTH = 14
 BADGE_RADIUS = 2
 BADGE_SIDES = 8  # padding 3 + border 1, both sides
+BADGE_CHECK_PX = 10  # the Official badge's drawn check (logical px; the box's inside is 12 x 13)
 ROW_GAP = 6  # .row { gap: 6px }: swatch | badge | name
 SWATCH_SIZE = 10  # .row-color (ModListView's icon size)
 ROW_PADDING = 8  # .row { padding: 0 8px } (the ::item rule's side padding)
 # .row-issues / .row-issue (ModList.jsx RowIssues): the Active pane's per-row
-# issue icons, left to right - (severity, glyph, color) - bold, in --warn /
-# --danger, 4px apart, the cross always rightmost.
+# issue icons, left to right - (severity, icons.py name, color) - drawn like
+# the Valheim rows' marks (bepinex_mod_list.py), ISSUE_ICON_PX square, in
+# --warn / --danger, 4px apart, the cross always rightmost.
 ISSUE_ICONS = (
-    ("warning", "⚠︎", theme.WARN),
-    ("error", "✕", theme.DANGER),
+    ("warning", "warn", theme.WARN),
+    ("error", "x", theme.DANGER),
 )
+ISSUE_ICON_PX = 14  # = bepinex_mod_list.MARK_PX
 ISSUE_GAP = 4  # .row-issues { gap: 4px }
 # .row.downloading { opacity: 0.6 }: a not-found Workshop row with a Subscribe
 # under way. In styles.css it sits after .row.dragging and before
@@ -861,7 +864,7 @@ class ModRowDelegate(QStyledItemDelegate):
         .row-badge, ROW_GAP apart, vertically centered on the badge. Drawn at
         the view's device pixel ratio (crisp text), cached per swatch color.
         The same pixmap serves the Selected mode too: the badge keeps its
-        --panel-2 fill on a selected row (no selection wash), as in CSS."""
+        opaque OFFICIAL_FILL chip on a selected row (no selection wash)."""
         from PySide6.QtGui import QIcon
 
         view = self._view
@@ -943,6 +946,9 @@ class ModRowDelegate(QStyledItemDelegate):
         (after the badge, if both). Plain rows are just the base paint."""
         view = self._view
         decor = view.mod_model.decor_at(index.row()) if index.isValid() else NO_DECOR
+        # the card-shaped paints' item rect, shifted by the rail's wider left margin (no-op without the rail):
+        # _card_rectf insets by theme.ROW_MARGINS
+        bars_rect = opt.rect.adjusted(theme.row_margins(view)[0] - theme.ROW_MARGINS[0], 0, 0, 0)
         # One .row opacity, the later styles.css rule winning (DOWNLOADING_ROW_OPACITY).
         opacity = (
             DIMMED_ROW_OPACITY if mark == MARK_DIM
@@ -968,7 +974,7 @@ class ModRowDelegate(QStyledItemDelegate):
         if opacity is not None:
             painter.setOpacity(opacity)
         if tinted:
-            paint_row_tint(painter, opt.rect, decor.dependency, decor.dependent)
+            paint_row_tint(painter, bars_rect, decor.dependency, decor.dependent)
         controls_left = icons[0][3].left() if icons else subscribe.left() if subscribe is not None else None
         if controls_left is not None:
             self._text_right = controls_left - ROW_GAP  # .row gap between the name and .row-issues / the button
@@ -985,9 +991,9 @@ class ModRowDelegate(QStyledItemDelegate):
             warn_at, self._warn_at = self._warn_at, None
         if tinted:
             left = theme.DEP if decor.dependency else theme.ACCENT if bar else None
-            paint_row_bars(painter, opt.rect, left, theme.RDEP if decor.dependent else None)
+            paint_row_bars(painter, bars_rect, left, theme.RDEP if decor.dependent else None)
         elif bar:
-            paint_match_bar(painter, opt.rect)
+            paint_match_bar(painter, bars_rect)
         if suffix_at is not None:
             paint_row_suffix(painter, suffix_at, view)
         if badge_at is not None:
@@ -1000,9 +1006,9 @@ class ModRowDelegate(QStyledItemDelegate):
             paint_subscribe_button(painter, subscribe, view, view.subscribe_hovered(index.row()),
                                    view.subscribe_is_enabled())
         if decor.conflict:
-            paint_conflict_outline(painter, opt.rect)
+            paint_conflict_outline(painter, bars_rect)
         elif decor.pending:
-            paint_pending_outline(painter, opt.rect)
+            paint_pending_outline(painter, bars_rect)
         painter.restore()
 
 
@@ -1128,20 +1134,37 @@ def trailing_after(name_w: int, widths: list[int], available: int) -> tuple[int,
     return room, xs
 
 
-def paint_row_badge(painter, rect: QRectF, font, text: str = BADGE_TEXT, color: str = theme.OFFICIAL) -> None:
-    """.row-badge in `rect` (badge_width x BADGE_HEIGHT): --panel-2 fill, 1px
-    `color` border, BADGE_RADIUS corners, `text` centered in `color` - by
-    default the official "L" in --official; the .dds leftover's is
-    DDS_BADGE_TEXT in --muted (.row-badge.dds-leftover)."""
+def paint_row_badge(painter, rect: QRectF, font, text: str | None = None, color: str = theme.OFFICIAL,
+                    edge: str | None = None, fill: str | None = None) -> None:
+    """.row-badge in `rect` (badge_width x BADGE_HEIGHT), BADGE_RADIUS corners.
+    text None = the Official (Core/DLC) badge: an OFFICIAL_FILL chip, 1px
+    OFFICIAL_EDGE border, a drawn check (icons.py "check") in `color`
+    (OFFICIAL), centred. With `text` (the .dds leftover, the BepInEx status
+    pills): a --panel-2 fill, a 1px `color` border and `text` in `color` -
+    edge / fill override the border / fill colour only when given."""
+    from PySide6.QtCore import QPointF
+
+    official = text is None
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(QPen(QColor(color), 1))
-    painter.setBrush(QColor(theme.PANEL_2))
+    painter.setPen(QPen(QColor(edge or (theme.OFFICIAL_EDGE if official else color)), 1))
+    painter.setBrush(QColor(fill or (theme.OFFICIAL_FILL if official else theme.PANEL_2)))
     # The 1px stroke centered on the half-pixel inset: its outer edge is the
     # rect, its outer corner radius BADGE_RADIUS.
     painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), BADGE_RADIUS - 0.5, BADGE_RADIUS - 0.5)
-    painter.setFont(font)
-    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+    if official:
+        from volt_py import icons  # local: keeps the stdlib harnesses' import graph as today
+
+        dpr = painter.device().devicePixelRatioF()
+        side = BADGE_CHECK_PX
+        # Whole device px: a crisp 1-device-px stroke.
+        x = round((rect.center().x() - side / 2) * dpr) / dpr
+        y = round((rect.center().y() - side / 2) * dpr) / dpr
+        painter.drawPixmap(QPointF(x, y), icons.pixmap("check", color, side, dpr))
+    else:
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
     painter.restore()
 
 
@@ -1155,22 +1178,33 @@ def issue_font(widget):
 
 
 def issue_glyph_width(widget, glyph: str) -> int:
-    """An issue icon's width: its glyph's advance in issue_font. (Module
-    level so the check harnesses, which have no real fonts, can patch it.)"""
+    """An issue icon's width: ISSUE_ICON_PX for a drawn issue icon (an
+    ISSUE_ICONS name); for a text mark (ROW_WARN_TEXT) its advance in
+    issue_font. (Module level so the check harnesses, which have no real
+    fonts, can patch it.)"""
+    if any(glyph == name for _severity, name, _color in ISSUE_ICONS):
+        return ISSUE_ICON_PX
     from PySide6.QtGui import QFontMetrics
 
     return QFontMetrics(issue_font(widget)).horizontalAdvance(glyph)
 
 
 def paint_issue_icons(painter, icons, widget) -> None:
-    """The .row-issue glyphs: each (severity, glyph, color, rect) of
-    ModListView.issue_icons, centered in its rect (the card's height) in its
-    color. The caller saves/restores the painter (clip, opacity)."""
-    font = issue_font(widget)
-    painter.setFont(font)
-    for _severity, glyph, color, rect in icons:
-        painter.setPen(QColor(color))
-        painter.drawText(QRectF(rect), Qt.AlignmentFlag.AlignCenter, glyph)
+    """The .row-issue icons: each (severity, icons.py name, color, rect) of
+    ModListView.issue_icons, drawn ISSUE_ICON_PX square in its color,
+    centered in its rect (the card's height), snapped to whole device px.
+    The caller saves/restores the painter (clip, opacity)."""
+    from PySide6.QtCore import QPointF
+
+    from volt_py import icons as drawn  # local: keeps the stdlib harnesses' import graph as today
+
+    dpr = painter.device().devicePixelRatioF()
+    side = ISSUE_ICON_PX
+    for _severity, name, color, rect in icons:
+        box = QRectF(rect)
+        x = round((box.center().x() - side / 2) * dpr) / dpr
+        y = round((box.center().y() - side / 2) * dpr) / dpr
+        painter.drawPixmap(QPointF(x, y), drawn.pixmap(name, color, side, dpr))
 
 
 def paint_conflict_outline(painter, rect) -> None:
@@ -1560,15 +1594,15 @@ class ModListView(QListView):
     # ---- issue icons (ModList.jsx RowIssues) ----
     def issue_icons(self, decor: RowDecor, rect) -> list:
         """The issue icons `decor` asks for, on a row painted at item rect
-        `rect` (viewport px): (severity, glyph, color, icon rect) left to
+        `rect` (viewport px): (severity, icon name, color, icon rect) left to
         right - warning, then error. They end at the card's right edge less
         .row's 8px padding, the card clipped to the viewport first (as
-        _card_rect does for the drag pill), 4px apart; each as wide as its
-        glyph and as tall as the card. Empty when the row has none."""
+        _card_rect does for the drag pill), 4px apart; each ISSUE_ICON_PX
+        (issue_glyph_width) wide and as tall as the card. Empty when the row has none."""
         shown = [icon for icon in ISSUE_ICONS if getattr(decor, icon[0])]
         if not shown:
             return []
-        _left, top, right_margin, bottom = theme.ROW_MARGINS
+        _left, top, right_margin, bottom = theme.row_margins(self)
         right = min(rect.right(), self.viewport().rect().right()) - right_margin - ROW_PADDING
         subscribe = self.subscribe_rect(decor, rect)
         if subscribe is not None:
@@ -1616,7 +1650,7 @@ class ModListView(QListView):
         that isn't pending, or in a view without on_subscribe."""
         if self._on_subscribe is None or not decor.pending:
             return None
-        _left, top, right_margin, bottom = theme.ROW_MARGINS
+        _left, top, right_margin, bottom = theme.row_margins(self)
         right = min(rect.right(), self.viewport().rect().right()) - right_margin - ROW_PADDING
         left = right - subscribe_width(self) + 1
         card_top, card_h = rect.top() + top, rect.height() - top - bottom
@@ -1984,7 +2018,7 @@ class ModListView(QListView):
         viewport = self.viewport().rect()
         rect.setLeft(max(rect.left(), viewport.left()))
         rect.setRight(min(rect.right(), viewport.right()))
-        left, top, right, bottom = theme.ROW_MARGINS
+        left, top, right, bottom = theme.row_margins(self)
         return rect.adjusted(left, top, -right, -bottom)
 
     def _drag_to(self, pos: QPoint, global_pos: QPoint) -> None:

@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from volt_py import painters
 from volt_py.applog import log
 
 # Same window chrome as the Scan issues window (.modal.validation-window).
@@ -497,7 +498,7 @@ class RulesWindow(QDialog):
         example_layout = QVBoxLayout(example)
         example_layout.setContentsMargins(12, 12, 12, 12)
         example_layout.setSpacing(0)
-        example_layout.addWidget(_label("Example", "rules-field-label"))
+        example_layout.addWidget(painters.TerminalLabel("Example", rule="heading"))  # a terminal heading (step 3.4)
         example_layout.addSpacing(8)  # .rules-example-label: margin-bottom 8px
         self._example = QVBoxLayout()
         self._example.setSpacing(4)
@@ -511,10 +512,11 @@ class RulesWindow(QDialog):
 
     @staticmethod
     def _field(title: str, content) -> QVBoxLayout:
-        # label { display: block; margin-bottom: 6px; font-weight: 600 }
+        # label { display: block; margin-bottom: 6px } - a copper side-rule
+        # terminal heading (design step 3.4; was a 600 sans label)
         group = QVBoxLayout()
         group.setSpacing(6)
-        group.addWidget(_label(title, "rules-field-label"))
+        group.addWidget(painters.TerminalLabel(title, rule="heading"))
         if isinstance(content, QWidget):
             group.addWidget(content)
         else:

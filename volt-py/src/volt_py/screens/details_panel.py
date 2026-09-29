@@ -20,7 +20,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QFormLayout, QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from volt_py import theme
+from volt_py import painters, theme
 from volt_py.fsutil import find_child_ci
 
 # DetailsPanel.jsx: a not-found row's path and description, verbatim.
@@ -43,6 +43,17 @@ def _label(text: str, *, muted: bool = False) -> QLabel:
     label = QLabel(text)
     if muted:
         label.setProperty("muted", True)
+    return label
+
+
+def details_key(text: str) -> QLabel:
+    """A details-pane key as a Circuit terminal label (step 3.1, both games):
+    copper mono spaced caps (theme.py's QLabel[role="details-key"]; the caps
+    and spacing are on its font - QSS has neither). No colon: the copper
+    column is the separator."""
+    label = QLabel(text)
+    label.setProperty("role", "details-key")
+    label.setFont(painters.terminal_font(painters.TERMINAL_KEY_PX, painters.TERMINAL_KEY_SPACING))
     return label
 
 
@@ -87,13 +98,13 @@ class DetailsPanel(QFrame):
         form.setVerticalSpacing(4)
         self.details_fields: dict[str, QLabel] = {}
         for key, title in (
-            ("name", "Name:"),
-            ("authors", "Authors:"),
-            ("path", "Path:"),
-            ("package_id", "Package ID:"),
+            ("name", "Name"),
+            ("authors", "Authors"),
+            ("path", "Path"),
+            ("package_id", "Package ID"),
         ):
             value = self.details_fields[key] = _details_text()
-            form.addRow(_label(title, muted=True), value)
+            form.addRow(details_key(title), value)
         body_layout.addLayout(form)
 
         # .details-description: fills the rest, scrolls on overflow.
