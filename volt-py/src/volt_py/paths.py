@@ -117,6 +117,24 @@ def steam_root_candidates() -> list[Path]:
     return dedupe(norm(p) for p in c)
 
 
+STEAM_EXE = "steam.exe"
+
+
+def find_steam_exe() -> Path | None:
+    """The Steam client executable: the first steam_root_candidates() entry
+    holding steam.exe (cross-game; the BepInEx launch starts games through
+    `steam.exe -applaunch`). Windows only for now - None elsewhere, and
+    None when Steam isn't installed (the registry key is written by the
+    client itself)."""
+    if not _WIN:
+        return None
+    for root in steam_root_candidates():
+        exe = Path(root) / STEAM_EXE
+        if exists(exe):
+            return exe
+    return None
+
+
 def steam_libraries(steam_root, appid: str = STEAM_APPID) -> list[dict]:
     """Library folders from libraryfolders.vdf. has_app: True/False when the
     file lists installed app ids (newer format) for `appid`, None when unknown

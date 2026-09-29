@@ -49,13 +49,60 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
   - Paths: Game (the install), Load order (load-orders/<slug>/) and BepInEx
     (its BepInEx/ subfolder); the latter two follow the picker and are
     disabled with no load order open.
-  - "Add mod..." (a Team-Package name or a thunderstore.io package URL)
-    installs one package plus its dependencies into the open load order
-    (install_mod) - the stand-in for the mod browser (stage 3f) until it
-    exists, so a load order can hold more than the framework. "Browse
-    Mods...", Import... / Export... (stage 3e) and Run (stage 3c, the
-    Doorstop launch) are on the screen as designed but disabled until
-    their stage lands - never a stub that half-works.
+  - "Browse Mods..." (stage 3f; screens/bepinex_browse_window.py) opens
+    the in-app Thunderstore browser over the open load order: search /
+    category / sort over the site's own paged listing, a card grid, a
+    Thunderstore-style package page (README, Required / Versions /
+    Changelog tabs, the latest version's facts, a version selector), Install
+    = _install_package - the same job as "Add mod..." (download into the
+    shared cache if absent, dependencies first, appended to the Active
+    list, the panes refreshed), and the window stays open for the next
+    one. "Add mod..." (a Team-Package name or a thunderstore.io package
+    URL) stays as the power-user shortcut (user decision 2026-09-28).
+  - Import... / Export... (stage 3e; volt_py/bepinex_share.py): the
+    load order as an r2modman / Thunderstore Mod Manager `.r2z` profile
+    file, so VOLT and TMM users can swap load orders. Both buttons open the
+    same popup menu RimWorld's do (_show_action_menu). "Export to file..."
+    zips the on-screen lists (unsaved edits included, like Copy to new) +
+    the load order's BepInEx/config files, default name <load order>.r2z.
+    "Import from file..." always creates a NEW load order (name asked,
+    the file's profile name offered): the framework at the file's
+    version, each listed mod at the file's exact version (a version
+    Thunderstore no longer has falls back to the latest; a package that
+    can't be fetched is reported, the rest still install), the config
+    files restored, enabled: false mods switched off - one busy job with
+    per-package progress, then a summary dialog. A file made for another
+    game is refused. "Export as code..." / "Import from code..." are the
+    same .r2z through Thunderstore's own profile-code service (the one
+    r2modman / TMM use, so codes cross over both ways): export asks for
+    confirmation every time (the profile and its config files go to a
+    public service; anyone with the code can fetch it), uploads as a job
+    and shows the code in a small dialog with a Copy button; import asks
+    for the code (whitespace / a pasted URL tolerated, validated before
+    any request), downloads it as a job into <APP-ROOT>/cache/profiles/,
+    then runs the file import unchanged (name prompt, job, summary).
+  - Modded (stage 3c; volt_py/bepinex_launch.py has the mechanism; the
+    button was "Run" until v0.4.27 - the method is still _run, the log
+    prefix still `run:`): the open load order's Doorstop loader files are
+    copied into the game folder
+    (anything already there is backed up), the game is started through
+    `steam.exe -applaunch` with the Doorstop arguments pointing at the
+    load order's own BepInEx, and the screen stays busy while the game
+    runs (a poll of `tasklist` every 2 s, off the GUI thread) - the
+    running load order's DLLs are mapped by the game, so a Save / Update /
+    Uninstall rename would fail mid-way. When it exits, the copied files
+    are removed and the backups restored ("game folder restored"). Never
+    saves: unsaved changes and missing-dependency errors each ask first, a
+    BepInEx/ folder inside the game install asks once. A launch record
+    left by a previous VOLT session is handled on open (_recover_launch):
+    re-attach if the game is still running, else clean up and say so.
+    Vanilla (v0.4.27, right above Modded; both carry a play-triangle icon,
+    _play_icon) is _run(modded=False): a plain Steam launch, nothing
+    copied, no confirms - the screen stays locked while it runs, exactly
+    as for Modded (user decision 2026-09-28). Modded needs a load order
+    open; Vanilla only the game (enabled whenever the screen isn't busy,
+    load order or not); the Vanilla button is theme.py's neutral
+    "vanilla" variant (a step lighter than Save), Modded stays primary.
   - Row right-click: Open folder (BepInEx/plugins/<Team-Package>), Open on
     Thunderstore, Open website, Copy package name, Edit config..., Update
     (when one is available), Uninstall... (remove_mod, confirmed; not the
@@ -77,16 +124,20 @@ rows' controls) and shows in the status text. The check pass is read-only
 and may overlap a job.
 """
 
+import functools
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtCore import QObject, QPoint, QPointF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -104,13 +155,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import bepinex_load_orders as lo, theme, thunderstore as ts
+from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, bepinex_share as share, paths, theme, thunderstore as ts
 from volt_py.app_root import resolve_app_root
 from volt_py.applog import clip, init_log, log
-from volt_py.bepinex_install import PackageError
+from volt_py.bepinex_install import BEPINEX_DIR, PackageError
 from volt_py.mods import natural_key
 from volt_py.paths import norm
+from volt_py.screens.bepinex_browse_window import BepInExBrowseWindow
 from volt_py.screens.bepinex_config_window import BepInExConfigWindow
+from volt_py.screens.bepinex_issues_window import BepInExIssuesWindow
 from volt_py.screens.bepinex_mod_list import BepInExModListView, RowInfo
 from volt_py.screens.bepinex_settings_window import BepInExSettingsWindow
 from volt_py.screens.help_window import HelpWindow
@@ -133,12 +186,38 @@ from volt_py.screens.rimworld_main_screen import (
 )
 from volt_py.settings import SettingsStore
 
-STAGE_TOOLTIP = {
-    "import": "Import comes in a later update (load-order sharing).",
-    "export": "Export comes in a later update (load-order sharing).",
-    "browse": "The in-app mod browser comes in a later update. Add mod... installs a package by name meanwhile.",
-    "run": "Run comes in a later update (the BepInEx launch). Until then, start the game from Steam.",
-}
+IMPORT_TOOLTIP = (
+    "Import a load order from a file (.r2z - VOLT's and r2modman / Thunderstore Mod Manager's profile format) "
+    "as a new load order: its mods are downloaded at the file's versions and its config files restored."
+)
+EXPORT_TOOLTIP = (
+    "Save the open load order as a .r2z profile file - its mod list (with versions and on/off state) and its "
+    "BepInEx config files, no mod files - readable by VOLT and by r2modman / Thunderstore Mod Manager."
+)
+IMPORT_CODE_TOOLTIP = (
+    "Import a load order from a profile code (r2modman / Thunderstore Mod Manager's or VOLT's): the profile is "
+    "downloaded from Thunderstore and imported as a new load order, exactly like a file."
+)
+EXPORT_CODE_TOOLTIP = (
+    "Upload the open load order's profile (mod list + config files) to Thunderstore's public profile service and "
+    "get a code anyone can import - in VOLT, r2modman or Thunderstore Mod Manager."
+)
+EXPORT_CODE_CONFIRM = (
+    'Upload "{name}" to Thunderstore?\n\nThe profile - its mod list and every file in its BepInEx config folder - '
+    "is uploaded to Thunderstore's public profile-sharing service (the one r2modman and Thunderstore Mod Manager "
+    "use). Anyone who has the code can download it; it can't be taken back. Mod files themselves aren't uploaded.\n\n"
+    "Don't share a load order whose config files hold anything private (server passwords, tokens...)."
+)
+IMPORT_CODE_PROMPT = (
+    "Paste the profile code - from VOLT, r2modman or Thunderstore Mod Manager (their \"Export as code\"). "
+    "The profile is downloaded from Thunderstore and becomes a new load order.\n\nCode:"
+)
+SHARE_FILTER = "Load order profiles (*.r2z);;All files (*)"
+BROWSE_TOOLTIP = "Browse Thunderstore's {game} mods and install them into the open load order."
+# The two launch buttons' tooltips ({game} = the game module's NAME).
+MODDED_TOOLTIP = "Launch {game} with this load order's mods (BepInEx)."
+VANILLA_TOOLTIP = "Launch {game} without mods or BepInEx."
+PLAY_ICON_PX = 12  # the play triangle's logical size on the Modded / Vanilla buttons
 ADD_MOD_PROMPT = (
     "Thunderstore package to install, with its dependencies, into the open load order.\n"
     "A package name (Team-Package, e.g. ValheimModding-Jotunn) or its thunderstore.io page URL:"
@@ -147,8 +226,49 @@ ADD_MOD_PROMPT = (
 _PACKAGE_URL = re.compile(r"thunderstore\.io/(?:c/[^/]+/p|package)/([A-Za-z0-9_]+)/([A-Za-z0-9_]+)/?", re.IGNORECASE)
 
 
+def _play_polygon(size: float) -> QPolygonF:
+    """A solid right-pointing triangle filling a size x size box: 80% tall,
+    centered, its width the equilateral 0.87 x height."""
+    top, bottom = size * 0.1, size * 0.9
+    left = size * 0.15
+    return QPolygonF([QPointF(left, top), QPointF(left, bottom), QPointF(left + (bottom - top) * 0.87, size / 2)])
+
+
+@functools.cache
+def _play_icon() -> QIcon:
+    """The play triangle on the Modded / Vanilla buttons, drawn by Qt itself
+    (no asset): theme.TEXT for QIcon.Mode.Normal and the same at half
+    alpha for QIcon.Mode.Disabled, so it dims exactly like the disabled
+    button text (theme.py's QPushButton:disabled uses _half(TEXT)); Qt
+    picks the Disabled pixmap itself whenever the button is disabled.
+    Rendered at 2x (as _eye_icon), shown at PLAY_ICON_PX. Cached: one
+    icon, shared by both buttons."""
+    icon = QIcon()
+    size = PLAY_ICON_PX * 2
+    for mode, alpha in ((QIcon.Mode.Normal, 1.0), (QIcon.Mode.Disabled, 0.5)):
+        color = QColor(theme.TEXT)
+        color.setAlphaF(alpha)
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(_play_polygon(size))
+        painter.end()
+        icon.addPixmap(pixmap, mode)
+    return icon
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _duration(seconds: float) -> str:
+    """12s / 4m 05s / 1h 02m 03s."""
+    s = max(0, int(seconds))
+    h, m, s = s // 3600, s % 3600 // 60, s % 60
+    return f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s" if m else f"{s}s"
 
 
 # Packages checked at or after this moment count as "checked this session": a
@@ -395,7 +515,14 @@ class BepInExMainScreen(QWidget):
         self._busy: str | None = None  # a mutating job in flight (its status text)
         self._updating: set[str] = set()  # full_names with an update in flight
         self._jobs: dict[_JobDone, threading.Thread] = {}
-        self._issues: dict[str, list[tuple[str, str]]] = {}  # full_name -> [(severity, text)]
+        self._issues: dict[str, list[tuple[str, str]]] = {}  # full_name -> [(severity, text)] (the rows / tooltips)
+        self._issue_list: list[dict] = []  # bepinex_load_orders.dependency_issues' dicts (the issues window)
+        # The launch being watched (Run): exe_name, load_order_name, modded,
+        # phase "starting" / "running", started (monotonic). None when idle.
+        self._launch: dict | None = None
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setSingleShot(True)  # re-armed after each poll's result, so polls never overlap
+        self._poll_timer.timeout.connect(self._poll_launch)
 
         self.app_root = resolve_app_root(game.SLUG)
         self._log_path: Path | None = init_log(self.app_root)
@@ -407,6 +534,7 @@ class BepInExMainScreen(QWidget):
         self._resolve_paths()
         self._reload_load_order_picker()
         self._apply_paths()
+        self._recover_launch()
         if self.game_dir:
             self._apply_current_load_order_to_panes()
             self._start_update_check()
@@ -551,10 +679,15 @@ class BepInExMainScreen(QWidget):
         ready = has_game and not busy
         self.load_order_picker.setEnabled(ready and self.load_order_picker.count() > 0)
         self.new_button.setEnabled(ready)
+        self.import_button.setEnabled(ready)  # creates a new load order: the game is all it needs
+        self.export_button.setEnabled(ready and has_lo)
         self.copy_button.setEnabled(ready and has_lo)
         self.rescan_button.setEnabled(ready and has_lo)
         self.add_mod_button.setEnabled(ready and has_lo)
+        self.browse_button.setEnabled(ready and has_lo)
         self.save_button.setEnabled(ready and has_lo)
+        self.run_button.setEnabled(ready and has_lo)
+        self.vanilla_button.setEnabled(ready)  # no load order needed for a vanilla launch (user-directed 2026-09-28)
         dirty = self._dirty()
         if dirty != self._was_dirty:
             log(f"unsaved changes: {'yes' if dirty else 'none'} ({len(self._history)} undo steps)")
@@ -618,7 +751,10 @@ class BepInExMainScreen(QWidget):
         self.load_order_link.clicked.connect(lambda: self.current_load_order and self._open_folder(self._load_order_dir()))
         self.bepinex_link.clicked.connect(lambda: self.current_load_order and self._open_folder(self._bepinex_dir()))
         self.rescan_button.clicked.connect(lambda: self.rescan())
+        self.import_button.clicked.connect(lambda: self._show_action_menu(self.import_button, self._import_menu_items()))
+        self.export_button.clicked.connect(lambda: self._show_action_menu(self.export_button, self._export_menu_items()))
         self.add_mod_button.clicked.connect(lambda: self._add_mod())
+        self.browse_button.clicked.connect(lambda: self._browse_mods())
         active_model = self.active_list.mod_model
         for signal in (active_model.rowsAboutToBeInserted, active_model.rowsAboutToBeRemoved,
                        active_model.rowsAboutToBeMoved):
@@ -638,6 +774,8 @@ class BepInExMainScreen(QWidget):
         self.new_button.clicked.connect(lambda: self._new_load_order())
         self.copy_button.clicked.connect(lambda: self._copy_to_new_load_order())
         self.save_button.clicked.connect(lambda: self._save_load_order())
+        self.run_button.clicked.connect(lambda: self._run())
+        self.vanilla_button.clicked.connect(lambda: self._run(modded=False))
         self.update_all_button.clicked.connect(lambda: self._update_all_clicked())
         self.issues_button.clicked.connect(lambda: self._show_issues())
 
@@ -899,8 +1037,9 @@ class BepInExMainScreen(QWidget):
         self._apply_current_load_order_to_panes()
         self._start_update_check()
 
-    def _ask_name(self, title: str, message: str | None = None) -> str | None:
-        name, ok = QInputDialog.getText(self, title, f"{message}\n\nName:" if message else "Name:")
+    def _ask_name(self, title: str, message: str | None = None, default: str = "") -> str | None:
+        name, ok = QInputDialog.getText(self, title, f"{message}\n\nName:" if message else "Name:",
+                                        QLineEdit.EchoMode.Normal, default)
         if not ok or not name.strip():
             log(f"{title}: {'cancelled' if not ok else 'empty name entered'}, nothing created")
             return None
@@ -965,6 +1104,267 @@ class BepInExMainScreen(QWidget):
         self._reload_load_order_picker(select_slug=manifest["slug"])
         self._apply_current_load_order_to_panes()
         self.status_text.set_status_text(f"Copied to \"{name}\".")
+
+    # ---- Import / Export (THUNDERSTORE.md §4; bepinex_share.py) ----
+    def _import_menu_items(self) -> list[tuple]:
+        """Import...'s entries: (label, handler, enabled, tooltip)."""
+        return [
+            ("Import from file...", self._import_file, True, IMPORT_TOOLTIP),
+            ("Import from code...", self._import_code, True, IMPORT_CODE_TOOLTIP),
+        ]
+
+    def _export_menu_items(self) -> list[tuple]:
+        """Export...'s entries: (label, handler, enabled, tooltip)."""
+        return [
+            ("Export to file...", self._export_file, True, EXPORT_TOOLTIP),
+            ("Export as code...", self._export_code, True, EXPORT_CODE_TOOLTIP),
+        ]
+
+    def _show_action_menu(self, button: QPushButton, items: list[tuple]) -> None:
+        """Import... / Export...: a native menu dropped 4px below the button
+        (rimworld_main_screen's), entries (label, handler[, enabled,
+        tooltip]) - a disabled entry is a later update, its tooltip says so."""
+        log(f"{button.text()} menu opened")
+        menu = QMenu(button)
+        menu.setToolTipsVisible(True)
+        for label, fn, *rest in items:
+            enabled = rest[0] if rest else True
+            action = menu.addAction(label)
+            action.setEnabled(bool(enabled))
+            if len(rest) > 1 and rest[1]:
+                action.setToolTip(rest[1])
+            action.triggered.connect(lambda _checked=False, fn=fn: fn())
+        menu.exec(button.mapToGlobal(QPoint(0, button.height() + 4)))
+        menu.deleteLater()
+
+    def _share_dir(self) -> Path | None:
+        """The folder of the last Import / Export file pick (settings
+        `share_dir`), if it still exists."""
+        d = self._settings.get().get("share_dir")
+        return Path(d) if d and Path(d).is_dir() else None
+
+    def _remember_share_dir(self, path: Path) -> None:
+        try:
+            self._settings.update({"share_dir": str(path.parent)})
+        except OSError as err:
+            log(f"share dir not remembered: {err!r}")
+
+    def _export_file(self) -> None:
+        """Export to file...: the open load order as a .r2z - the on-screen
+        lists / toggles (unsaved edits included, Copy to new's rule) and its
+        BepInEx/config files - written as a job."""
+        if self.current_load_order is None or self._busy is not None:
+            return
+        slug, lo_name = self.current_load_order, self.load_order_picker.currentText()
+        start = self._share_dir()
+        default = share.export_file_name(lo_name)
+        path, _ = QFileDialog.getSaveFileName(
+            self, f'Export load order "{lo_name}"', str(start / default) if start else default, SHARE_FILTER,
+        )
+        if not path:
+            log(f"export {slug}: file picker cancelled")
+            return
+        path = Path(path)
+        if not path.suffix:
+            path = path.with_suffix(share.EXTENSION)
+        self._remember_share_dir(path)
+        active, inactive = self._save_lists()
+        log(f"export {slug} ({lo_name!r}) -> {path}: {len(active)} active, {len(inactive)} inactive"
+            f"{' (unsaved edits included)' if self._dirty() else ''}")
+        self._set_busy(f'Exporting "{lo_name}"...')
+
+        def job(report):
+            return share.export_profile(self.app_root, slug, self.ts_game, path, active=active, inactive=inactive,
+                                        app_version=self.app_version)
+
+        def done(payload: dict) -> None:
+            self._set_busy(None)
+            if "error" in payload:
+                self._warn("Export failed", payload["error"])
+                self.status_text.set_status_text(f"Couldn't export \"{lo_name}\".", "error")
+                return
+            res = payload["ok"]
+            self.status_text.set_status_text(
+                f"Exported \"{lo_name}\": {res['mods']} mods, {res['config_files']} config files -> {path.name}.")
+            self._notice("Export", f"Exported \"{lo_name}\" ({res['mods']} mods, {res['files']} files) to {path}.")
+
+        self._run_job(f"export-{slug}", job, done)
+
+    def _import_file(self) -> None:
+        """Import from file...: a .r2z (VOLT's or TMM's) -> a NEW load order
+        (never merged into an existing one; the file's profile name is the
+        default). Reads and checks the file first (not a profile / another
+        game's = refused before anything is created), then one busy job:
+        framework, each listed mod at the file's version, config files,
+        on/off flags (bepinex_share.import_profile) - and a summary dialog."""
+        if self.game_dir is None or self._busy is not None:
+            return
+        if not self._confirm_discard():
+            log("import: cancelled at the discard-changes prompt")
+            return
+        start = self._share_dir()
+        path, _ = QFileDialog.getOpenFileName(self, "Import a load order from a file", str(start) if start else "", SHARE_FILTER)
+        if not path:
+            log("import: file picker cancelled")
+            return
+        path = Path(path)
+        self._remember_share_dir(path)
+        try:
+            profile = share.read_profile(path)
+        except (share.ProfileError, OSError) as err:
+            self._warn("Couldn't import", str(err))
+            return
+        self._import_profile(profile, path.name)
+
+    def _import_profile(self, profile: dict, source: str) -> None:
+        """The shared tail of both imports (a picked file, a downloaded
+        code): game check, name prompt (the file's profile name offered),
+        one busy job (bepinex_share.import_profile), the new load order
+        opened, the summary dialog."""
+        path = Path(profile["path"])
+        try:
+            share.check_game(profile, self.ts_game, self.game_name)
+        except share.ProfileError as err:
+            self._warn("Couldn't import", str(err))
+            return
+        n = sum(1 for m in profile["mods"] if m["full_name"] != self.ts_game.framework_package)
+        default = profile["name"] or path.stem
+        name = self._ask_name(
+            "Import load order",
+            f"{source} holds {n} mod{'s' if n != 1 else ''} and {len(profile['files'])} config file"
+            f"{'s' if len(profile['files']) != 1 else ''}. It becomes a new load order: {self.ts_game.framework_package} "
+            "is set up for it, every listed mod is downloaded at the file's version, then the config files are put "
+            "in place. Existing load orders aren't touched.",
+            default,
+        )
+        if name is None:
+            return
+        log(f"import {source} ({path}) -> new load order {name!r}: {n} mods, {len(profile['files'])} files, "
+            f"{len(profile['skipped'])} skipped, problems={profile['problems']}")
+        self._set_busy(f'Importing "{name}" from {source}...')
+
+        def job(report):
+            return share.import_profile(self.app_root, path, name, self.ts_game, self.app_version,
+                                        progress=report, game_name=self.game_name, source=source)
+
+        def done(payload: dict) -> None:
+            self._set_busy(None)
+            if "error" in payload:
+                old = self.current_load_order
+                self._reload_load_order_picker(select_slug=old)  # a load order left half-built still lists
+                if self.current_load_order != old:
+                    self._apply_current_load_order_to_panes()
+                self._apply_load_order_state()
+                self._warn("Couldn't import", payload["error"])
+                self.status_text.set_status_text(f"Couldn't import \"{name}\".", "error")
+                return
+            res = payload["ok"]
+            log(f"import: done -> {res['slug']}: {len(res['installed'])} of {res['listed']} installed, "
+                f"{len(res['fallbacks'])} fallbacks, {len(res['failed'])} failed, {len(res['restored'])} files restored")
+            self._settings.update({"last_load_order": res["slug"]})
+            self._reload_load_order_picker(select_slug=res["slug"])
+            self._apply_current_load_order_to_panes()
+            kind = "warn" if res["failed"] or res["errors"] else "info"
+            self.status_text.set_status_text(
+                f"Imported \"{name}\": {len(res['installed'])} of {res['listed']} mods, {len(res['restored'])} config files"
+                + (f", {len(res['failed'])} failed" if res["failed"] else "") + ".", kind)
+            QMessageBox.information(self, "Import finished", share.describe_import(res))
+            self._start_update_check()
+
+        self._run_job(f"import-{name}", job, done, progress=lambda text: self.status_text.set_status_text(text))
+
+    def _import_code(self) -> None:
+        """Import from code...: a profile code (r2modman / TMM / VOLT) ->
+        downloaded from Thunderstore as a job into the cache, then the same
+        import as a picked file (_import_profile)."""
+        if self.game_dir is None or self._busy is not None:
+            return
+        if not self._confirm_discard():
+            log("import from code: cancelled at the discard-changes prompt")
+            return
+        text, ok = QInputDialog.getText(self, "Import from code", IMPORT_CODE_PROMPT)
+        if not ok or not text.strip():
+            log("import from code: cancelled")
+            return
+        try:
+            code = share.parse_code(text)
+        except ValueError as err:
+            self._warn("Couldn't import", str(err))
+            return
+        log(f"import from code {code}: downloading")
+        self._set_busy(f"Downloading profile {code} from Thunderstore...")
+
+        def job(report):
+            return share.fetch_code_profile(self.app_root, code, self.app_version)
+
+        def done(payload: dict) -> None:
+            self._set_busy(None)
+            if "error" in payload:
+                self._warn("Couldn't import", payload["error"])
+                self.status_text.set_status_text(f"Couldn't fetch profile {code}.", "error")
+                return
+            profile = payload["ok"]
+            self.status_text.set_status_text(f"Fetched profile {code}: {len(profile['mods'])} mods.")
+            self._import_profile(profile, profile["source"])
+
+        self._run_job(f"fetch-code-{code}", job, done)
+
+    def _export_code(self) -> None:
+        """Export as code...: confirm (every time - it's an upload to a
+        public service), then the on-screen lists as a .r2z uploaded to
+        Thunderstore's profile service as a job; the code shown in a small
+        dialog with Copy."""
+        if self.current_load_order is None or self._busy is not None:
+            return
+        slug, lo_name = self.current_load_order, self.load_order_picker.currentText()
+        if not self._confirm("Export as code", EXPORT_CODE_CONFIRM.format(name=lo_name), confirm_label="Upload"):
+            log(f"export {slug} as code: cancelled at the upload confirm")
+            return
+        active, inactive = self._save_lists()
+        log(f"export {slug} ({lo_name!r}) as code: {len(active)} active, {len(inactive)} inactive"
+            f"{' (unsaved edits included)' if self._dirty() else ''}")
+        self._set_busy(f'Uploading "{lo_name}" to Thunderstore...')
+
+        def job(report):
+            return share.export_code(self.app_root, slug, self.ts_game, active=active, inactive=inactive,
+                                     app_version=self.app_version)
+
+        def done(payload: dict) -> None:
+            self._set_busy(None)
+            if "error" in payload:
+                self._warn("Export failed", payload["error"])
+                self.status_text.set_status_text(f"Couldn't upload \"{lo_name}\".", "error")
+                return
+            res = payload["ok"]
+            self.status_text.set_status_text(
+                f"Uploaded \"{lo_name}\": {res['mods']} mods, {res['config_files']} config files - code {res['code']}.")
+            self._show_code(lo_name, res["code"])
+
+        self._run_job(f"export-code-{slug}", job, done)
+
+    def _show_code(self, lo_name: str, code: str) -> None:
+        """The code dialog: the code in a read-only field, Copy, Close."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Profile code")
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(GAP)
+        text = _label(f'"{lo_name}" is uploaded. Anyone can import it with this code - in VOLT (Import... > Import from code...), '
+                      "r2modman or Thunderstore Mod Manager:")
+        text.setWordWrap(True)
+        layout.addWidget(text)
+        field = QLineEdit(code)
+        field.setReadOnly(True)
+        field.selectAll()
+        layout.addWidget(field)
+        buttons = QDialogButtonBox()
+        copy = buttons.addButton("Copy code", QDialogButtonBox.ButtonRole.ActionRole)
+        copy.clicked.connect(lambda: self._copy_text(code, f"Copied the profile code {code}."))
+        buttons.addButton(QDialogButtonBox.StandardButton.Close).clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.setMinimumWidth(460)
+        log(f"code dialog shown for {lo_name!r}: {code}")
+        dialog.exec()
+        dialog.deleteLater()
 
     def _save_lists(self) -> tuple[list[dict], list[str]]:
         """save_load_order's arguments from the panes: Active as
@@ -1144,42 +1544,88 @@ class BepInExMainScreen(QWidget):
     def _update_issues(self) -> None:
         """An active, enabled mod whose declared dependency (the framework
         aside) isn't installed = error; installed but inactive / toggled off
-        = warning. Fills _issues and the "⚠ N · ✕ M" button."""
+        = warning (bepinex_load_orders.dependency_issues). Fills _issue_list,
+        the rows' _issues and the "⚠ N · ✕ M" button."""
+        self._issue_list = lo.dependency_issues(self._entries, self._active_ids(), self._toggles,
+                                                self.ts_game.framework_package)
         issues: dict[str, list[tuple[str, str]]] = {}
-        active = set(self._active_ids())
-        for mod_id in active:
-            if not self._toggles.get(mod_id, True):
-                continue
-            e = self._entries.get(mod_id)
-            for dep in (e or {}).get("dependencies", ()):
-                try:
-                    d = ts.PackageRef.parse(dep).full_name
-                except ValueError:
-                    continue
-                if d == self._framework or d == mod_id:
-                    continue
-                if d not in self._entries:
-                    issues.setdefault(mod_id, []).append(("error", f"requires {d}, which isn't installed"))
-                elif d not in active:
-                    issues.setdefault(mod_id, []).append(("warning", f"requires {d}, which is inactive"))
-                elif not self._toggles.get(d, True):
-                    issues.setdefault(mod_id, []).append(("warning", f"requires {d}, which is switched off"))
+        for issue in self._issue_list:
+            issues.setdefault(issue["mod_id"], []).append((issue["severity"], issue["text"]))
         self._issues = issues
-        warnings = sum(1 for v in issues.values() for sev, _ in v if sev == "warning")
-        errors = sum(1 for v in issues.values() for sev, _ in v if sev == "error")
+        warnings = sum(1 for i in self._issue_list if i["severity"] == "warning")
+        errors = sum(1 for i in self._issue_list if i["severity"] == "error")
         self.issues_label.setText(_issue_count_html(warnings, errors))
         self.issues_button.setVisible(bool(warnings or errors))
 
     def _show_issues(self) -> None:
-        lines = []
-        for mod_id, items in self._issues.items():
-            name = self._display_name(mod_id)
-            lines += [f"{'✕' if sev == 'error' else '⚠'} {name} {text}" for sev, text in items]
-        log(f"issues shown: {len(lines)}")
-        QMessageBox.information(
-            self, "Warnings and errors",
-            "\n".join(lines) if lines else "No issues.",
-        )
+        """The "⚠ N · ✕ M" button: the Warnings and errors window
+        (screens/bepinex_issues_window.py) over the live issue list; its
+        Install buttons run _install_missing."""
+        log(f"issues window opened: {len(self._issue_list)} issues")
+        BepInExIssuesWindow(
+            lambda: self._issue_list, self._display_name, self._install_missing,
+            is_busy=lambda: self._busy is not None, parent=self,
+        ).exec()
+        log("issues window closed")
+
+    def _install_missing(self, packages: list[str], on_done=None, parent: QWidget | None = None) -> None:
+        """Installs the missing dependencies `packages` (full_names, each at
+        Thunderstore's latest, with their own dependencies - install_mod's
+        policy) into the open load order as ONE job, one package after the
+        other; a package that fails is reported, the rest still install.
+        The shared path behind the issues window's Install / Install all
+        missing and the row menu's Install missing dependencies. Refreshes
+        the panes like Add mod; `on_done({"ok": {"installed", "failed":
+        [(package, message)]}} | {"error": text})` runs last."""
+        packages = list(dict.fromkeys(packages))
+        if self.current_load_order is None or self._busy is not None or not packages:
+            why = "no load order" if self.current_load_order is None else "busy" if self._busy else "nothing to install"
+            log(f"install missing {packages}: ignored ({why})")
+            if on_done is not None:
+                on_done({"error": "The screen is busy." if self._busy else "Nothing to install."})
+            return
+        n = len(packages)
+        self._set_busy(f"Installing {n} missing dependenc{'ies' if n != 1 else 'y'}...")
+        slug = self.current_load_order
+
+        def job(report):
+            done, failed = [], []
+            for i, name in enumerate(packages, 1):
+                report(f"Installing {name} ({i} of {n})...")
+                try:
+                    res = lo.install_mod(self.app_root, slug, self.ts_game, ts.PackageRef.parse(name), self.app_version)
+                except (ts.ThunderstoreError, PackageError, OSError, ValueError) as err:
+                    log(f"install missing: {name} failed: {err!r}")
+                    failed.append((name, str(err)))
+                    continue
+                done += [e["full_name"] for e in res["installed"]]
+                failed += [(p.get("package", "?"), p.get("message", "")) for p in res["problems"]]
+            return {"installed": done, "failed": failed}
+
+        def finished(payload: dict) -> None:
+            self._set_busy(None)
+            if "error" in payload:
+                self._refresh_after_change()
+                self._warn("Couldn't install the missing dependencies", payload["error"], parent)
+                self.status_text.set_status_text("Couldn't install the missing dependencies.", "error")
+            else:
+                res = payload["ok"]
+                log(f"install missing: installed {res['installed']}, {len(res['failed'])} failed")
+                self._absorb_installed(res["installed"])
+                if res["failed"]:
+                    self._warn("Some dependencies couldn't be installed",
+                               "\n".join(f"{name}: {msg}" for name, msg in res["failed"]), parent)
+                got = len(res["installed"])
+                self.status_text.set_status_text(
+                    f"Installed {got} missing dependenc{'ies' if got != 1 else 'y'}."
+                    + (f" {len(res['failed'])} failed." if res["failed"] else ""),
+                    "warn" if res["failed"] else "info",
+                )
+                self._start_update_check(force=True)
+            if on_done is not None:
+                on_done(payload)
+
+        self._run_job("install-missing", job, finished, progress=lambda text: self.status_text.set_status_text(text))
 
     # ---- update checking (THUNDERSTORE.md §3) ----
     def _start_update_check(self, force: bool = False) -> None:
@@ -1338,6 +1784,73 @@ class BepInExMainScreen(QWidget):
         if ref.full_name in self._entries:
             self._notice("Add mod", f"{ref.full_name} is already in this load order.")
             return
+        self._install_package(ref)
+
+    def _browse_mods(self) -> None:
+        """Browse Mods...: the in-app Thunderstore browser over the open load
+        order (screens/bepinex_browse_window.py); its Install is
+        _install_package, so the panes refresh behind the window."""
+        if self.current_load_order is None or self._busy is not None:
+            return
+        name = self.load_order_picker.currentText()
+        log(f"browse mods window opened for {self.current_load_order} ({name!r})")
+        BepInExBrowseWindow(
+            self.ts_game, self.game_name, name,
+            installed=lambda: self._entries, framework=self._framework, run_job=self._run_job,
+            install=self._install_package, switch_version=self._switch_version, is_busy=lambda: self._busy is not None,
+            app_version=self.app_version, parent=self,
+        ).exec()
+        log("browse mods window closed")
+
+    def _switch_version(self, full_name: str, version: str | None, on_done=None, parent: QWidget | None = None) -> None:
+        """The browser's Versions tab (and its Update-to-latest button):
+        re-installs an installed mod at `version` (None = the latest) in
+        place - update_mod's path: files diffed, config kept, on-disk state
+        and list position preserved - as a job; the panes refresh like an
+        update. `on_done(payload)` runs last, on the GUI thread."""
+        if self._busy is not None or full_name not in self._entries or full_name in self._updating:
+            log(f"switch {full_name} -> {version or 'latest'}: ignored ({'busy' if self._busy else 'not installed / in flight'})")
+            if on_done is not None:
+                on_done({"error": "The screen is busy." if self._busy else f"{full_name} isn't in this load order."})
+            return
+        name = self._display_name(full_name)
+        self._updating.add(full_name)
+        self._set_busy(f"{'Updating' if version is None else 'Switching'} {name}{'' if version is None else f' to {version}'}...")
+        slug = self.current_load_order
+
+        def job(report):
+            return lo.update_mod(self.app_root, slug, self.ts_game, full_name, self.app_version, version=version)
+
+        def done(payload: dict) -> None:
+            self._updating.discard(full_name)
+            self._set_busy(None)
+            if "error" in payload:
+                self._warn(f"Couldn't {'update' if version is None else 'switch'} {name}", payload["error"], parent)
+                self.status_text.set_status_text(f"Couldn't {'update' if version is None else 'switch'} {name}.", "error")
+            else:
+                res = payload["ok"]
+                self._refresh_after_change(res["manifest"])
+                if res["updated"]:
+                    self.status_text.set_status_text(f"{name} is now {res['entry']['version']}.")
+                else:
+                    self.status_text.set_status_text(f"{name} already is {res['entry']['version']}.")
+                self._start_update_check(force=True)
+            if on_done is not None:
+                on_done(payload)
+
+        self._run_job(f"switch-{full_name}", job, done)
+
+    def _install_package(self, ref: ts.PackageRef, on_done=None, parent: QWidget | None = None) -> None:
+        """Installs `ref` (its pinned version, else the latest) plus its
+        dependencies into the open load order as a job (install_mod), then
+        refreshes the panes - Add mod... and the browser's Install alike.
+        `on_done(payload)` runs last, on the GUI thread, when given;
+        warnings are parented to `parent` (the browser) when given."""
+        if self.current_load_order is None or self._busy is not None:
+            log(f"install {ref.full_name}: ignored ({'no load order' if self.current_load_order is None else 'busy'})")
+            if on_done is not None:
+                on_done({"error": "The screen is busy." if self._busy else "No load order is open."})
+            return
         self._set_busy(f"Installing {ref.full_name}...")
         slug = self.current_load_order
 
@@ -1348,30 +1861,38 @@ class BepInExMainScreen(QWidget):
             self._set_busy(None)
             if "error" in payload:
                 self._refresh_after_change()  # a dependency may have landed before the target failed
-                self._warn(f"Couldn't install {ref.full_name}", payload["error"])
+                self._warn(f"Couldn't install {ref.full_name}", payload["error"], parent)
                 self.status_text.set_status_text(f"Couldn't install {ref.full_name}.", "error")
+                if on_done is not None:
+                    on_done(payload)
                 return
             res = payload["ok"]
             new = [e["full_name"] for e in res["installed"]]
             log(f"add mod: installed {new}, {len(res['problems'])} problems")
-            # The new mods are on disk as active + enabled already: they join
-            # the on-screen Active list and the baseline alike, so an install
-            # is never itself an unsaved change.
-            ids, toggles = self._snapshot()
-            self._take_manifest(self._read_manifest())
-            self._show_lists(ids + [n for n in new if n not in ids], {**toggles, **{n: True for n in new}})
-            base_ids, base_toggles = self._baseline
-            self._baseline = (base_ids + [n for n in new if n not in base_ids], {**base_toggles, **{n: True for n in new}})
-            self._apply_load_order_state()
+            self._absorb_installed(new)
             if res["problems"]:
                 self._warn("Some dependencies couldn't be installed",
-                           "\n".join(f"{p.get('package', '?')}: {p.get('message', '')}" for p in res["problems"]))
+                           "\n".join(f"{p.get('package', '?')}: {p.get('message', '')}" for p in res["problems"]), parent)
             extra = len(new) - 1
             self.status_text.set_status_text(
                 f"Installed {ref.full_name}" + (f" and {extra} dependenc{'ies' if extra != 1 else 'y'}" if extra > 0 else "") + ".")
             self._start_update_check(force=True)
+            if on_done is not None:
+                on_done(payload)
 
         self._run_job(f"install-{ref.full_name}", job, done)
+
+    def _absorb_installed(self, new: list[str]) -> None:
+        """After an install landed on disk: the new mods (active + enabled
+        already) join the on-screen Active list and the baseline alike, so
+        an install is never itself an unsaved change; the manifest is
+        re-read, the state re-applied."""
+        ids, toggles = self._snapshot()
+        self._take_manifest(self._read_manifest())
+        self._show_lists(ids + [n for n in new if n not in ids], {**toggles, **{n: True for n in new}})
+        base_ids, base_toggles = self._baseline
+        self._baseline = (base_ids + [n for n in new if n not in base_ids], {**base_toggles, **{n: True for n in new}})
+        self._apply_load_order_state()
 
     def _uninstall(self, mod_id: str) -> None:
         if mod_id == self._framework or mod_id not in self._entries or self._busy is not None:
@@ -1400,6 +1921,197 @@ class BepInExMainScreen(QWidget):
         self.status_text.set_status_text(f"Uninstalled {name}.")
         self._start_update_check(force=True)
 
+    # ---- Run: the BepInEx launch through Steam (THUNDERSTORE.md §2; bepinex_launch.py) ----
+    def _run(self, modded: bool = True) -> None:
+        """Modded: starts the game through Steam with the open load order's
+        BepInEx injected (bepinex_launch.start), then watches for it to exit
+        and tidies the game folder. Never saves: with unsaved changes it
+        asks first, and the game gets the load order as it was last saved.
+        `modded=False` is the Vanilla button: a plain Steam launch, nothing
+        copied, no confirms, no load order needed (slug / tree / manifest
+        may all be None - only the modded branches read them), the same
+        recovery / already-running checks and the same busy lock while the
+        game runs."""
+        if self._busy is not None or self._launch is not None:
+            log("run: ignored, the screen is busy")
+            return
+        reason = bl.platform_error()
+        if reason:
+            log(f"run: preflight failed (platform): {reason}")
+            self._warn("Run failed", reason)
+            return
+        exe = self.game.find_game_exe(self.game_dir)
+        if exe is None:
+            log(f"run: preflight failed (exe): game_dir={self.game_dir}, looked for {', '.join(self.game.GAME_EXES)}")
+            self._warn("Run failed", f"No {self.game_name} executable found in {self.game_dir or '(game folder not set)'}")
+            return
+        slug, name = self.current_load_order, self.load_order_picker.currentText()
+        if modded and (slug is None or self._manifest is None):
+            log("run: preflight failed (load order): none open")
+            self._warn("Run failed", "Open a load order first.")
+            return
+        tree = self._load_order_dir()
+        if modded:
+            missing = bl.framework_missing(tree, self._manifest)
+            if missing:
+                log(f"run: preflight failed (framework): tree={tree}, missing {missing}")
+                self._warn(
+                    "Run failed",
+                    f"The load order's BepInEx install is incomplete (missing {', '.join(missing)}). "
+                    "Rescan, or delete and recreate the load order.",
+                )
+                return
+        steam_exe = paths.find_steam_exe()
+        if steam_exe is None:
+            looked = ", ".join(str(p) for p in paths.steam_root_candidates()) or "(nowhere)"
+            log(f"run: preflight failed (steam.exe): looked in {looked}")
+            self._warn(
+                "Run failed",
+                f"Couldn't find steam.exe - {self.game_name} is started through Steam. Looked in: {looked}",
+            )
+            return
+        mods_with_errors = [m for m, v in self._issues.items() if any(sev == "error" for sev, _ in v)]
+        log(f"run: preflight ok ({'modded' if modded else 'vanilla'}): game_dir={self.game_dir}, exe={exe.name}, "
+            f"load order={slug} ({name!r}), tree={tree}, steam={steam_exe}, dirty={'yes' if self._dirty() else 'no'}, "
+            f"mods with dependency errors={len(mods_with_errors)}")
+        if modded and self._dirty() and not self._confirm(
+            "Unsaved load order changes",
+            f"The active list has unsaved changes. Run doesn't save them: {self.game_name} starts with the load order "
+            "as it was last saved.",
+            confirm_label="Run without saving",
+        ):
+            log("run: cancelled at the unsaved-changes prompt (nothing saved)")
+            return
+        n = len(mods_with_errors)
+        if modded and n and not self._confirm(
+            "Missing dependencies",
+            f"{n} active mod{'s have' if n != 1 else ' has'} dependencies that aren't installed; BepInEx will skip "
+            f"{'them' if n != 1 else 'it'}. Run anyway?",
+            confirm_label="Run anyway",
+        ):
+            log("run: cancelled at the missing-dependencies prompt")
+            return
+        if modded and (Path(self.game_dir) / BEPINEX_DIR).is_dir() and not self._confirm(
+            "BepInEx already in the game folder",
+            f"{self.game_name}'s folder has its own BepInEx install. This run uses the load order's BepInEx instead "
+            "and leaves that folder untouched (its plugins won't load). Continue?",
+            confirm_label="Continue",
+        ):
+            log("run: cancelled at the foreign-BepInEx prompt")
+            return
+        try:
+            bl.start(
+                self.app_root, self.game_dir, tree, self._manifest, appid=self.game.STEAM_APPID, exe_name=exe.name,
+                steam_exe=steam_exe, load_order=slug or "", load_order_name=name, modded=modded,
+            )
+        except (bl.LaunchError, OSError) as err:
+            log(f"run: failed: {err!r}")
+            self._warn("Run failed", str(err))
+            return
+        self._begin_watch(exe_name=exe.name, load_order_name=name, modded=modded, phase="starting")
+
+    def _recover_launch(self) -> None:
+        """On open: a launch record left by a previous VOLT session means the
+        game is still running (re-attach: busy + watch until it exits, then
+        clean up) or the last run's loader files are still in the game
+        folder (clean up now, say so)."""
+        try:
+            rec = bl.recover(self.app_root)
+        except OSError as err:
+            log(f"run: recovery failed: {err!r}")
+            self._warn("Couldn't check the last run", str(err))
+            return
+        state = rec["state"]
+        if state == "none":
+            return
+        record = rec["record"]
+        name = record.get("load_order_name") or record.get("load_order") or "?"
+        if state == "running":
+            self._begin_watch(exe_name=record["exe_name"], load_order_name=name, modded=bool(record.get("modded", True)),
+                              phase="running")
+            return
+        if state == "incomplete":
+            self._warn_cleanup_failed(rec["result"])
+            self.status_text.set_status_text(
+                f"Leftover loader files from the last run are still in the {self.game_name} folder.", "warn")
+        else:
+            self.status_text.set_status_text(
+                f"Removed leftover loader files from the {self.game_name} folder (the last run wasn't cleaned up).", "warn")
+
+    def _begin_watch(self, *, exe_name: str, load_order_name: str, modded: bool, phase: str) -> None:
+        """Busy until the game (by image name) has been seen and is gone."""
+        self._launch = {"exe_name": exe_name, "load_order_name": load_order_name, "modded": modded,
+                        "phase": phase, "started": time.monotonic()}
+        what = f'load order "{load_order_name}"' if modded else "vanilla, no mods"
+        if phase == "running":
+            self._set_busy(f"{self.game_name} is running ({what}), started by a previous VOLT session."
+                           + (" VOLT tidies the game folder when it exits." if modded else ""))
+        else:
+            self._set_busy(f"Launching {self.game_name} through Steam ({what})...")
+        self._poll_timer.start(bl.POLL_INTERVAL_S * 1000)
+
+    def _poll_launch(self) -> None:
+        """One tick of the watch: tasklist off the GUI thread, then _on_poll."""
+        if self._launch is None:
+            return
+        exe_name = self._launch["exe_name"]
+        self._run_job("launch-poll", lambda report: bl.running_pids(exe_name), self._on_poll)
+
+    def _on_poll(self, payload: dict) -> None:
+        st = self._launch
+        if st is None:
+            return
+        pids = payload.get("ok") or set()
+        elapsed = time.monotonic() - st["started"]
+        what = f'load order "{st["load_order_name"]}"' if st["modded"] else "vanilla, no mods"
+        if st["phase"] == "starting":
+            if pids:
+                st["phase"], st["started"] = "running", time.monotonic()
+                log(f"run: {st['exe_name']} running (pids {sorted(pids)}) after {elapsed:.0f}s")
+                self._set_busy(f"{self.game_name} is running ({what})."
+                               + (" VOLT tidies the game folder when it exits." if st["modded"] else ""))
+            elif elapsed >= bl.START_TIMEOUT_S:
+                log(f"run: {st['exe_name']} didn't start within {bl.START_TIMEOUT_S}s")
+                self._end_watch(f"{self.game_name} didn't start within {bl.START_TIMEOUT_S // 60} minutes", "warn")
+                return
+        elif not pids:
+            log(f"run: {st['exe_name']} exited after {_duration(elapsed)}")
+            self._end_watch(f"{self.game_name} exited after {_duration(elapsed)}", "info")
+            return
+        self._poll_timer.start(bl.POLL_INTERVAL_S * 1000)
+
+    def _end_watch(self, what: str, kind: str) -> None:
+        """The game is gone (or never came): a modded run's cleanup (as a
+        job - a locked file is retried for a few seconds), then the status."""
+        st, self._launch = self._launch, None
+        self._poll_timer.stop()
+        if not st["modded"]:
+            self._set_busy(None)
+            self.status_text.set_status_text(f"{what}.", kind)
+            return
+        self._set_busy(f"{what} - tidying the game folder...")
+
+        def done(payload: dict) -> None:
+            self._set_busy(None)
+            result = payload.get("ok") or {"removed": [], "restored": [], "failed": [("?", payload.get("error", ""))]}
+            if result["failed"]:
+                self._warn_cleanup_failed(result)
+                self.status_text.set_status_text(
+                    f"{what} - some loader files are still in the {self.game_name} folder.", "warn")
+            else:
+                self.status_text.set_status_text(f"{what} - game folder restored.", kind)
+
+        self._run_job("launch-cleanup", lambda report: bl.cleanup(self.app_root), done)
+
+    def _warn_cleanup_failed(self, result: dict) -> None:
+        names = ", ".join(n for n, _ in result["failed"])
+        first = result["failed"][0][1]
+        self._warn(
+            "Couldn't restore the game folder",
+            f"Couldn't remove {names} from the {self.game_name} folder ({first}). They're harmless for normal Steam "
+            "launches; VOLT retries the next time you open this manager or press Modded or Vanilla.",
+        )
+
     # ---- right-click menu ----
     def _show_mod_menu(self, pane, pos) -> None:
         index = pane.indexAt(pos)
@@ -1413,7 +2125,8 @@ class BepInExMainScreen(QWidget):
         site = e.get("website_url") or ""
         is_fw = mod_id == self._framework
         idle = self._busy is None
-        log(f"context menu: {mod_id} in {self._pane_name(pane)} (folder={folder}, update={self._has_update(mod_id)})")
+        log(f"context menu: {mod_id} in {self._pane_name(pane)} (folder={folder}, update={self._has_update(mod_id)}, "
+            f"missing deps={lo.mod_missing_dependencies(self._entries, mod_id, self.ts_game.framework_package)})")
         menu = QMenu(pane)
 
         def item(label: str, enabled, fn) -> None:
@@ -1427,6 +2140,9 @@ class BepInExMainScreen(QWidget):
         item("Copy package name", True, lambda: self._copy_text(e["full_name"], f'Copied "{e["full_name"]}".'))
         item("Edit config...", True, lambda: self._edit_config(e.get("name") or ""))
         menu.addSeparator()
+        missing = lo.mod_missing_dependencies(self._entries, mod_id, self.ts_game.framework_package)
+        if missing:  # only a mod with missing dependencies gets the entry (Active or Inactive alike)
+            item(f"Install missing dependencies ({len(missing)})", idle, lambda: self._install_missing(missing))
         item("Update", idle and self._has_update(mod_id) and mod_id not in self._updating, lambda: self._update_one(mod_id))
         item("Uninstall...", idle and not is_fw, lambda: self._uninstall(mod_id))
         menu.exec(pane.viewport().mapToGlobal(pos))
@@ -1615,15 +2331,15 @@ class BepInExMainScreen(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(12)
         self.import_button = _button("Import...")
-        self.import_button.setToolTip(STAGE_TOOLTIP["import"])
+        self.import_button.setToolTip(IMPORT_TOOLTIP)
         self.export_button = _button("Export...")
-        self.export_button.setToolTip(STAGE_TOOLTIP["export"])
+        self.export_button.setToolTip(EXPORT_TOOLTIP)
         self.rescan_button = _button("Rescan")
         self.rescan_button.setToolTip("Re-read the open load order from disk and check for updates again.")
         self.add_mod_button = _button("Add mod...", variant="accent-outline")
         self.add_mod_button.setToolTip("Install a Thunderstore package (and its dependencies) into the open load order.")
         self.browse_button = _button("Browse Mods...", variant="accent-outline")
-        self.browse_button.setToolTip(STAGE_TOOLTIP["browse"])
+        self.browse_button.setToolTip(BROWSE_TOOLTIP.format(game=self.game_name))
         layout.addLayout(self._group(self.import_button, self.export_button, self.rescan_button,
                                      self.add_mod_button, self.browse_button))
         layout.addStretch(1)
@@ -1639,9 +2355,15 @@ class BepInExMainScreen(QWidget):
         self.issues_button.setVisible(False)
         layout.addLayout(self._group(self.issues_button))
         self.save_button = _button("Save", variant="primary")
-        self.run_button = _button("Run", variant="primary")
-        self.run_button.setToolTip(STAGE_TOOLTIP["run"])
-        layout.addLayout(self._group(self.save_button, self.run_button))
+        # Vanilla sits right above Modded (the button that was "Run"), placed
+        # by the user 2026-09-28; both carry the play triangle, same icon.
+        self.vanilla_button = _button("Vanilla", variant="vanilla")
+        self.run_button = _button("Modded", variant="primary")
+        for button, tip in ((self.vanilla_button, VANILLA_TOOLTIP), (self.run_button, MODDED_TOOLTIP)):
+            button.setToolTip(tip.format(game=self.game_name))
+            button.setIcon(_play_icon())
+            button.setIconSize(QSize(PLAY_ICON_PX, PLAY_ICON_PX))
+        layout.addLayout(self._group(self.save_button, self.vanilla_button, self.run_button))
         return column
 
     @staticmethod

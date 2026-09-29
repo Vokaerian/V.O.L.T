@@ -196,24 +196,30 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
     },
     {
         "name": "Mod right-click menu",
-        "short": "Open the mod's folder or pages, copy its package name, edit config, update or uninstall it.",
+        "short": "Open the mod's folder or pages, copy its package name, edit config, install missing dependencies, update or uninstall it.",
         "long": (
             "Right-click a row in either list. Open folder opens the mod's own subfolder under BepInEx/plugins, "
             "Open on Thunderstore its Thunderstore page and Open website its own site, when it has one. Copy "
-            "package name copies the Team-Package name Thunderstore uses; Edit config... opens the load order's "
-            "config files with the search pre-filled with this mod's name, and Update is available while a newer "
-            "version is out. Uninstall... removes the mod's files from this load order (its config files are "
-            "kept; other load orders aren't affected) after a confirmation."
+            "package name copies the Team-Package name Thunderstore uses, and Edit config... opens the load order's "
+            "config files with the search pre-filled with this mod's name. Install missing dependencies (N) "
+            "appears only on a mod whose dependencies aren't installed and fetches them - each at its latest "
+            "version, with whatever they need themselves - into the Active list; Update is available while a "
+            "newer version is out; Uninstall... removes the mod's files from this load order (its config files "
+            "are kept; other load orders aren't affected) after a confirmation."
         ),
     },
     {
         "name": "Warnings and errors",
-        "short": "The \"⚠ N · ✕ M\" button: mods whose dependencies aren't there.",
+        "short": "The \"⚠ N · ✕ M\" button: mods whose dependencies aren't there, with a fix for the missing ones.",
         "long": (
             "Appears above Save while an Active, switched-on mod declares a dependency that isn't installed in "
             "this load order (an error, marked ✕ on the row) or is installed but inactive or switched off (a "
-            "warning). Click it for the list. Adding a mod installs its dependencies with it, so this mostly "
-            "shows up after something was uninstalled or switched off."
+            "warning). Click it for the window: one entry per problem, grouped by mod, with what it means and "
+            "what fixes it. A missing dependency has an Install button right there (its latest version, with "
+            "whatever it needs itself, added to the Active list), and Install all missing at the top does them "
+            "all at once; a dependency that's merely inactive or switched off is fixed by activating or "
+            "switching it back on, so it has no button. Adding a mod installs its dependencies with it, so this "
+            "mostly shows up after something was uninstalled or switched off."
         ),
     },
     # ---- actions column ----
@@ -233,16 +239,70 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
             "address of its thunderstore.io page. VOLT downloads its latest version (or takes it from the "
             "cache), installs any of its dependencies that aren't in the load order yet, and appends it to the "
             "Active list switched on. Downloads are shared: a package fetched once is reused by every load "
-            "order. An in-app mod browser is coming in a later update."
+            "order. It's the shortcut for when you already know the package; Browse Mods is the same install "
+            "with searching built in."
         ),
     },
     {
-        "name": "Import, Export, Browse Mods, Run",
-        "short": "Not available yet - each comes in a later update.",
+        "name": "Browse Mods",
+        "short": "Opens the in-app Thunderstore browser to find Valheim mods and install them into the open load order.",
         "long": (
-            "Import and Export (sharing a load order as a file), Browse Mods (the in-app Thunderstore browser) "
-            "and Run (starting Valheim with the open load order's BepInEx) are on the screen as designed but "
-            "greyed out until their update lands. Until then, start Valheim from Steam as usual."
+            "Search by name, narrow by category, and sort by most downloaded (the starting order), last updated, "
+            "top rated or newest - each page comes straight from Thunderstore as you ask for it, so nothing is "
+            "downloaded until you press Install. A card's Install button adds that mod (and any dependencies it "
+            "needs) to the Active list, exactly like Add mod, and the browser stays open so you can keep going. "
+            "Click a card itself for the mod's page: Details (its README, with the dependency check underneath), "
+            "Required (each dependency and whether it's already in the load order), Versions (every release, each "
+            "with its own Install) and Changelog, plus the latest version's facts and categories on the right - the "
+            "version selector in the header decides what the big Install button installs, and it says how many "
+            "extra packages come along. Back to results, Esc or Backspace return to the grid where you left it; "
+            "the X (or Esc on the grid) closes the browser."
+        ),
+    },
+    {
+        "name": "Import",
+        "short": "Creates a new load order from a .r2z profile file - VOLT's or r2modman / Thunderstore Mod Manager's.",
+        "long": (
+            "Pick \"Import from file...\" and choose the file; VOLT asks for a name (the file's own profile name is "
+            "offered) and always makes a new load order - an existing one is never changed. It sets up BepInEx at the "
+            "file's version, downloads every listed mod at exactly the version in the file (if Thunderstore no longer "
+            "has that version, the latest is installed and the summary says so; a mod that can't be fetched at all is "
+            "listed as failed and the rest still install), puts the file's config files in place, and switches off "
+            "the mods the file has switched off. A file made for another game is refused. Mod files never travel in "
+            "the file itself, so an import needs an internet connection. \"Import from code...\" takes a profile code "
+            "instead - VOLT's, r2modman's or Thunderstore Mod Manager's - downloads that profile from Thunderstore and "
+            "then imports it exactly the same way."
+        ),
+    },
+    {
+        "name": "Export",
+        "short": "Saves the open load order as a .r2z profile file that VOLT and r2modman / Thunderstore Mod Manager can read.",
+        "long": (
+            "Pick \"Export to file...\" and choose where to save it (the load order's name is the default file name). "
+            "The file holds the mod list as shown on screen right now - unsaved changes included, like Copy to new - "
+            "with each mod's version and on/off state, plus every file in the load order's BepInEx config folder, "
+            "so a friend's import gets your settings too. Inactive mods are written as switched off (that's what "
+            "another mod manager understands); VOLT itself restores them to Inactive. Mod files aren't included - "
+            "they're downloaded again on import. \"Export as code...\" uploads the same profile to Thunderstore's public "
+            "profile-sharing service (after asking you to confirm - anyone with the code can fetch it, and it can't be "
+            "taken back) and shows a short code with a Copy button; VOLT, r2modman and Thunderstore Mod Manager can all "
+            "import it."
+        ),
+    },
+    {
+        "name": "Modded and Vanilla",
+        "short": "The two play buttons: Modded starts Valheim with the open load order, Vanilla without mods or BepInEx.",
+        "long": (
+            "Modded copies the load order's two BepInEx loader files (winhttp.dll and doorstop_config.ini) into the "
+            "Valheim folder - anything already there under those names is set aside - and starts the game through "
+            "Steam with launch arguments that point BepInEx at the load order's own folder, so the game install "
+            "itself stays as it is; when the game exits, the copied files are removed and anything set aside is put "
+            "back. Vanilla starts Valheim through Steam as it is, with nothing copied and no BepInEx - it needs "
+            "no load order open. Either way "
+            "the screen stays locked while Valheim runs, and a game left running when VOLT closes is picked up "
+            "again the next time this screen opens. Neither button saves: with unsaved changes Modded asks first "
+            "and Valheim gets the load order as it was last saved, and it also asks before starting with mods "
+            "whose dependencies aren't installed."
         ),
     },
     {

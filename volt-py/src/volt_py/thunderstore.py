@@ -4,9 +4,10 @@ one client serves Valheim, Lethal Company, R.E.P.O. alike.
 
 - fetch_package(namespace, name): GET /api/experimental/package/<ns>/<name>/
   -> the package's metadata (latest.version_number / download_url /
-  dependencies, date_updated, ...). This is the only listing endpoint used;
-  the bulk /api/v1/package/ dump is deliberately NOT called here (tens of MB,
-  unpaginated - the mod browser's catalog cache, stage 3f, is its own thing).
+  dependencies, date_updated, ...). The bulk /api/v1/package/ dump is
+  deliberately never called (tens of MB, unpaginated); the mod browser's
+  paged listing calls live in thunderstore_browse.py (stage 3f), which
+  reuses this module's request / error / cache pieces.
 - download(url, dest): streams a package zip to disk atomically.
 - ensure_cached(app_root, ref, download_url): the shared package cache,
   <APP-ROOT>/cache/packages/<Team-Package-Version>.zip - one download per
@@ -47,7 +48,7 @@ from .applog import clip, log
 SITE = "https://thunderstore.io"
 TIMEOUT_S = 15.0  # metadata requests
 DOWNLOAD_TIMEOUT_S = 60.0  # per socket operation while streaming a zip, not the whole transfer
-CACHE_DIR = "cache"  # <APP-ROOT>/cache/ - also where 3f's catalog cache will go
+CACHE_DIR = "cache"  # <APP-ROOT>/cache/ (packages/ + the metadata cache; the browser keeps no disk cache)
 PACKAGES_DIR = "packages"  # <APP-ROOT>/cache/packages/<Team-Package-Version>.zip
 META_FILE = "package-meta.json"  # <APP-ROOT>/cache/package-meta.json (read_meta_cache)
 _CHUNK = 1 << 16

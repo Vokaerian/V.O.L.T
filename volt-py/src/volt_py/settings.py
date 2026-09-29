@@ -34,6 +34,7 @@ DEFAULTS = {
     # otherwise. Only set_steam_acquire_via stores a value.
     "steam_acquire_via": None,
     "skip_sync_confirm": False,  # True once "Don't ask me again" was ticked in Sync to Steam's heads-up dialog
+    "share_dir": None,  # folder of the last Import / Export file pick (Thunderstore games' .r2z profiles)
 }
 
 ACQUIRE_VIA = ("steamcmd", "steamworks", "gog")

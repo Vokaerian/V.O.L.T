@@ -50,6 +50,12 @@ and update_mod() re-downloads + installs one package (the framework
 included) in place - new files overwrite, files the old version had and the
 new one doesn't are deleted, config kept, the mod's on-disk enabled/disabled
 state preserved. The manager screen runs both off the GUI thread.
+
+Import/Export (THUNDERSTORE.md §4, stage 3e) lives in bepinex_share.py and
+builds on this module's two pinning hooks: create_load_order(framework_
+version=) and install_mod(pins=, fallback_latest=) reproduce a profile's
+exact versions, falling back to Thunderstore's latest (and saying so) for a
+version that's gone.
 """
 
 import os
@@ -188,6 +194,76 @@ def installed(manifest: dict) -> dict[str, dict]:
     return out
 
 
+# ---- dependency presence (THUNDERSTORE.md §3): the manager's "⚠ N · ✕ M" issues ----
+ISSUE_TEXT = {
+    "missing": "requires {dep}, which isn't installed",
+    "inactive": "requires {dep}, which is inactive",
+    "off": "requires {dep}, which is switched off",
+}
+
+
+def _declared_dependencies(entry: dict | None) -> list[str]:
+    """The full_names an installed entry declares (bad strings skipped, each once)."""
+    out: list[str] = []
+    for dep in (entry or {}).get("dependencies", ()):
+        try:
+            name = ts.PackageRef.parse(dep).full_name
+        except ValueError:
+            continue
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def dependency_issues(entries: dict[str, dict], active_ids: list[str], toggles: dict[str, bool],
+                      framework_package: str | None) -> list[dict]:
+    """The manager's dependency issues: for each Active, switched-on mod,
+    each declared dependency (the game's framework package aside - it's
+    part of every load order, never a listed dependency) that isn't
+    installed (kind "missing", severity "error"), is installed but not in
+    Active ("inactive", "warning") or is in Active but switched off ("off",
+    "warning"). One dict per (mod, dependency): {"mod_id", "dep", "kind",
+    "severity", "text"} in Active order. Qt-free; the screen derives its
+    per-row lists and the "⚠ N · ✕ M" count from this."""
+    active = set(active_ids)
+    out: list[dict] = []
+    for mod_id in active_ids:
+        if not toggles.get(mod_id, True):
+            continue
+        for dep in _declared_dependencies(entries.get(mod_id)):
+            if dep == framework_package or dep == mod_id:
+                continue
+            if dep not in entries:
+                kind, severity = "missing", "error"
+            elif dep not in active:
+                kind, severity = "inactive", "warning"
+            elif not toggles.get(dep, True):
+                kind, severity = "off", "warning"
+            else:
+                continue
+            out.append({"mod_id": mod_id, "dep": dep, "kind": kind, "severity": severity,
+                        "text": ISSUE_TEXT[kind].format(dep=dep)})
+    return out
+
+
+def missing_packages(issues: list[dict], mod_id: str | None = None) -> list[str]:
+    """The packages the "missing" issues ask for (each once, issue order) -
+    what "Install all missing" installs; for `mod_id`, just that mod's."""
+    out: list[str] = []
+    for issue in issues:
+        if issue["kind"] == "missing" and (mod_id is None or issue["mod_id"] == mod_id) and issue["dep"] not in out:
+            out.append(issue["dep"])
+    return out
+
+
+def mod_missing_dependencies(entries: dict[str, dict], mod_id: str, framework_package: str | None) -> list[str]:
+    """A mod's declared dependencies that aren't installed, whatever list it
+    sits in (the row menu's "Install missing dependencies" - an inactive
+    mod has no issue lines but can still be fixed up)."""
+    return [dep for dep in _declared_dependencies(entries.get(mod_id))
+            if dep != framework_package and dep != mod_id and dep not in entries]
+
+
 def _write(app_root, slug, manifest: dict) -> dict:
     manifest = {k: v for k, v in manifest.items() if k != "slug"}
     manifest["schema_version"] = SCHEMA_VERSION
@@ -274,11 +350,32 @@ def _fetch_and_install(app_root, slug, ref: ts.PackageRef, framework: bool, app_
     return _make_entry(ref, result)
 
 
-def create_load_order(app_root, name: str, game: ThunderstoreGame, app_version=None) -> dict:
+def _fetch_pinned_or_latest(app_root, slug, ref: ts.PackageRef, framework: bool, app_version=None) -> tuple[dict, bool]:
+    """_fetch_and_install for a pinned `ref` (an import's exact version): if
+    that version can't be fetched or installed (gone from Thunderstore, a
+    bad download), the package's latest is installed instead. Returns
+    (entry, fell_back). An unpinned ref is just _fetch_and_install."""
+    try:
+        return _fetch_and_install(app_root, slug, ref, framework=framework, app_version=app_version), False
+    except (ts.ThunderstoreError, bx.PackageError) as err:
+        if ref.version is None:
+            raise
+        log(f"[loadorders] {slug}: {ref.key} unavailable ({err}); falling back to the latest {ref.full_name}")
+    entry = _fetch_and_install(app_root, slug, ts.PackageRef(ref.namespace, ref.name), framework=framework, app_version=app_version)
+    return entry, True
+
+
+def create_load_order(app_root, name: str, game: ThunderstoreGame, app_version=None, *,
+                      framework_version: str | None = None) -> dict:
     """New load order: folder + manifest, then the game's framework package
     downloaded (or taken from the cache) and installed into the tree root, so
-    it's launch-ready immediately. If the framework install fails the folder
-    is removed again and the error propagates."""
+    it's launch-ready immediately. `framework_version` pins the framework
+    (an import reproducing a profile's exact versions, bepinex_share.py) -
+    Thunderstore's latest when None, or when that version can't be fetched
+    any more (the caller compares the manifest's framework version to tell).
+    If the framework install fails the folder is removed again and the
+    error propagates."""
+    ref = game.framework_ref if framework_version is None else game.framework_ref.with_version(framework_version)  # validates first
     display, slug = _allocate(app_root, name)
     now = _now()
     manifest = {
@@ -288,7 +385,7 @@ def create_load_order(app_root, name: str, game: ThunderstoreGame, app_version=N
     write_json(manifest_path(app_root, slug), manifest)
     log(f"[loadorders] created {slug!r} ({display!r}) at {tree_root(app_root, slug)}")
     try:
-        manifest["framework"] = _fetch_and_install(app_root, slug, game.framework_ref, framework=True, app_version=app_version)
+        manifest["framework"], _ = _fetch_pinned_or_latest(app_root, slug, ref, framework=True, app_version=app_version)
     except Exception:
         remove_tree_best_effort(tree_root(app_root, slug))
         log(f"[loadorders] framework install failed, removed {slug!r}")
@@ -296,28 +393,40 @@ def create_load_order(app_root, name: str, game: ThunderstoreGame, app_version=N
     return _write(app_root, slug, manifest)
 
 
-def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None) -> dict:
+def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None, *,
+                pins: dict[str, str] | None = None, fallback_latest: bool = False) -> dict:
     """Installs `target` (a PackageRef or "Team-Package[-Version]" string) into
     the load order, appended to the active list enabled, after any of its
-    declared dependencies not yet installed (recursively, latest versions).
-    Already-installed packages (framework included) are left alone. Returns
-    {"installed": [entries, dependencies first], "problems": [{kind, path,
-    message, package}]} - a dependency that fails is a problem; the target
-    itself failing raises (ThunderstoreError / PackageError)."""
+    declared dependencies not yet installed (recursively, latest versions -
+    or the version `pins` names for that full_name: an import's file
+    pins every package it lists, bepinex_share.py). Already-installed
+    packages (framework included) are left alone. Returns {"installed":
+    [entries, dependencies first], "problems": [{kind, path, message,
+    package}], "fallbacks": [{package, wanted, installed}]} - a dependency
+    that fails is a problem; the target itself failing raises
+    (ThunderstoreError / PackageError). With `fallback_latest`, a pinned
+    version that can't be fetched (gone from Thunderstore) is replaced by
+    the package's latest and recorded in "fallbacks" instead of failing;
+    without it (the browser's Versions tab), a pinned version is exact."""
     ref = target if isinstance(target, ts.PackageRef) else ts.PackageRef.parse(target)
     manifest = load_load_order(app_root, slug)
     have = installed(manifest)
     if ref.full_name == game.framework_package or ref.full_name in have:
         log(f"[loadorders] {slug}: {ref.full_name} already installed, nothing to do")
-        return {"installed": [], "problems": []}
-    done, problems, visiting = [], [], set()
+        return {"installed": [], "problems": [], "fallbacks": []}
+    done, problems, fallbacks, visiting = [], [], [], set()
 
     def visit(r: ts.PackageRef, is_target: bool) -> None:
         if r.full_name in have or r.full_name == game.framework_package or r.full_name in visiting:
             return
         visiting.add(r.full_name)
+        if r.version is None and pins and pins.get(r.full_name):
+            r = r.with_version(pins[r.full_name])
         try:
-            entry = _fetch_and_install(app_root, slug, r, framework=False, app_version=app_version)
+            if fallback_latest:
+                entry, fell_back = _fetch_pinned_or_latest(app_root, slug, r, framework=False, app_version=app_version)
+            else:
+                entry, fell_back = _fetch_and_install(app_root, slug, r, framework=False, app_version=app_version), False
         except (ts.ThunderstoreError, bx.PackageError) as err:
             if is_target:
                 raise
@@ -325,10 +434,12 @@ def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None
             problems.append({**problem, "package": r.full_name})
             log(f"[loadorders] {slug}: dependency {r.full_name} failed: {err}")
             return
+        if fell_back:
+            fallbacks.append({"package": r.full_name, "wanted": r.version, "installed": entry["version"]})
         for dep in entry["dependencies"]:
             try:
                 d = ts.PackageRef.parse(dep)
-                visit(ts.PackageRef(d.namespace, d.name), False)  # the dep string's version is informational: latest
+                visit(ts.PackageRef(d.namespace, d.name), False)  # the dep string's version is informational: latest (or a pin)
             except ValueError as err:
                 problems.append({"kind": "bad-dependency", "path": "", "message": str(err), "package": r.full_name})
         have[entry["full_name"]] = entry
@@ -337,8 +448,8 @@ def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None
         _write(app_root, slug, manifest)  # keep the manifest truthful after every install
 
     visit(ref, True)
-    log(f"[loadorders] {slug}: installed {[e['full_name'] for e in done]}, {len(problems)} problems")
-    return {"installed": done, "problems": problems}
+    log(f"[loadorders] {slug}: installed {[e['full_name'] for e in done]}, {len(problems)} problems, {len(fallbacks)} fallbacks")
+    return {"installed": done, "problems": problems, "fallbacks": fallbacks}
 
 
 def remove_mod(app_root, slug, full_name: str) -> dict:
@@ -439,27 +550,34 @@ def check_updates(manifest: dict, app_version=None) -> dict[str, dict]:
     return out
 
 
-def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_version=None) -> dict:
+def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_version=None, *, version: str | None = None) -> dict:
     """Re-downloads + installs `full_name` at Thunderstore's current latest
-    version, in place (the framework included). New files overwrite the
-    tree's, files the old version tracked that the new one doesn't are
-    deleted (config kept, as always); the mod's on-disk state is preserved
-    (an inactive or toggled-off mod comes back disabled). Returns
-    {"manifest", "entry", "updated": bool} - updated False when the
-    installed version already is the latest (nothing touched). ValueError
-    for a package not in this load order; ThunderstoreError / PackageError
-    from the fetch/install."""
+    version - or at `version` (the browser's Versions tab: any release,
+    newer or older) - in place (the framework included). New files
+    overwrite the tree's, files the old version tracked that the new one
+    doesn't are deleted (config kept, as always); the mod's on-disk state
+    and list position are preserved (an inactive or toggled-off mod comes
+    back disabled). Returns {"manifest", "entry", "updated": bool} -
+    updated False when the installed version already is the one asked for
+    (nothing touched). ValueError for a package not in this load order or
+    a bad version; ThunderstoreError / PackageError from the fetch/install."""
     manifest = load_load_order(app_root, slug)
     entry = installed(manifest).get(full_name)
     if entry is None:
         raise ValueError(f"{full_name} is not installed in this load order")
     fw = manifest.get("framework")
     is_framework = bool(fw) and fw["full_name"] == full_name
-    meta = ts.fetch_package(entry["namespace"], entry["name"], app_version)
-    latest = ts.latest_ref(meta)
-    if not ts.is_newer(latest.version, entry["version"]):
-        log(f"[loadorders] {slug}: {full_name} {entry['version']} is current (latest {latest.version}), nothing to update")
-        return {"manifest": manifest, "entry": entry, "updated": False}
+    if version is None:
+        meta = ts.fetch_package(entry["namespace"], entry["name"], app_version)
+        latest = ts.latest_ref(meta)
+        if not ts.is_newer(latest.version, entry["version"]):
+            log(f"[loadorders] {slug}: {full_name} {entry['version']} is current (latest {latest.version}), nothing to update")
+            return {"manifest": manifest, "entry": entry, "updated": False}
+    else:
+        latest = ts.PackageRef(entry["namespace"], entry["name"], version)  # validates; "latest" = the target below
+        if version == entry["version"]:
+            log(f"[loadorders] {slug}: {full_name} already is {version}, nothing to do")
+            return {"manifest": manifest, "entry": entry, "updated": False}
     on_disk_enabled = is_framework or (
         entry["enabled"] and any(e["full_name"] == full_name for e in manifest["active"]))
     root = tree_root(app_root, slug)
@@ -476,7 +594,7 @@ def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_versi
     else:
         for key in ("active", "inactive"):
             manifest[key] = [new_entry if e["full_name"] == full_name else e for e in manifest[key]]
-    log(f"[loadorders] {slug}: updated {full_name} {entry['version']} -> {latest.version}"
+    log(f"[loadorders] {slug}: {'updated' if version is None else 'switched'} {full_name} {entry['version']} -> {latest.version}"
         f"{' (framework)' if is_framework else ''}{'' if on_disk_enabled else ', kept disabled'}")
     return {"manifest": _write(app_root, slug, manifest), "entry": new_entry, "updated": True}
 

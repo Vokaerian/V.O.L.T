@@ -63,7 +63,16 @@ def _mix(color_a: str, weight_a: float, color_b: str) -> str:
 
 # --selected: color-mix(in srgb, var(--accent) 35%, var(--panel-2)).
 SELECTED = _mix(ACCENT, 0.35, PANEL_2)
+# The BepInEx manager's Vanilla launch button (THUNDERSTORE.md §3): a neutral
+# gray one small step lighter than the default button (Save = PANEL_2 /
+# BORDER), user-directed 2026-09-28 - the same 10% step toward TEXT for both.
+VANILLA_BG = _mix(TEXT, 0.10, PANEL_2)
+VANILLA_BORDER = _mix(TEXT, 0.10, BORDER)
 
+
+# The Browse Mods cards' title size (screens/bepinex_browse_window.py): one
+# step above FONT_SIZE_PX, tuned on real hardware 2026-09-29.
+BROWSE_NAME_PX = 14
 
 # Mod-list row-card ::item margin (left, top, right, bottom): the card sits this
 # far inside its row rect. Also for sizing the drag pill.
@@ -111,6 +120,21 @@ QPushButton[variant="primary"]:disabled {{
     background: {_half(ACCENT)};
     border-color: {_half(ACCENT)};
     color: {_alpha("#ffffff", 0.5)};
+}}
+/* The BepInEx manager's Vanilla launch button: the default button, one step
+   lighter (VANILLA_BG / VANILLA_BORDER); same hover / disabled scheme. */
+QPushButton[variant="vanilla"] {{
+    background: {VANILLA_BG};
+    border-color: {VANILLA_BORDER};
+    color: {TEXT};
+}}
+QPushButton[variant="vanilla"]:enabled:hover {{
+    border-color: {MUTED};
+}}
+QPushButton[variant="vanilla"]:disabled {{
+    background: {_half(VANILLA_BG)};
+    border-color: {_half(VANILLA_BORDER)};
+    color: {_half(TEXT)};
 }}
 QPushButton[variant="accent-outline"] {{
     border-color: {ACCENT};
@@ -642,6 +666,206 @@ QFrame[variant="config-row"][hit="match"] {{
 QFrame[variant="config-row"][hit="current"] {{
     background: {_alpha(WARN, 0.12)};
     border-color: {WARN};
+}}
+
+/* ---- Browse Mods window (screens/bepinex_browse_window.py; the signed-off
+   BrowseMods / PackageDetail artboards of the same Valheim design) ---- */
+QDialog#browseMods {{
+    background: {PANEL};
+}}
+/* .close-btn: the plain button, 30x30, no padding */
+QPushButton#browseClose {{
+    padding: 0;
+}}
+QScrollArea#browseGrid {{
+    background: transparent;
+    border: 0;
+}}
+/* .card: --panel-2, rounded; the hover tint is SCOPE.md §2's feedback rule
+   (not in the mockup), the same 7% --text wash the list rows use */
+QFrame[role="browse-card"] {{
+    background: {PANEL_2};
+    border: 1px solid transparent;
+    border-radius: {RADIUS}px;
+}}
+QFrame[role="browse-card"]:hover {{
+    background: {_mix(TEXT, 0.07, PANEL_2)};
+}}
+/* .card-icon / .pkg-icon placeholder: --panel, rounded (the loaded icon is
+   pre-rounded to the same radius) */
+QLabel[role="browse-icon"] {{
+    background: {PANEL};
+    border-radius: {RADIUS}px;
+}}
+/* .card-name: 600; a step above the body's 13px (BROWSE_NAME_PX) - the
+   mockup's 13px read too small on a large monitor (user, 2026-09-29) */
+QLabel[role="browse-name"] {{
+    font-size: {BROWSE_NAME_PX}px;
+    font-weight: 600;
+}}
+/* "by author", "⬇ downloads": muted 11px; .card-desc the same */
+QLabel[role="browse-small"], QLabel[role="browse-desc"] {{
+    color: {MUTED};
+    font-size: 11px;
+}}
+/* .pkg-name: 22px h2 */
+QLabel[role="browse-title"] {{
+    font-size: 22px;
+    font-weight: bold;
+}}
+/* .pagination's Prev / Next: muted text, --text on hover, no frame */
+QPushButton[variant="browse-page"] {{
+    background: transparent;
+    border: 0;
+    padding: 0 4px;
+    color: {MUTED};
+}}
+QPushButton[variant="browse-page"]:enabled:hover {{
+    color: {TEXT};
+}}
+QPushButton[variant="browse-page"]:disabled {{
+    background: transparent;
+    border: 0;
+    color: {_half(MUTED)};
+}}
+/* the detail page's big Install: button.primary, padding 10px, 15px */
+QPushButton[variant="primary"][big="true"] {{
+    padding: 10px;
+    font-size: 15px;
+}}
+/* .pkg-description's border-top, and the README box inside it */
+QFrame#browseDivider {{
+    border: 0;
+    border-top: 1px solid {BORDER};
+}}
+QTextBrowser#browseReadme {{
+    background: transparent;
+    border: 0;
+}}
+/* the dependency rows: a dependency that gets pulled in is --accent (the
+   mockup); one that couldn't be resolved is --warn */
+QLabel[role="browse-dep-missing"] {{
+    color: {ACCENT};
+}}
+QLabel[role="browse-dep-problem"] {{
+    color: {WARN};
+}}
+/* ---- the detail page, reworked as a Thunderstore-style page (signed off
+   2026-09-29: the PackageDetail artboard): cards on the modal, a tab
+   strip, the right column's facts / copy box / chips, the Required rows'
+   status pills, the Versions rows ---- */
+/* the header card, the tab body, the facts and categories cards: --panel-2, rounded */
+QFrame[role="browse-panel"] {{
+    background: {PANEL_2};
+    border: 0;
+    border-radius: {RADIUS}px;
+}}
+QScrollArea#browseTabScroll {{
+    background: transparent;
+    border: 0;
+}}
+/* the tab strip: the Settings tabs' look - plain text, accent border +
+   text when selected, the muted border on hover */
+QPushButton[variant="browse-tab"] {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {RADIUS}px;
+    padding: 4px 12px;
+    color: {MUTED};
+}}
+QPushButton[variant="browse-tab"]:enabled:hover {{
+    border-color: {MUTED};
+    color: {TEXT};
+}}
+QPushButton[variant="browse-tab"][selected="true"],
+QPushButton[variant="browse-tab"][selected="true"]:enabled:hover {{
+    border-color: {ACCENT};
+    color: {ACCENT};
+}}
+/* the package-name copy box: an input frame holding a bare read-only
+   line edit (mono 12px) and the copy button on its right edge */
+QFrame#browseCopyBox {{
+    background: {BG};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+}}
+QLineEdit#browsePackageName {{
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 4px 8px;
+    font-family: {_MONO_CSS};
+    font-size: 12px;
+}}
+QPushButton#browseCopy {{
+    border: 0;
+    border-left: 1px solid {BORDER};
+    border-radius: 0;
+    border-top-right-radius: {RADIUS}px;
+    border-bottom-right-radius: {RADIUS}px;
+    padding: 4px 10px;
+}}
+/* the facts rows: a rule under each but the last; values 600 */
+QFrame[role="browse-fact"] {{
+    border: 0;
+    border-bottom: 1px solid {BORDER};
+}}
+QFrame[role="browse-fact"][last="true"] {{
+    border-bottom: 0;
+}}
+QLabel[role="browse-fact-value"] {{
+    font-weight: 600;
+}}
+/* a category chip: the storefront tag's look, clickable (accent on hover) */
+QPushButton[variant="browse-chip"] {{
+    background: {PANEL};
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 2px 8px;
+    color: {MUTED};
+    font-size: 11px;
+}}
+QPushButton[variant="browse-chip"]:enabled:hover {{
+    border-color: {ACCENT};
+    color: {ACCENT_HOVER};
+}}
+/* a Required row: a --panel card inside the --panel-2 body */
+QFrame[role="browse-row"] {{
+    background: {PANEL};
+    border: 0;
+    border-radius: {RADIUS}px;
+}}
+/* its status pill: green = already installed (the Rules window's ok
+   tint), accent = will be installed (the dependency tint), warn = a
+   dependency that couldn't be resolved */
+QLabel[role="browse-pill"] {{
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 8px;
+}}
+QLabel[role="browse-pill"][state="ok"] {{
+    background: {RDEP_BG};
+    color: {RDEP};
+}}
+QLabel[role="browse-pill"][state="get"] {{
+    background: {DEP_BG};
+    color: {ACCENT};
+}}
+QLabel[role="browse-pill"][state="warn"] {{
+    background: {_alpha(WARN, 0.14)};
+    color: {WARN};
+}}
+/* a Versions row: a rule under each, the rows' hover wash; the header row plain */
+QFrame[role="browse-vrow"] {{
+    border: 0;
+    border-bottom: 1px solid {BORDER};
+    border-radius: 0;
+}}
+QFrame[role="browse-vrow"]:hover {{
+    background: {_mix(TEXT, 0.07, PANEL_2)};
+}}
+QFrame[role="browse-vrow"][head="true"]:hover {{
+    background: transparent;
 }}
 
 /* ---- Rules window (screens/rules_window.py; the approved Design mockup) ---- */
