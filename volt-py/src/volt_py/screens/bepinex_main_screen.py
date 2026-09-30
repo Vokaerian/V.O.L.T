@@ -724,9 +724,27 @@ class BepInExMainScreen(QWidget):
         BepInExSettingsWindow(
             self.game_name, self._paths_state, self._browse_path, self._autodetect_paths, self._warn,
             self._log_path, self, app_root=self.app_root, is_busy=lambda: self._busy is not None,
-            settings=self._settings,
+            settings=self._settings, game=self.game, confirm=self._confirm,
+            troubleshooting_info=self._troubleshooting_info,
         ).exec()
         log("settings window closed")
+
+    def _troubleshooting_info(self) -> list[tuple[str, object]]:
+        """Settings > Troubleshooting > Copy troubleshooting info: this
+        screen's part (game, folder, Steam, the open load order, mod counts)."""
+        active = self._active_ids()
+        off = sum(1 for n in active if not self._toggles.get(n, True))
+        return [
+            ("Game", self.game_name),
+            ("Game folder", f"{self.game_dir} ({SOURCE_LABEL.get(self._game_source) or self._game_source})"
+             if self.game_dir else None),
+            ("Steam", paths.find_steam_exe()),
+            ("Load order", f"{self.load_order_picker.currentText()} ({self.current_load_order})"
+             if self.current_load_order else None),
+            ("Framework", self._framework),
+            ("Mods", f"{len(active)} active ({off} toggled off), {len(self.inactive_list.mod_ids())} inactive"
+             + (", unsaved changes" if self._dirty() else "")),
+        ]
 
     def _show_help(self) -> None:
         log("help window opened")
@@ -780,6 +798,7 @@ class BepInExMainScreen(QWidget):
         self.disable_all_button.setEnabled(ready and has_lo and any(self._toggles.values()))
         self.copy_button.setEnabled(ready and has_lo)
         self.rescan_button.setEnabled(ready and has_lo)
+        self.config_button.setEnabled(ready and has_lo)
         self.add_mod_button.setEnabled(ready and has_lo)
         self.browse_button.setEnabled(ready and has_lo)
         self.save_button.setEnabled(ready and has_lo)
@@ -851,6 +870,7 @@ class BepInExMainScreen(QWidget):
         self.load_order_link.clicked.connect(lambda: self.current_load_order and self._open_folder(self._load_order_dir()))
         self.bepinex_link.clicked.connect(lambda: self.current_load_order and self._open_folder(self._bepinex_dir()))
         self.rescan_button.clicked.connect(lambda: self.rescan())
+        self.config_button.clicked.connect(lambda: self._edit_config())
         self.import_button.clicked.connect(lambda: self._show_action_menu(self.import_button, self._import_menu_items()))
         self.export_button.clicked.connect(lambda: self._show_action_menu(self.export_button, self._export_menu_items()))
         self.add_mod_button.clicked.connect(lambda: self._add_mod())
@@ -944,8 +964,9 @@ class BepInExMainScreen(QWidget):
         for notice in self.findChildren(_Notice):
             self._place_notice(notice)
 
-    def _confirm(self, title: str, message: str, *, confirm_label: str) -> bool:
-        box = QMessageBox(QMessageBox.Icon.Question, title, message, QMessageBox.StandardButton.Cancel, self)
+    def _confirm(self, title: str, message: str, *, confirm_label: str, parent: QWidget | None = None) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Question, title, message, QMessageBox.StandardButton.Cancel,
+                          parent if parent is not None else self)
         confirm = box.addButton(confirm_label, QMessageBox.ButtonRole.AcceptRole)
         box.setDefaultButton(confirm)  # Enter confirms (user decision 2026-09-29)
         box.setEscapeButton(QMessageBox.StandardButton.Cancel)  # Esc still cancels
@@ -2201,10 +2222,17 @@ class BepInExMainScreen(QWidget):
                 f"Couldn't find steam.exe - {self.game_name} is started through Steam. Looked in: {looked}",
             )
             return
+        launch_args = self._settings.get().get("launch_args") or ""
+        try:
+            extra_args = bl.parse_launch_args(launch_args)
+        except ValueError as err:
+            log(f"run: preflight failed (launch arguments {launch_args!r}): {err}")
+            self._warn("Run failed", f"The launch arguments in Settings > Launch can't be read ({err}). Fix them and try again.")
+            return
         mods_with_errors = [m for m, v in self._issues.items() if any(sev == "error" for sev, _ in v)]
         log(f"run: preflight ok ({'modded' if modded else 'vanilla'}): game_dir={self.game_dir}, exe={exe.name}, "
             f"load order={slug} ({name!r}), tree={tree}, steam={steam_exe}, dirty={'yes' if self._dirty() else 'no'}, "
-            f"mods with dependency errors={len(mods_with_errors)}")
+            f"mods with dependency errors={len(mods_with_errors)}, launch args={extra_args}")
         if modded and self._dirty() and not self._confirm(
             "Unsaved load order changes",
             f"The active list has unsaved changes. Run doesn't save them: {self.game_name} starts with the load order "
@@ -2233,7 +2261,7 @@ class BepInExMainScreen(QWidget):
         try:
             bl.start(
                 self.app_root, self.game_dir, tree, self._manifest, appid=self.game.STEAM_APPID, exe_name=exe.name,
-                steam_exe=steam_exe, load_order=slug or "", load_order_name=name, modded=modded,
+                steam_exe=steam_exe, load_order=slug or "", load_order_name=name, modded=modded, extra_args=extra_args,
             )
         except (bl.LaunchError, OSError) as err:
             log(f"run: failed: {err!r}")
@@ -2588,6 +2616,10 @@ class BepInExMainScreen(QWidget):
         bulk_row.addWidget(self.disable_all_button)
         self.rescan_button = _button("Rescan")
         self.rescan_button.setToolTip("Re-read the open load order from disk and check for updates again.")
+        # Config: the Edit config window, no search query (placed by the user
+        # 2026-09-30, between Rescan and the Get mods label)
+        self.config_button = _button("Config")
+        self.config_button.setToolTip("Edit the open load order's mod config files.")
         self.add_mod_button = _button("Add mod...", variant="accent-outline")
         self.add_mod_button.setToolTip("Install a Thunderstore package (and its dependencies) into the open load order.")
         self.browse_button = _button("Browse Mods...", variant="accent-outline")
@@ -2607,6 +2639,7 @@ class BepInExMainScreen(QWidget):
         top.insertWidget(0, self.group_labels[0])
         top.addLayout(bulk_row)
         top.addWidget(self.rescan_button)
+        top.addWidget(self.config_button)
         top.addWidget(self.group_labels[1])
         for button in (self.add_mod_button, self.browse_button):
             top.addWidget(button)

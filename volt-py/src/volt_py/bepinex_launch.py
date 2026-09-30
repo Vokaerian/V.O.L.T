@@ -35,6 +35,12 @@ a game still running from a previous VOLT session, or cleans up a stale
 record's leftovers. A vanilla launch (start(modded=False)) injects nothing
 and writes no record, but runs the same recovery and already-running checks.
 
+Settings > Launch's "Launch arguments" (parse_launch_args) are appended
+after the Doorstop arguments (modded) or alone (vanilla) - start(extra_args).
+Settings > Troubleshooting's Reset installation (reset_refusal +
+wipe_game_folder) is the one deliberate exception to "never touch the live
+game install": it empties the game folder so Steam's verify re-downloads it.
+
 Windows only for now (steam.exe, tasklist, the proxy DLL): platform_error()
 says so elsewhere; Linux/Proton comes with Linux packaging (CLAUDE.md §3).
 """
@@ -43,7 +49,9 @@ import csv
 import io
 import os
 import re
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -138,6 +146,18 @@ def steam_argv(steam_exe, appid: str, args=()) -> list[str]:
     arguments to the game's own command line (list form - Popen quotes a
     path with spaces itself)."""
     return [str(steam_exe), "-applaunch", str(appid), *map(str, args)]
+
+
+def parse_launch_args(text: str) -> list[str]:
+    """Settings > Launch's "Launch arguments" as a list, Windows-style:
+    whitespace splits, double or single quotes group (and are dropped),
+    backslashes stay literal (C:\\path), '#' is an ordinary character.
+    ValueError on an unclosed quote."""
+    lex = shlex.shlex(text or "", posix=True)
+    lex.whitespace_split = True
+    lex.escape = ""  # posix quoting without the backslash escape: Windows paths survive
+    lex.commenters = ""
+    return list(lex)
 
 
 # ---- the launch record ----
@@ -346,10 +366,12 @@ def recover(app_root, retries: int = CLEANUP_RETRIES, delay: float = 1.0) -> dic
 
 
 def start(app_root, game_dir, tree_root, manifest, *, appid: str, exe_name: str, steam_exe, load_order: str,
-          load_order_name: str, modded: bool = True) -> dict:
+          load_order_name: str, modded: bool = True, extra_args=()) -> dict:
     """The launch: recovery pass, refuse if the game is already running,
     then (modded) inject + Steam launch with the Doorstop arguments, or
     (vanilla) a plain Steam launch with nothing copied and no record.
+    extra_args (Settings > Launch, already parsed) go after the Doorstop
+    arguments, or alone for vanilla.
     Returns {"argv", "pid", "record" (None for vanilla), "recovery"}.
     LaunchError for anything refused or failed (the folder is left as found)."""
     recovery = recover(app_root)
@@ -372,11 +394,11 @@ def start(app_root, game_dir, tree_root, manifest, *, appid: str, exe_name: str,
                 f"The load order's BepInEx install is incomplete (missing {', '.join(missing)}). "
                 "Rescan, or delete and recreate the load order."
             )
-        argv = steam_argv(steam_exe, appid, doorstop_args(tree_root))
+        argv = steam_argv(steam_exe, appid, [*doorstop_args(tree_root), *extra_args])
         record = inject(app_root, game_dir, tree_root, manifest, load_order=load_order, load_order_name=load_order_name,
                         exe_name=exe_name, argv=argv)
     else:
-        argv, record = steam_argv(steam_exe, appid), None
+        argv, record = steam_argv(steam_exe, appid, extra_args), None
     log(f"run: launching ({'modded' if modded else 'vanilla'}): {subprocess.list2cmdline(argv)}")
     try:
         pid = launch(argv)
@@ -387,3 +409,98 @@ def start(app_root, game_dir, tree_root, manifest, *, appid: str, exe_name: str,
         raise LaunchError(f"Couldn't start Steam ({err}).") from err
     log(f"run: started {argv[0]} (pid {pid}); waiting for {exe_name} (timeout {START_TIMEOUT_S}s)")
     return {"argv": argv, "pid": pid, "record": record, "recovery": recovery}
+
+
+# ---- Settings > Troubleshooting > Reset installation ----
+def validate_url(appid: str) -> str:
+    """Steam's "Verify integrity of game files" for this app."""
+    return f"steam://validate/{appid}"
+
+
+def reset_refusal(game_dir, game_source, is_game_root, app_root) -> str | None:
+    """Why Reset installation must not empty `game_dir`, or None when it may:
+    no folder / not a Steam install (Steam's verify can only restore a Steam
+    install) / folder missing / a drive root, the home folder or one of its
+    parents, or anything under 3 path parts / not this game's install
+    (is_game_root) / VOLT's own APP-ROOT inside it (the mod trees would go)."""
+    if not game_dir:
+        return "No game folder is set."
+    if game_source != "steam":
+        return ("Reset installation only works for a Steam install: it relies on Steam re-downloading the game "
+                "afterwards, and this game folder wasn't found through Steam. Nothing was deleted.")
+    d = Path(game_dir)
+    if not d.is_dir():
+        return f"The game folder {d} doesn't exist."
+    real = d.resolve()
+    home = Path.home().resolve()
+    if len(real.parts) < 3 or real == home or real in home.parents:
+        return f"{real} is too close to a drive root or your user folder to be emptied safely. Nothing was deleted."
+    if not is_game_root(d):
+        return f"{d} doesn't look like the game's install folder. Nothing was deleted."
+    if real == Path(app_root).resolve() or real in Path(app_root).resolve().parents:
+        return f"VOLT's own data folder ({app_root}) is inside {real}, so emptying it would delete your load orders."
+    return None
+
+
+def _is_link(p: Path) -> bool:
+    return p.is_symlink() or os.path.isjunction(p)
+
+
+def _remove_link(p: Path) -> None:
+    # The link itself, never its target: unlink a file link / POSIX dir link,
+    # rmdir a Windows directory symlink or junction.
+    try:
+        os.unlink(p)
+    except OSError:
+        os.rmdir(p)
+
+
+def wipe_game_folder(app_root, game_dir) -> dict:
+    """Deletes everything inside `game_dir` (never the folder itself), after
+    a launch-record recovery pass so none of VOLT's injected loader files are
+    left half-managed; clears the record + launch-backup/ afterwards (those
+    backups belonged to the folder being emptied). Symlinks / junctions are
+    unlinked, never followed (shutil.rmtree doesn't follow them either).
+    Read-only files get their write bit set and are retried once. Call
+    reset_refusal first. LaunchError while the record's game is running.
+    {"removed": top-level entries deleted, "failed": [(path, error text)],
+    "recovery": recover()'s state}."""
+    rec = recover(app_root)
+    if rec["state"] == "running":
+        raise LaunchError(f"{rec['record'].get('exe_name')} is running - quit it first. Nothing was deleted.")
+    failed: list[tuple[str, str]] = []
+
+    def onexc(func, path, exc):
+        if isinstance(exc, PermissionError):
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+                return
+            except OSError as err:
+                exc = err
+        if not isinstance(exc, FileNotFoundError):
+            failed.append((str(path), str(exc)))
+
+    removed = 0
+    for entry in sorted(Path(game_dir).iterdir()):
+        before = len(failed)
+        try:
+            if _is_link(entry):
+                _remove_link(entry)
+            elif entry.is_dir():
+                shutil.rmtree(entry, onexc=onexc)
+            else:
+                try:
+                    entry.unlink()
+                except PermissionError:
+                    os.chmod(entry, stat.S_IWRITE)
+                    entry.unlink()
+        except OSError as err:
+            failed.append((str(entry), str(err)))
+        if len(failed) == before:
+            removed += 1
+    remove_record(app_root)
+    shutil.rmtree(backup_dir(app_root), ignore_errors=True)
+    log(f"reset installation: emptied {game_dir}: {removed} top-level entries removed, {len(failed)} failed "
+        f"{clip(failed)}; launch record cleared (recovery was {rec['state']})")
+    return {"removed": removed, "failed": failed, "recovery": rec["state"]}

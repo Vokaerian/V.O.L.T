@@ -201,6 +201,14 @@ def list_config_files(bepinex_dir: Path, *, all_files: bool = False) -> list[Con
     return sort_files(files, "name")
 
 
+def never_run(files: list[ConfigFile]) -> bool:
+    """True when the load order looks like it has never been run: no files
+    at all, or only BepInEx's own BepInEx.cfg (written at first install,
+    before any mod has had the chance to write its defaults). Pass every
+    file (all_files=True), not just the text ones."""
+    return not files or (len(files) == 1 and files[0].rel.casefold() == "bepinex.cfg")
+
+
 def sort_files(files: list[ConfigFile], key: str) -> list[ConfigFile]:
     if key == "modified":
         return sorted(files, key=lambda f: (-f.mtime, f.rel.casefold()))

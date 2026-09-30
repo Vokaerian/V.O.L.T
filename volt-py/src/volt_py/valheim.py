@@ -23,6 +23,16 @@ STEAM_INSTALLDIR = "Valheim"  # appmanifest installdir fallback when the .acf is
 DATA_DIR = "valheim_Data"  # Unity data folder beside the exe (holds Managed/ - confirmed on the real install)
 GAME_EXES = ["valheim.exe", "valheim.x86_64"]  # Windows / Linux; no macOS build
 FRAMEWORK_PACKAGE = "denikson-BepInExPack_Valheim"  # Thunderstore's pinned BepInEx pack for this community
+# Settings > Launch's examples, (arguments, what they do): Valheim's own
+# -console plus Unity player options (docs.unity3d.com "Unity Standalone
+# Player command line arguments"). A game without this list gets the window's
+# generic Unity ones (bepinex_settings_window.UNITY_LAUNCH_ARG_EXAMPLES).
+LAUNCH_ARG_EXAMPLES = (
+    ("-console", "turns on the in-game console (F5)"),
+    ("-window-mode exclusive", "exclusive fullscreen"),
+    ("-screen-fullscreen 0", "starts in a window"),
+    ("-screen-width 1920 -screen-height 1080", "sets the resolution"),
+)
 
 GAME = ThunderstoreGame(slug=SLUG, community=COMMUNITY, framework_package=FRAMEWORK_PACKAGE)
 

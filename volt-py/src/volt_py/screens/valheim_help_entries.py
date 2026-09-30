@@ -120,15 +120,16 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
         "name": "Edit config",
         "short": "View, edit or delete the config files the load order's mods have written.",
         "long": (
-            "Right-click the load order picker (or any mod row) and choose Edit config... to open the load "
+            "Click Config in the actions column (under Rescan), or right-click the load order picker (or any mod "
+            "row) and choose Edit config..., to open the load "
             "order's BepInEx/config folder: every file in it, listed flat on the left with a search box, a sort "
             "and a \"Show all files\" switch for the non-text data some mods keep there. Click a file to load it "
             "on the right: a BepInEx .cfg becomes a settings form - each setting with its description, type, "
             "default and the right control (a drop-down, check boxes, a number, a color swatch, a text box) - and "
             "any other file (.json, .yml, .txt) is shown as raw text. Save writes your changes, Revert drops them, "
             "Delete removes the file (a mod writes a fresh default one on the next run) and Open externally opens "
-            "it in your usual editor. The folder is empty until the load order has been run once, since BepInEx "
-            "creates each mod's config file on first launch."
+            "it in your usual editor. Until the load order has been run once only BepInEx's own "
+            "BepInEx.cfg is there, since BepInEx creates each mod's config file on first launch."
         ),
     },
     # ---- panes ----

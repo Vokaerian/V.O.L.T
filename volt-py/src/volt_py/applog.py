@@ -98,3 +98,32 @@ def clip(value, max_chars: int = 4000) -> str:
     if len(s) > max_chars:
         return f"{s[:max_chars]}…[truncated, {len(s)} chars total]"
     return s
+
+
+def read_tail(path, max_bytes: int) -> str:
+    """The last `max_bytes` of a UTF-8 text file (the whole file when it's
+    smaller), starting at a line boundary when cut. OSError if unreadable."""
+    with open(path, "rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(max(0, size - max_bytes))
+        data = f.read()
+    if size > max_bytes:
+        data = data.split(b"\n", 1)[1] if b"\n" in data else data
+    return data.decode("utf-8", errors="replace")
+
+
+def troubleshooting_text(fields, log_path=None, lines: int = 50) -> str:
+    """Settings > Troubleshooting's "Copy troubleshooting info": one
+    "Key: value" line per (key, value) in `fields`, then the last `lines`
+    lines of the log (or why there are none). Plain text, no markdown."""
+    out = [f"{k}: {'(none)' if v in (None, '') else v}" for k, v in fields]
+    if log_path is None:
+        out += ["", "Log: none (logging is only on in development builds)"]
+    else:
+        try:
+            tail = read_tail(log_path, 64 * 1024).splitlines()[-lines:]
+        except OSError as err:
+            out += ["", f"Log: couldn't read {log_path}: {err}"]
+        else:
+            out += ["", f"Last {len(tail)} lines of {log_path}:", *tail]
+    return "\n".join(out) + "\n"

@@ -37,6 +37,8 @@ Two pages in one window (a QStackedWidget, a short fade between them):
            │   [Install x.y.z] / Installed on the     │ └───────────────┘
            │   version this load order has            │
            │ Changelog: the version's changelog       │
+           │ Wiki (N): a page rail (the Help window's)│
+           │   beside the selected page in a well     │
            └──────────────────────────────────────────┘
            The right column always shows the LATEST version; the header's
            version selector drives the Install button, Required and
@@ -83,6 +85,22 @@ on the same thread, handed to the text browser through loadResource - no
 network inside the widget) and the dependency chain; picking another
 version is the same job minus the package-level pieces.
 
+Wiki (TODO #12, built 2026-09-30, direct implementation): the whole-page
+job also fetches the package's wiki index (thunderstore_browse.fetch_wiki_
+index; a 404 = no wiki, any failure logged and treated the same) - the tab
+shows only when there are pages, labelled "Wiki (N)", the rail in
+order_wiki_pages' order. Pages load lazily: nothing until the tab is first
+opened (then its first page), one job per page picked (its markdown + images,
+the README's caps), kept per package in `_wiki_pages` (reset when another
+package opens; a version pick never touches the wiki - it's package-level);
+a superseded page reply is dropped (`_wiki_gen`). Loading / error + Retry
+show inside the page pane.
+
+Links in a README / changelog / wiki page (_Readme._open_link): absolute
+ones open in the system browser (as setOpenExternalLinks did), "#section"
+scrolls, anything relative (a repo file, another wiki page) is ignored and
+logged - Qt's own handling would navigate the box to a blank page.
+
 Install (a card's button, the right column's big one, or a Versions row)
 hands the PackageRef to the manager screen's install callback - the same
 job as "Add mod..." (download into the shared cache if absent,
@@ -122,7 +140,7 @@ import re
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QPainter, QPainterPath, QPalette, QPixmap, QTextDocument,
+    QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QPainter, QPainterPath, QPalette, QPixmap, QTextDocument,
 )
 from PySide6.QtWidgets import (
     QComboBox,
@@ -146,7 +164,7 @@ from PySide6.QtWidgets import (
 )
 
 from volt_py import icons, painters, theme, thunderstore as ts, thunderstore_browse as tb
-from volt_py.applog import log
+from volt_py.applog import clip, log
 from volt_py.screens.flow_layout import FlowLayout
 
 WINDOW_SIZE = (1400, 820)  # .modal.browse-mods
@@ -181,8 +199,10 @@ VERSION_PICKER_WIDTH = 240  # the header's selector
 RIGHT_COLUMN_WIDTH = 300  # the facts column (fixed on every window width; the left column flexes)
 CHIP_GAP = 6
 PAGE_JOB = "browse-list"
-TABS = (("details", "Details"), ("required", "Required"), ("versions", "Versions"), ("changelog", "Changelog"))
-TAB_INDEX = {"details": 1, "required": 2, "versions": 3, "changelog": 4}  # tab_stack pages; 0 = the status page
+TABS = (("details", "Details"), ("required", "Required"), ("versions", "Versions"), ("changelog", "Changelog"), ("wiki", "Wiki"))
+TAB_INDEX = {"details": 1, "required": 2, "versions": 3, "changelog": 4, "wiki": 5}  # tab_stack pages; 0 = the status page
+WIKI_RAIL_WIDTH = 240  # the Wiki tab's page rail (the Help window's RAIL_WIDTH)
+WIKI_ENTRY_ROOM = 44  # the rail's margins, an entry's padding and the rail's scrollbar: a title elides past the rest
 IMAGE_MAX_HEIGHT = 1200  # a README image taller than this is scaled down (a whole-page banner never fills the box)
 REFIT_MS = 150  # the README re-lays its images out this long after the last resize
 AGE_MONTH_DAYS, AGE_YEAR_DAYS = 30, 365  # "Last updated": days -> green, months -> yellow, years -> red
@@ -298,14 +318,16 @@ def fit_button_text(text: str, fm, width: int) -> tuple[str, bool]:
 def render_markdown_html(markdown: str) -> str:
     """The README as one HTML document: split_html_blocks' markdown chunks
     through Qt's markdown importer (a scratch QTextDocument -> toHtml's
-    body), its HTML chunks as they are."""
+    body; each chunk first through thunderstore_browse.qt_markdown, so a
+    tag-like "<rarity>" shows as text instead of hiding the prose after
+    it), its HTML chunks as they are."""
     parts: list[str] = []
     for kind, text in tb.split_html_blocks(markdown):
         if kind == "html":
             parts.append(text)
         elif text.strip():
             doc = QTextDocument()
-            doc.setMarkdown(text)
+            doc.setMarkdown(tb.qt_markdown(text))  # a stray "<rarity>" would swallow the chunk's prose
             parts.append(_html_body(doc.toHtml()))
     return "\n".join(parts)
 
@@ -616,7 +638,8 @@ class _Readme(QTextBrowser):
     def __init__(self, object_name: str) -> None:
         super().__init__()
         self.setObjectName(object_name)
-        self.setOpenExternalLinks(True)
+        self.setOpenLinks(False)  # every click goes through _open_link: nothing navigates the box itself
+        self.anchorClicked.connect(lambda url: self._open_link(url))
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.viewport().setAutoFillBackground(False)
         self.images: dict[str, bytes] = {}
@@ -638,6 +661,21 @@ class _Readme(QTextBrowser):
         else:
             self.setPlainText(fallback.strip() or "No description.")
         self.verticalScrollBar().setValue(0)
+
+    def _open_link(self, url: QUrl) -> None:
+        """An absolute link opens in the system browser (Qt's openExternalLinks
+        rule: not file: / qrc:), "#section" scrolls to it, a relative one (a
+        repo file, another wiki page) is ignored - Qt would load it into the
+        box and blank the page."""
+        if url.isRelative():
+            if url.hasFragment() and not url.path():
+                self.scrollToAnchor(url.fragment())
+            else:
+                log(f"browse: relative link not opened: {clip(url.toString())}")
+        elif url.scheme() in ("file", "qrc"):
+            log(f"browse: local link not opened: {clip(url.toString())}")
+        else:
+            QDesktopServices.openUrl(url)
 
     def _available_width(self) -> int:
         return max(50, self.viewport().width() - 2 * int(self.document().documentMargin()) - 2)
@@ -681,6 +719,33 @@ class _Readme(QTextBrowser):
 def _repolish(widget: QWidget) -> None:
     widget.style().unpolish(widget)
     widget.style().polish(widget)
+
+
+def _status_page() -> tuple[QWidget, QLabel, QPushButton]:
+    """A centered message + Retry (the tab body's loading / error page; the
+    Wiki pane has its own)."""
+    page = QWidget()
+    layout = QVBoxLayout(page)
+    layout.addStretch(1)
+    message = QLabel()
+    message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    message.setWordWrap(True)
+    layout.addWidget(message)
+    retry = QPushButton("Retry")
+    retry.setAutoDefault(False)
+    layout.addWidget(retry, 0, Qt.AlignmentFlag.AlignHCenter)
+    layout.addStretch(1)
+    return page, message, retry
+
+
+def _set_status(message: QLabel, retry: QPushButton, text: str, error: bool) -> None:
+    message.setText(text)
+    role = "modal-error" if error else None
+    if message.property("role") != role or message.property("muted") != (not error):
+        message.setProperty("role", role)
+        message.setProperty("muted", not error)
+        _repolish(message)
+    retry.setVisible(error)
 
 
 def _close_button() -> QPushButton:
@@ -873,6 +938,11 @@ class BepInExBrowseWindow(QDialog):
         self._version_meta: dict | None = None  # fetch_version of the selected version
         self._chain: dict | None = None  # dependency_chain for the selected version
         self._has_changelog = False
+        self._wiki: list[dict] = []  # the package's wiki pages [{id, title}], rail order; [] = no wiki (tab hidden)
+        self._wiki_pages: dict[str, dict] = {}  # page id -> {markdown, images}, this package's pages fetched so far
+        self._wiki_page: str | None = None  # the page picked in the rail (None until the tab is first opened)
+        self._wiki_gen = 0  # bumped per page request / package; an older reply is dropped
+        self._wiki_buttons: dict[str, QPushButton] = {}
         self._tab = "details"
         self._version_buttons: list[tuple[str, QPushButton]] = []  # Versions tab: (version, its Install)
         self._dep_icons: list[tuple[str, QLabel]] = []  # Required tab: (icon_url, label)
@@ -917,6 +987,7 @@ class BepInExBrowseWindow(QDialog):
         self.detail_install_button.clicked.connect(lambda _=False: self._install_from_detail())
         self.copy_button.clicked.connect(lambda _=False: self._copy_package_name())
         self.retry_button.clicked.connect(lambda _=False: self._retry_detail())
+        self.wiki_retry.clicked.connect(lambda _=False: self._retry_wiki())
         self.close_button.clicked.connect(lambda _=False: self.reject())
         self.show_deprecated.toggled.connect(lambda _on: self._filters_changed())
         self.show_nsfw.toggled.connect(lambda _on: self._filters_changed())
@@ -1168,17 +1239,7 @@ class BepInExBrowseWindow(QDialog):
         self.tab_stack = QStackedWidget()
         outer.addWidget(self.tab_stack)
         # 0: the status page (loading / error + Retry)
-        status = QWidget()
-        status_layout = QVBoxLayout(status)
-        status_layout.addStretch(1)
-        self.detail_message = QLabel()
-        self.detail_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.detail_message.setWordWrap(True)
-        status_layout.addWidget(self.detail_message)
-        self.retry_button = QPushButton("Retry")
-        self.retry_button.setAutoDefault(False)
-        status_layout.addWidget(self.retry_button, 0, Qt.AlignmentFlag.AlignHCenter)
-        status_layout.addStretch(1)
+        status, self.detail_message, self.retry_button = _status_page()
         self.tab_stack.addWidget(status)
         # 1: Details = the README over the dependency block
         details = QWidget()
@@ -1219,6 +1280,28 @@ class BepInExBrowseWindow(QDialog):
         # 4: Changelog (in the README's well too)
         self.changelog = _Readme("browseReadme")
         self.tab_stack.addWidget(_well(self.changelog))
+        # 5: Wiki = the page rail (the Help window's list: #helpRail, help-entry
+        # buttons) beside the selected page in the README's well; the pane's own
+        # loading / error page in front of it
+        wiki = QWidget()
+        wiki_row = QHBoxLayout(wiki)
+        wiki_row.setContentsMargins(0, 0, 0, 0)
+        wiki_row.setSpacing(8)
+        rail = QWidget()
+        self.wiki_rail = QVBoxLayout(rail)
+        self.wiki_rail.setContentsMargins(4, 4, 4, 4)
+        self.wiki_rail.setSpacing(4)
+        rail_scroll = _scroll(rail)
+        rail_scroll.setObjectName("helpRail")
+        rail_scroll.setFixedWidth(WIKI_RAIL_WIDTH)
+        wiki_row.addWidget(rail_scroll)
+        self.wiki_stack = QStackedWidget()
+        wiki_status, self.wiki_message, self.wiki_retry = _status_page()
+        self.wiki_stack.addWidget(wiki_status)
+        self.wiki_readme = _Readme("browseReadme")
+        self.wiki_stack.addWidget(_well(self.wiki_readme))
+        wiki_row.addWidget(self.wiki_stack, 1)
+        self.tab_stack.addWidget(wiki)
         return frame
 
     def _build_right_column(self) -> QWidget:
@@ -1669,7 +1752,12 @@ class BepInExBrowseWindow(QDialog):
                 versions = tb.fetch_versions(ns, name, app_version)
                 if not any(v["version"] == detail["latest_version"] for v in versions):
                     versions.insert(0, {"version": detail["latest_version"], "created": detail["last_updated"], "downloads": 0})
-                out.update(detail=detail, versions=versions)
+                try:  # package-level, fetched once per page open; its failure only hides the tab
+                    wiki = tb.order_wiki_pages(tb.fetch_wiki_index(ns, name, app_version))
+                except ts.ThunderstoreError as err:
+                    log(f"browse: wiki unavailable for {ns}-{name}: {err}")
+                    wiki = []
+                out.update(detail=detail, versions=versions, wiki=wiki)
                 picked, changelog_wanted = detail["latest_version"], detail["has_changelog"]
             else:
                 picked, changelog_wanted = version, has_changelog
@@ -1728,6 +1816,7 @@ class BepInExBrowseWindow(QDialog):
             self._set_chips(d["categories"])
             self._fill_versions_tab()
             self.tab_buttons["changelog"].setVisible(self._has_changelog)
+            self._set_wiki(res["wiki"])
         self._version = res["version"]
         self._version_meta = res["meta"]
         website = (self._detail["website_url"] if self._detail else "") or res["meta"]["website_url"]
@@ -1737,7 +1826,8 @@ class BepInExBrowseWindow(QDialog):
             self.changelog.set_markdown(res["changelog"], res["images"], fallback="No changelog for this version.")
         self._set_deps(res["chain"])
         self._fill_required_tab()
-        self._select_tab(self._tab if self._tab != "changelog" or self._has_changelog else "details")  # off the status page
+        hidden = (self._tab == "changelog" and not self._has_changelog) or (self._tab == "wiki" and not self._wiki)
+        self._select_tab("details" if hidden else self._tab)  # off the status page
         self._apply_detail_button()
 
     def _version_changed(self) -> None:
@@ -1853,16 +1943,81 @@ class BepInExBrowseWindow(QDialog):
                 painters.crossfade(self.tab_stack, lambda: self.tab_stack.setCurrentIndex(index), theme.MOTION_FAST)
             else:
                 self.tab_stack.setCurrentIndex(index)
+            if key == "wiki" and self._wiki_page is None and self._wiki:
+                self._select_wiki_page(self._wiki[0]["id"])  # lazy: the first page on the tab's first opening
 
     def _show_status(self, text: str, *, error: bool) -> None:
-        self.detail_message.setText(text)
-        role = "modal-error" if error else None
-        if self.detail_message.property("role") != role or self.detail_message.property("muted") != (not error):
-            self.detail_message.setProperty("role", role)
-            self.detail_message.setProperty("muted", not error)
-            _repolish(self.detail_message)
-        self.retry_button.setVisible(error)
+        _set_status(self.detail_message, self.retry_button, text, error)
         self.tab_stack.setCurrentIndex(0)
+
+    # ---- the Wiki tab ----
+    def _set_wiki(self, pages: list[dict]) -> None:
+        """A package's wiki index (rail order): the rail's entries and the tab
+        button ("Wiki (N)", hidden with no pages). Resets the page state."""
+        self._wiki = pages
+        self._wiki_pages = {}
+        self._wiki_page = None
+        self._wiki_gen += 1  # a page reply for the previous package is dropped
+        _clear_layout(self.wiki_rail)
+        self._wiki_buttons = {}
+        for page in pages:
+            button = QPushButton()
+            button.setProperty("variant", "help-entry")
+            button.setAutoDefault(False)
+            button.setText(button.fontMetrics().elidedText(page["title"], Qt.TextElideMode.ElideRight, WIKI_RAIL_WIDTH - WIKI_ENTRY_ROOM))
+            button.setToolTip(page["title"])
+            button.clicked.connect(lambda _=False, page_id=page["id"]: self._select_wiki_page(page_id))
+            self.wiki_rail.addWidget(button)
+            self._wiki_buttons[page["id"]] = button
+        self.wiki_rail.addStretch(1)
+        self.tab_buttons["wiki"].setText(f"Wiki ({len(pages)})" if pages else "Wiki")
+        self.tab_buttons["wiki"].setVisible(bool(pages))
+
+    def _select_wiki_page(self, page_id: str) -> None:
+        """A rail entry (or the tab's first opening): the page from this
+        package's cache, else one job for its markdown + images."""
+        self._wiki_page = page_id
+        self._wiki_gen += 1  # a reply for the page picked before is dropped
+        gen = self._wiki_gen
+        for key, button in self._wiki_buttons.items():
+            if button.property("selected") != (key == page_id):
+                button.setProperty("selected", key == page_id)
+                _repolish(button)
+        cached = self._wiki_pages.get(page_id)
+        if cached is not None:
+            self._show_wiki_page(cached)
+            return
+        app_version = self.app_version
+        title = next((p["title"] for p in self._wiki if p["id"] == page_id), "?")
+        log(f"browse: wiki page {page_id} ({clip(title)}) of {self._detail_listing['full_name'] if self._detail_listing else '?'}")
+        _set_status(self.wiki_message, self.wiki_retry, "Loading...", False)
+        self.wiki_stack.setCurrentIndex(0)
+
+        def job(report):
+            markdown = tb.fetch_wiki_page(page_id, app_version)
+            return {"markdown": markdown, "images": tb.prefetch_images(markdown, app_version)}
+
+        def done(payload: dict) -> None:
+            if self._closed or gen != self._wiki_gen:
+                return
+            if "error" in payload:
+                log(f"browse: wiki page {page_id} failed: {clip(payload['error'])}")
+                _set_status(self.wiki_message, self.wiki_retry, payload["error"], True)
+                return
+            self._wiki_pages[page_id] = payload["ok"]
+            # the page replaces "Loading..." under a MOTION_FAST crossfade, as the README does
+            painters.crossfade(self.wiki_stack, lambda: self._show_wiki_page(payload["ok"]), theme.MOTION_FAST)
+
+        self._run_job(f"browse-wiki-{page_id}", job, done)
+
+    def _show_wiki_page(self, page: dict) -> None:
+        self.wiki_readme.set_markdown(page["markdown"], page["images"], fallback="This wiki page is empty.")
+        self.wiki_stack.setCurrentIndex(1)
+
+    def _retry_wiki(self) -> None:
+        if self._wiki_page is not None:
+            log(f"browse: wiki retry {self._wiki_page}")
+            self._select_wiki_page(self._wiki_page)
 
     def _clear_tabs(self) -> None:
         self._version_meta = None
@@ -1875,6 +2030,7 @@ class BepInExBrowseWindow(QDialog):
         self._dep_icons = []
         self.tab_buttons["required"].setText("Required")
         self.tab_buttons["changelog"].setVisible(True)
+        self._set_wiki([])  # hidden until the package's index says it has pages
 
     def _set_deps(self, chain: dict | None) -> None:
         """The Details tab's dependency block (Option X, the full block): one

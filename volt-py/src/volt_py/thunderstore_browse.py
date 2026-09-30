@@ -43,6 +43,15 @@ The documented experimental endpoints used alongside:
 - GET /api/experimental/package/<ns>/<name>/<version>/readme/ -> {markdown}.
 - GET /api/experimental/package/<ns>/<name>/<version>/changelog/ ->
   {markdown} (null when the version has none).
+- GET /api/experimental/package/<ns>/<name>/wiki/ -> {id, title, slug,
+  datetime_created, datetime_updated, pages: [{id, title, slug,
+  datetime_created, datetime_updated}]} (ids are strings; HTTP 404
+  {"detail": "Not found."} when the package has no wiki), and
+  GET /api/experimental/wiki/page/<id>/ -> {id, title, slug, datetime_created,
+  datetime_updated, markdown_content} (verified live 2026-09-30 against
+  RandyKnapp-EpicLoot: 8 pages "1. What is Epic Loot" .. "8. Cheats/Commands",
+  API order = the numbering; an unknown page id is a 404). The Wiki tab
+  orders the pages with order_wiki_pages.
 README / changelog images: markdown_image_urls picks the http(s) image
 links out of the markdown and prefetch_images fetches them (a size cap
 each, failures skipped) on the job thread, so the window can hand them to
@@ -124,6 +133,14 @@ def readme_url(namespace: str, name: str, version: str) -> str:
 
 def changelog_url(namespace: str, name: str, version: str) -> str:
     return f"{ts.SITE}/api/experimental/package/{namespace}/{name}/{version}/changelog/"
+
+
+def wiki_url(namespace: str, name: str) -> str:
+    return f"{ts.SITE}/api/experimental/package/{namespace}/{name}/wiki/"
+
+
+def wiki_page_url(page_id) -> str:
+    return f"{ts.SITE}/api/experimental/wiki/page/{urllib.parse.quote(str(page_id), safe='')}/"
 
 
 def team_page_url(community: str, namespace: str) -> str:
@@ -412,6 +429,77 @@ def fetch_changelog(namespace: str, name: str, version: str, app_version=None) -
     return md or ""
 
 
+def fetch_wiki_index(namespace: str, name: str, app_version=None) -> list[dict]:
+    """The package's wiki pages [{id, title}] in the API's order ([] when the
+    package has no wiki - the site's 404). Other failures raise."""
+    ref = ts.PackageRef(namespace, name)
+    what = f"wiki of {ref.full_name}"
+    try:
+        data = _get_json(wiki_url(ref.namespace, ref.name), app_version, what)
+    except ThunderstoreError as err:
+        cause = err.__cause__
+        if isinstance(cause, urllib.error.HTTPError) and cause.code == 404:
+            log(f"[browse] {what}: none")
+            return []
+        raise
+    pages = data.get("pages") if isinstance(data, dict) else None
+    if not isinstance(pages, list):
+        raise _shape_error(what, "no pages", data)
+    out = []
+    for page in pages:
+        if not (isinstance(page, dict) and isinstance(page.get("id"), (str, int)) and isinstance(page.get("title"), str)):
+            raise _shape_error(what, "a page has no id / title", page)
+        out.append({"id": str(page["id"]), "title": page["title"]})
+    log(f"[browse] {what}: {len(out)} pages")
+    return out
+
+
+def fetch_wiki_page(page_id, app_version=None) -> str:
+    """One wiki page's markdown ("" when the page is empty)."""
+    what = f"wiki page {page_id}"
+    data = _get_json(wiki_page_url(page_id), app_version, what)
+    if not isinstance(data, dict) or "markdown_content" not in data:
+        raise _shape_error(what, "no markdown_content", data)
+    md = data["markdown_content"]
+    if md is not None and not isinstance(md, str):
+        raise _shape_error(what, "markdown_content isn't text", data)
+    return md or ""
+
+
+# Wiki page order (order_wiki_pages; the user's rule, 2026-09-30).
+_WIKI_PINNED = {"index", "home"}
+# "1." "2)" "01 -" "1.2 Title" "1.10" "Part 3": a number (dotted parts allowed) followed by
+# punctuation, a space or the end - "3D Models" / "2x Speed" stay unprefixed.
+_WIKI_NUMBER = re.compile(r"\s*(?:part\s*)?(\d+(?:\.\d+)*)\.?(?=[\s).:\-\u2013\u2014]|$)", re.IGNORECASE)
+# "a." "b)" "C) Title": one letter, then "." or ")", then a space or the end.
+_WIKI_LETTER = re.compile(r"\s*([a-z])[.)](?=\s|$)", re.IGNORECASE)
+
+
+def _wiki_key(page: dict) -> tuple:
+    title = page["title"].strip()
+    tie = (title.casefold(), str(page["id"]))
+    if title.casefold() in _WIKI_PINNED:
+        return (0, (), "", *tie)
+    m = _WIKI_NUMBER.match(title)
+    if m:
+        return (1, tuple(int(n) for n in m.group(1).split(".")), "", *tie)
+    m = _WIKI_LETTER.match(title)
+    if m:
+        return (2, (), m.group(1).casefold(), *tie)
+    return (3, (), "", *tie)
+
+
+def order_wiki_pages(pages: list[dict]) -> list[dict]:
+    """The Wiki tab's rail order (user rule, 2026-09-30): pages titled Index /
+    Home (case-insensitive, exact) first; then numbered pages ("1.", "2)",
+    "01 -", "1.2", "Part 3") in natural numeric order (1.2 < 1.10, "1." before
+    "1.1"); then letter-sequenced pages ("a.", "b)") by the letter; then the
+    rest alphabetically. Case-insensitive title, then the page id, breaks
+    every tie (two "3." pages, "Part 3" vs "3.", Home vs Index), so the
+    order never depends on the API's."""
+    return sorted(pages, key=_wiki_key)
+
+
 # HTML in a README (the markdown importer's weak spot): a line starting with
 # one of these tags opens an HTML chunk that runs until every tag opened in
 # it is closed again (void tags don't count). The window renders such chunks
@@ -472,6 +560,71 @@ def split_html_blocks(markdown: str) -> list[tuple[str, str]]:
             kind, depth = "md", 0
     flush()
     return chunks
+
+
+# Qt's markdown importer (QTextMarkdownImporter::cbText) counts raw inline HTML
+# naively: every "<letter" opens, every "</" or "/>" closes, and while the count
+# is above zero all ordinary text is held back for an HTML insert that only
+# happens when it's back to zero - code spans still go through. So one unclosed
+# tag-like token ("**<rarity>**", "<effect count>", a bare "<br>") silently drops
+# the rest of the chunk's prose (EpicLoot's wiki page "8. Cheats/Commands",
+# found on hardware 2026-09-30). qt_markdown fixes the markdown before Qt sees it.
+_KNOWN_TAGS = _VOID_TAGS | {
+    "a", "abbr", "address", "article", "aside", "b", "big", "blockquote", "body", "center", "cite", "code", "dd", "del",
+    "details", "dfn", "div", "dl", "dt", "em", "figcaption", "figure", "font", "footer", "h1", "h2", "h3", "h4", "h5",
+    "h6", "head", "header", "html", "i", "iframe", "ins", "kbd", "li", "main", "mark", "nav", "nobr", "ol", "p", "picture",
+    "pre", "q", "s", "samp", "section", "small", "span", "strike", "strong", "sub", "summary", "sup", "table", "tbody",
+    "td", "tfoot", "th", "thead", "title", "tr", "tt", "u", "ul", "var", "video",
+}
+_INLINE_TAG = re.compile(r"(?<!\\)<(/?)([A-Za-z][A-Za-z0-9-]*)(\s[^<>]*?)?(/?)>")
+_FENCE = re.compile(r"\s{0,3}(`{3,}|~{3,})")
+_BACKTICKS = re.compile(r"`+")
+
+
+def _qt_tag(m: re.Match) -> str:
+    closing, name, _attrs, selfclosed = m.groups()
+    if name.lower() not in _KNOWN_TAGS:
+        return "\\" + m.group(0)  # "<rarity>" is text, not HTML: shown literally
+    if name.lower() in _VOID_TAGS and not closing and not selfclosed:
+        return m.group(0)[:-1] + "/>"  # "<br>" -> "<br/>": Qt's count sees it close
+    return m.group(0)
+
+
+def _qt_line(line: str) -> str:
+    parts, pos, i = [], 0, 0
+    while (run := _BACKTICKS.search(line, i)) is not None:  # code spans pass through untouched
+        close = re.compile(rf"(?<!`){run.group(0)}(?!`)").search(line, run.end())
+        if close is None:
+            i = run.end()  # an unmatched run is literal backticks
+            continue
+        parts += [_INLINE_TAG.sub(_qt_tag, line[pos:run.start()]), line[run.start():close.end()]]
+        pos = i = close.end()
+    parts.append(_INLINE_TAG.sub(_qt_tag, line[pos:]))
+    return "".join(parts)
+
+
+def qt_markdown(markdown: str) -> str:
+    """A markdown chunk made safe for Qt's importer (the comment above):
+    outside code spans and fenced blocks, a tag-like token that isn't an HTML
+    element is backslash-escaped (shown literally) and a void element is
+    self-closed. Known elements are left as they are.
+    ponytail: per line - a code span broken over two lines, an indented code
+    block (an unknown tag in one shows a stray backslash) and an unclosed
+    known element ("<b>" never closed) are not handled; a real markdown
+    tokenizer if they show up."""
+    out, fence = [], None
+    for line in (markdown or "").split("\n"):
+        m = _FENCE.match(line)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+            out.append(line)
+        elif m:
+            fence = m.group(1)
+            out.append(line)
+        else:
+            out.append(_qt_line(line))
+    return "\n".join(out)
 
 
 def markdown_image_urls(markdown: str) -> list[str]:

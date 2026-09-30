@@ -40,6 +40,9 @@ DEFAULTS = {
     # Per game like every key here (there is no app-wide settings file); a
     # file from before 0.5.14 has no key and loads as 'windows'.
     "animations": "windows",
+    # Settings > Launch (Thunderstore games): extra command-line arguments for
+    # the game, as typed (bepinex_launch.parse_launch_args splits them at Run).
+    "launch_args": "",
 }
 
 ACQUIRE_VIA = ("steamcmd", "steamworks", "gog")
@@ -151,6 +154,12 @@ class SettingsStore:
         if mode not in ANIMATIONS:
             raise ValueError(f"Unknown animation mode: {mode}")
         return self.update({"animations": mode})["animations"]
+
+    def set_launch_args(self, text: str) -> str:
+        """Settings > Launch's "Launch arguments", stored as typed. Returns the stored value."""
+        if not isinstance(text, str):
+            raise ValueError("Launch arguments must be text.")
+        return self.update({"launch_args": text})["launch_args"]
 
 
 def effective_animations(stored) -> str:
