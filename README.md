@@ -6,6 +6,7 @@
 <p align="center">
   <img alt="Made with Claude" src="https://img.shields.io/badge/MADE_WITH-CLAUDE-D97757?style=flat-square&labelColor=555555">
   <a href="https://github.com/Vokaerian/V.O.L.T/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Vokaerian/V.O.L.T?style=flat-square&label=LATEST%20RELEASE&labelColor=555555&color=0078D4"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/LICENSE-MIT-555555?style=flat-square"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/PLATFORM-WINDOWS-555555?style=flat-square">
 </p>
 
@@ -30,3 +31,7 @@ Grab the latest build from the [Releases](https://github.com/Vokaerian/V.O.L.T/r
 
 Design, scope and testing by [@Vokaerian](https://github.com/Vokaerian).
 Code and implementation by [Claude](https://claude.ai) (Anthropic).
+
+## License
+
+VOLT's source code is released under the [MIT License](LICENSE). The licence covers the code only. It does not cover the VOLT logo, lettering and other artwork in `docs/brand/` (all rights reserved), the game cover art and names shown in the app (they belong to their respective owners), or bundled third-party components such as PySide6 (LGPL) and the Steamworks libraries, which keep their own licences.
