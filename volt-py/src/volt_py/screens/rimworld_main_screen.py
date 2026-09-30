@@ -64,7 +64,12 @@ subscription is unsubscribed through the Steam client, verified, then its
 Workshop folder deleted (steam_ops.unsubscribe_verified /
 delete_workshop_folder); a SteamCMD download only has its folder deleted
 (steam_cmd.delete_item, fsutil.remove_tree_best_effort - best effort, a
-locked file is skipped and reported). Sync (_sync_to_steam,
+locked file is skipped and reported). The SteamCMD-then-sync and
+Steam-client modes share that Subscribe / Unsubscribe pair (the second item
+reads Delete for a SteamCMD copy); the GOG mode shows Fetch (_fetch: the
+SteamCMD library's cached copy back into Mods, found by package id too) and
+Delete instead, and every mode adds Remove completely...
+(_remove_completely, mod_removal.py) - RIMWORLD.md #52. Sync (_sync_to_steam,
 steam_ops.sync_steamcmd_mods): every SteamCMD-downloaded 'steamcmd' copy
 becomes a real Steam subscription, its copy deleted once Steam's own
 download is on disk; a permanent 'gog' copy is never touched. Still inert:
@@ -92,6 +97,7 @@ import functools
 import sys
 import threading
 import time
+import traceback
 from dataclasses import replace
 from importlib.metadata import version
 from pathlib import Path
@@ -124,10 +130,10 @@ from PySide6.QtWidgets import (
 )
 
 from volt_py import (
-    community_rules, download_state, icons, load_orders, mod_decorations, mod_list_io, mods, mods_config, painters,
-    paths, sort, steam_client, steam_cmd, steam_ops, steam_web_api, theme, validation,
+    community_rules, download_state, icons, load_orders, mod_decorations, mod_list_io, mod_removal, mods, mods_config,
+    painters, paths, sort, steam_client, steam_cmd, steam_ops, steam_web_api, theme, validation,
 )
-from volt_py.app_root import GAME_SLUG, resolve_app_root
+from volt_py.app_root import GAME_SLUG, migrate_legacy_app_root, resolve_app_root
 from volt_py.applog import clip, init_log, log
 from volt_py.electron_import import import_electron_load_orders_if_needed
 from volt_py.fsutil import read_text, write_text_atomic
@@ -167,22 +173,27 @@ SUBSCRIBE_NOT_SUBSCRIBED_POLLS = 3
 # before touching any files (a returned unsubscribe isn't proof it took).
 UNSUBSCRIBE_VERIFY_TRIES = 5
 UNSUBSCRIBE_VERIFY_S = 1.0
-# Sync to Steam: how many SteamCMD mods are waited on at once in its install
-# pass (steam_ops.sync_steamcmd_mods; one Steam helper process each). Also
+# Sync to Steam: how many SteamCMD mods run at once, each subscribe-to-install
+# in one Steam helper process (steam_ops.sync_steamcmd_mods). Also
 # the Steam-client mode's Subscribe batch (_subscribe_via_steam). Untested on
 # real hardware at 5 in this port: if Steam objects to that many at once
 # (failed subscribes, helpers erroring), dial this down - 1 is one-at-a-time.
 SYNC_CONCURRENCY = 5
-# Sync to Steam's subscribe pass (subscribe + verify, then the helper is
-# released): how many run at once. Somewhat above SYNC_CONCURRENCY because
-# each item holds its helper for only about a second (Electron's real log
-# showed 5 concurrent subscribe calls landing within ~130 ms), so this pass
-# finishes a big list quickly - the point of it is registering every
-# subscription up front. Capped rather than all at once: each in-flight item
-# is its own helper process registered with Steam as "RimWorld running", and
-# a 370-mod list must not spawn hundreds. If Steam objects at 8, set this
-# back to SYNC_CONCURRENCY.
-SYNC_SUBSCRIBE_CONCURRENCY = 8
+# Sync to Steam, per item after a verified subscribe: Steam sometimes never
+# starts the download (the helper reads state 0 for good, real hardware
+# 2026-09-30). After SYNC_REDOWNLOAD_AFTER_S of unbroken state 0 the download
+# is re-requested (DownloadItem, high priority) every SYNC_REDOWNLOAD_EVERY_S,
+# at most SYNC_REDOWNLOADS times; at SYNC_NEVER_STARTED_S the item stops
+# waiting (pending, copy kept). A moving item keeps SUBSCRIBE_TIMEOUT_S.
+SYNC_REDOWNLOAD_AFTER_S = 10.0
+SYNC_REDOWNLOAD_EVERY_S = 15.0
+SYNC_REDOWNLOADS = 3
+SYNC_NEVER_STARTED_S = 60.0
+# Sync to Steam: Steam can report an item installed over a folder that isn't
+# a complete mod (no About.xml / far fewer bytes than the SteamCMD copy, real
+# hardware 2026-09-30); the copy is then kept and the folder re-checked for
+# up to this long before the item ends pending (steam_ops.steam_copy_problem).
+SYNC_VERIFY_GRACE_S = 30.0
 # Sync to Steam's heads-up dialog (_confirm_sync): the three caveats, one
 # bullet each, in this order.
 SYNC_CONFIRM_LINES = (
@@ -238,6 +249,22 @@ def _button(text: str, *, variant: str | None = None) -> QPushButton:
     if variant:
         button.setProperty("variant", variant)
     button.setEnabled(False)
+    return button
+
+
+GAMES_ICON_PX = 12  # the mockup's 12px grid glyph (Settings-sized button, 26px tall)
+GAMES_TOOLTIP = "Back to game select (Alt+Left)"
+
+
+def _games_button() -> QPushButton:
+    """Header row 1's far-left "Games" (back to game select, signed off
+    2026-09-30): the default button (Settings / Help's look and states) with
+    the drawn grid icon, which goes --muted with the label when disabled.
+    Enabled; each screen gates it while busy (coder)."""
+    button = QPushButton("Games")
+    button.setIcon(icons.icon("grid"))
+    button.setIconSize(QSize(GAMES_ICON_PX, GAMES_ICON_PX))
+    button.setToolTip(GAMES_TOOLTIP)
     return button
 
 
@@ -425,6 +452,7 @@ def _steam_ops_for(app_root: Path, game_dir: Path, mods_dir: Path | None = None)
     return SimpleNamespace(
         subscribe=lambda wid: steam_client.subscribe(app_root, game_dir, wid),
         install_info=lambda wid: steam_client.install_info(app_root, game_dir, wid),
+        download=lambda wid: steam_client.download_item(app_root, game_dir, wid),
         is_subscribed=lambda wid: steam_client.is_subscribed(app_root, game_dir, wid),
         unsubscribe=lambda wid: steam_client.unsubscribe(app_root, game_dir, wid),
         release=steam_client.release,
@@ -499,12 +527,35 @@ def _unsubscribe_workshop_item(steam, game_dir: Path, mod_id: str, wid: str, nam
           {"mod_id": mod_id, "wid": wid, "name": name, "result": result, "failure": failure})
 
 
+
+def _check_workshop_subscribed(steam, wids: list[str], ctx: dict, carrier: _SteamClientDone) -> None:
+    """Background-thread body of Remove completely's Steam question: is each
+    Workshop id subscribed (steam.is_subscribed, a one-shot Steam helper;
+    its operation released after)? `carrier.done` with ctx plus
+    {"subscribed": {wid: bool}, "failure": the error message when Steam
+    couldn't be asked, else None} - the caller refuses then, never guesses."""
+    subscribed, failure = {}, None
+    for wid in wids:
+        try:
+            subscribed[wid] = bool(steam.is_subscribed(wid))
+            log(f"remove completely: Steam says {wid} is {'SUBSCRIBED' if subscribed[wid] else 'not subscribed'}")
+        except Exception as err:  # SteamClientError (Steam not running...), or anything unexpected
+            failure = str(err) or repr(err)
+            log(f"remove completely: is_subscribed {wid} FAILED - {failure}")
+            break
+        finally:
+            try:
+                steam.release(wid)
+            except Exception:
+                pass
+    _emit(carrier, f"remove completely check {wids}", {**ctx, "subscribed": subscribed, "failure": failure})
+
 def _sync_to_steam_run(steam, mods_snapshot: dict, carrier: _SteamClientDone) -> None:
     """Background-thread body of Sync to Steam (App.jsx syncToSteam's await):
     steam_ops.sync_steamcmd_mods over a snapshot of the scanned mods, its
     per-item progress logged (Electron showed it in the status bar; this
     port's status text isn't wired yet), then `carrier.done` with {"result":
-    its {"total", "synced", "pending", "failed"} dict or None, "failure": the
+    its {"total", "synced", "pending", "not_downloaded", "failed"} dict or None, "failure": the
     message when the run itself raised, else None}."""
     result, failure = None, None
 
@@ -514,8 +565,9 @@ def _sync_to_steam_run(steam, mods_snapshot: dict, carrier: _SteamClientDone) ->
     try:
         result = steam_ops.sync_steamcmd_mods(
             mods_snapshot, steam, tries=UNSUBSCRIBE_VERIFY_TRIES, wait_s=UNSUBSCRIBE_VERIFY_S, poll_s=SUBSCRIBE_POLL_S,
-            timeout_s=SUBSCRIBE_TIMEOUT_S, concurrency=SYNC_CONCURRENCY,
-            subscribe_concurrency=SYNC_SUBSCRIBE_CONCURRENCY, on_progress=on_progress,
+            timeout_s=SUBSCRIBE_TIMEOUT_S, concurrency=SYNC_CONCURRENCY, redownload_after_s=SYNC_REDOWNLOAD_AFTER_S,
+            redownload_every_s=SYNC_REDOWNLOAD_EVERY_S, redownloads=SYNC_REDOWNLOADS,
+            never_started_s=SYNC_NEVER_STARTED_S, verify_grace_s=SYNC_VERIFY_GRACE_S, on_progress=on_progress,
         )
     except Exception as err:  # the run itself (not one item) raised: unexpected, but the thread must never die silently
         failure = str(err) or repr(err)
@@ -524,6 +576,8 @@ def _sync_to_steam_run(steam, mods_snapshot: dict, carrier: _SteamClientDone) ->
 
 
 class RimWorldMainScreen(QWidget):
+    back_requested = Signal()  # the "Games" button / Alt+Left: back to the game select screen
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -562,6 +616,10 @@ class RimWorldMainScreen(QWidget):
         self._steam_jobs: dict[_SteamClientDone, threading.Thread] = {}
         self._unsubscribing: set[str] = set()
         self._syncing = False
+        # Set once this screen is left for game select (_request_back): each
+        # background thread's queued result is dropped from then on (the
+        # screen is being deleted; its threads just finish on their own).
+        self._closed = False
         # The footer's SteamCMD download row (App.jsx dl): None = hidden; else
         # one shared download_state.DownloadState across every run in flight
         # (its `active` counts them) - _download_via_steamcmd merges a start
@@ -589,13 +647,16 @@ class RimWorldMainScreen(QWidget):
         self._conflicts: dict[str, set[str]] = {}
         self._scan_problems: list[dict] = []  # minus ignored_scan_issues; the Scan issues window's list
         self.app_root = resolve_app_root(GAME_SLUG)
-        # Dev-only action log at <app_root>/volt.log. Started here because this
+        moved = migrate_legacy_app_root(GAME_SLUG)  # before init_log creates the new folder
+        # Action log at <app_root>/volt.log. Started here because this
         # is the first point the per-game APP-ROOT is known; once a real
         # game-selection screen exists (multi-game, later slice), this moves to
-        # wherever the chosen game's app root gets resolved. None in a packaged
-        # build (no log): Settings > Troubleshooting's log buttons follow.
+        # wherever the chosen game's app root gets resolved. None when it can't be
+        # written (no log): Settings > Troubleshooting's log buttons follow.
         self._log_path: Path | None = init_log(self.app_root)
         log(f"app root: {self.app_root}")
+        if moved:
+            log(moved)
         # Community rules: looked up now, off the GUI thread (Electron fetches
         # them at launch; this screen is where this game's app root - and its
         # cache file - is first known), so validation's community tier is live
@@ -616,7 +677,7 @@ class RimWorldMainScreen(QWidget):
         )
         self._community_rules_thread.start()
         log(f"community rules: background lookup started (thread {self._community_rules_thread.name})")
-        self._settings = SettingsStore()
+        self._settings = SettingsStore(self.app_root)
         # Settings > General > Animations, app-wide from here on (phase 4)
         theme.set_animation_mode(self._settings.get()["animations"])
         log(f"animations: {self._settings.get()['animations']}")
@@ -890,6 +951,7 @@ class RimWorldMainScreen(QWidget):
         # ActionsColumn.jsx: Sync disabled={disabled || syncing}, reading "Syncing..." meanwhile.
         self.sync_button.setEnabled(has_game and not self._syncing)
         self.sync_button.setText("Syncing..." if self._syncing else "Sync")
+        self._apply_games_button()
         # ActionsColumn.jsx: Import disabled={busy}, Export disabled={busy || activeCount === 0}.
         # Import also needs a game here: with no scan, an import would have nothing to show.
         self.import_button.setEnabled(has_game)
@@ -945,6 +1007,8 @@ class RimWorldMainScreen(QWidget):
         """The startup community-rules lookup finished (on the GUI thread, via
         a queued connection): re-run validation, which now has the community
         tier (or still none, if the lookup found no rules)."""
+        if self._closed:  # the screen was left meanwhile (_request_back)
+            return
         rules = community_rules.loaded_rules()
         log(f"community rules: loaded ({len(rules or {})} mods with rules), re-running validation")
         self._update_validation()
@@ -959,6 +1023,9 @@ class RimWorldMainScreen(QWidget):
         self._apply_load_order_state()
 
     def _connect_signals(self) -> None:
+        self.games_button.clicked.connect(lambda: self._request_back())
+        # Alt+Left = the Games button (window context, Qt's default), through the same guard
+        QShortcut(QKeySequence("Alt+Left"), self).activated.connect(lambda: self._request_back())
         self.settings_button.setEnabled(True)  # always usable (PathsBar.jsx: disabled only while busy)
         self.settings_button.clicked.connect(lambda: self._show_settings())
         self.help_button.setEnabled(True)  # always usable, like Settings
@@ -1059,14 +1126,35 @@ class RimWorldMainScreen(QWidget):
     def _confirm(self, title: str, message: str, *, confirm_label: str) -> bool:
         """A question box with `confirm_label` / Cancel (the confirm button is
         the default, Esc = Cancel), logged like _warn. True if confirmed."""
+        return self._confirm_checked(title, message, confirm_label=confirm_label)[0]
+
+    def _confirm_checked(self, title: str, message: str, *, confirm_label: str,
+                         checkbox: str | None = None) -> tuple[bool, bool]:
+        """_confirm's box, optionally with a checkbox labelled `checkbox`
+        (unticked) under the text (QMessageBox.setCheckBox). Returns
+        (confirmed, ticked). The box and its checkbox are read here, while
+        alive: PySide6 deletes the box (and the checkbox it owns) as soon as
+        this returns - a caller holding the checkbox would read a deleted
+        C++ object (the 0.6.8 Remove completely crash). The checkbox is made
+        with the box as its Qt parent (so PySide6 never deletes it on its
+        own: setCheckBox doesn't take Python ownership, and an unparented
+        temporary was freed right after that call, leaving the box a dangling
+        pointer - the 0.6.8 hard crash on the next read) and read through
+        our own reference right after exec(), never via box.checkBox()."""
         box = QMessageBox(QMessageBox.Icon.Question, title, message, QMessageBox.StandardButton.Cancel, self)
+        check = None
+        if checkbox is not None:
+            check = QCheckBox(checkbox, box)  # parented: owned by the box, alive as long as it is
+            box.setCheckBox(check)
         confirm = box.addButton(confirm_label, QMessageBox.ButtonRole.AcceptRole)
         box.setDefaultButton(confirm)  # Enter confirms (user decision 2026-09-29)
         box.setEscapeButton(QMessageBox.StandardButton.Cancel)  # Esc still cancels
         box.exec()
         confirmed = box.clickedButton() is confirm
-        log(f"confirm shown: {title}: {message} -> {confirm_label if confirmed else 'Cancel'}")
-        return confirmed
+        ticked = check is not None and check.isChecked()
+        note = "" if checkbox is None else f" [{checkbox}: {'ticked' if ticked else 'not ticked'}]"
+        log(f"confirm shown: {title}: {message} -> {confirm_label if confirmed else 'Cancel'}{note}")
+        return confirmed, ticked
 
     def _confirm_sync(self) -> bool:
         """Sync to Steam's heads-up before a real sync starts (never for a
@@ -1123,6 +1211,39 @@ class RimWorldMainScreen(QWidget):
         return not self._dirty() or self._confirm(
             "Unsaved changes", "Discard unsaved changes to the current list?", confirm_label="Discard changes"
         )
+
+    # ---- back to game select (the "Games" button / Alt+Left, 0.6.8) ----
+    def _apply_games_button(self) -> None:
+        """Disabled while leaving would cut off or lose work in flight, its
+        tooltip saying why; else enabled with its usual tooltip. Blocks on: a
+        Sync to Steam; an unfinished SteamCMD download - running, or paused
+        (the footer row + its Resume live on this screen and would be lost;
+        user decision 2026-09-30); a Steam-client Subscribe / Unsubscribe
+        (_steam_jobs). Re-applied from _apply_load_order_state (Sync),
+        _render_download_bar (every _dl change) and wherever _steam_jobs
+        changes."""
+        dl = self._dl
+        why = ("while a Sync to Steam is running" if self._syncing
+               else "while a SteamCMD download is paused - Resume it and let it finish first" if dl is not None and dl.paused
+               else "while a SteamCMD download is running - let it finish first" if dl is not None or self._steamcmd_jobs
+               else "while a Steam Unsubscribe is running" if self._steam_jobs and self._unsubscribing
+               else "while a Steam Subscribe is running" if self._steam_jobs else None)
+        self.games_button.setEnabled(why is None)
+        self.games_button.setToolTip(GAMES_TOOLTIP if why is None else f"Can't go back to game select {why}.")
+
+    def _request_back(self) -> None:
+        """The Games button and Alt+Left: back to the game select screen
+        (MainWindow swaps a fresh one in and deleteLater()s this one). Does
+        nothing while the button is disabled (the shortcut doesn't follow it
+        on its own) or when the unsaved-changes confirm is cancelled. Then
+        _closed: whatever still runs in the background (the community-rules
+        lookup, a Steam-client Subscribe / Unsubscribe) finishes on its own
+        and its queued result is dropped (each slot checks _closed)."""
+        if not self.games_button.isEnabled() or not self._confirm_discard():
+            return
+        self._closed = True
+        log("back to game select: leaving the RimWorld manager")
+        self.back_requested.emit()
 
     # ---- mods: scan, select, move ----
     def rescan(self) -> None:
@@ -2166,6 +2287,38 @@ class RimWorldMainScreen(QWidget):
         log(f"subscribe: {mod_id} (Workshop id {wid})")
         self._acquire_pending([mod_id])
 
+    def _resolve_workshop_id(self, mod_id: str) -> str | None:
+        """A package-id-only not-found row's Workshop id, from an About.xml
+        with that packageId in the SteamCMD library, else in Steam's own
+        Workshop content folder (steam_cmd.find_item); None when neither has
+        it (RIMWORLD.md #52, user decision 2026-09-30). Logged."""
+        found = steam_cmd.library_copy(self.app_root, mod_id)
+        where = "SteamCMD library"
+        if found is None and self.game_dir is not None and paths.has_steam_appid(self.game_dir):
+            found, where = steam_cmd.find_item(paths.workshop_dir_for(self.game_dir), mod_id), "Steam Workshop folder"
+        log(f"context menu: {mod_id} Workshop id " + (f"{found[0]} (from the {where}: {found[1]})" if found
+                                                       else "not found in the SteamCMD library or the Workshop folder"))
+        return found[0] if found else None
+
+    def _subscribe_package_row(self, mod_id: str, wid: str) -> None:
+        """Subscribe on a package-id-only not-found row whose Workshop id was
+        resolved (_resolve_workshop_id): the row becomes that item's pending
+        'workshop:<id>' row on screen, then the normal Subscribe flow for it
+        (_acquire_pending: SteamCMD download - which reuses SteamCMD's cached
+        copy - or the Steam-client subscribe). Once installed, the rescan
+        swaps it back to the mod's package id (mod_list_io.reconcile_active),
+        so the list ends as it was saved; if it fails, the row keeps its
+        Workshop id (an unsaved change the user can Save)."""
+        sentinel = f"workshop:{wid}"
+        ids = self.active_list.mod_ids()
+        if mod_id not in ids:
+            log(f"subscribe: {mod_id} isn't in the Active list any more, nothing to do")
+            return
+        self.active_list.set_mod_ids(list(dict.fromkeys(sentinel if i == mod_id else i for i in ids)))
+        log(f"subscribe: {mod_id} resolved to Workshop id {wid}; row is now {sentinel}")
+        self._apply_load_order_state()
+        self._acquire_pending([sentinel])
+
     def _acquire_pending(self, row_ids: list[str]) -> None:
         """App.jsx acquirePending: fetch the given pending rows right away by
         the acquisition mode in effect (settings.effective_acquire_via) - one
@@ -2245,6 +2398,7 @@ class RimWorldMainScreen(QWidget):
             daemon=True,
         )
         self._steam_jobs[carrier] = thread
+        self._apply_games_button()
         thread.start()
         log(f"steam subscribe batch: background run started (thread {thread.name})")
 
@@ -2255,6 +2409,8 @@ class RimWorldMainScreen(QWidget):
         "downloading" (App.jsx subscribeViaSteamworks's per-item
         setDownloading). The rescan waits for the whole batch
         (_on_steam_subscribe_done)."""
+        if self._closed:  # the screen was left meanwhile (_request_back)
+            return
         self.downloading.difference_update(item["rows"])
         self._refresh_workshop_rows()
 
@@ -2269,8 +2425,11 @@ class RimWorldMainScreen(QWidget):
         failed, a warning with the reason and its Workshop page; for a batch
         with failures, how many made it, the first failure's reason, and that
         the rest stay pending (Subscribe on a row retries one)."""
+        if self._closed:  # the screen was left meanwhile (_request_back)
+            return
         wids, failed, failure = result["wids"], result["failed"], result["failure"]
         self._steam_jobs.pop(result.get("carrier"), None)
+        self._apply_games_button()
         self.downloading.difference_update(result["rows"])
         self.rescan()  # _scan + _show_lists(on-screen Active) + load-order state; warns itself if the scan fails
         self._refresh_workshop_rows()  # the downloading look is gone even if the scan failed
@@ -2369,6 +2528,8 @@ class RimWorldMainScreen(QWidget):
         a notice, and the footer's row flips to Paused (its button Resume)
         once every run in flight has settled (download_state.settle_download,
         the JS's `finally`); otherwise the row goes away with the last run."""
+        if self._closed:  # the screen was left meanwhile (_request_back)
+            return
         rows, wids, report, failure = result["rows"], result["wids"], result["report"], result["failure"]
         self._steamcmd_jobs.pop(result.get("carrier"), None)
         self.downloading.difference_update(rows)
@@ -2434,6 +2595,8 @@ class RimWorldMainScreen(QWidget):
         applyDownloadEvent - the current item's percent and speed, the
         finished items, the failed ones) and the row redrawn. Nothing to do
         when no row is shown (an event that outlived its row)."""
+        if self._closed:  # the screen was left meanwhile (_request_back)
+            return
         if self._dl is None:
             return
         self._dl = download_state.apply_download_event(self._dl, ev)
@@ -2441,7 +2604,9 @@ class RimWorldMainScreen(QWidget):
 
     def _render_download_bar(self) -> None:
         """The footer's download row follows _dl: hidden when None, else
-        redrawn from it (screens/download_bar.py DownloadBar.render)."""
+        redrawn from it (screens/download_bar.py DownloadBar.render). The
+        Games button follows it too (_apply_games_button)."""
+        self._apply_games_button()
         if self._dl is None:
             self.download_bar.setVisible(False)
             self.download_bar.clear()
@@ -2522,7 +2687,7 @@ class RimWorldMainScreen(QWidget):
                 confirm_label="Remove",
             ):
                 return
-            self._remove_download(path, name)
+            self._remove_download(path, name, mod_id)
             return
         if not self._confirm(
             f"Unsubscribe from {name}?",
@@ -2552,10 +2717,11 @@ class RimWorldMainScreen(QWidget):
             daemon=True,
         )
         self._steam_jobs[carrier] = thread
+        self._apply_games_button()
         thread.start()
         log(f"unsubscribe {wid} ({name}): background run started (thread {thread.name})")
 
-    def _remove_download(self, path, name: str) -> None:
+    def _remove_download(self, path, name: str, mod_id: str | None = None) -> None:
         """Unsubscribe's 'delete' kind (App.jsx removeDownloadNow): delete the
         SteamCMD download's folder, nothing else. steam_cmd.delete_item is
         best effort and doesn't raise for a locked file, so `gone` is the
@@ -2576,7 +2742,13 @@ class RimWorldMainScreen(QWidget):
             log(f"remove download {r['path']} ({name}): NOT removed - folder still on disk, {left} item(s) couldn't be "
                 f"deleted: {skipped}")
         self.rescan()
-        if r["gone"]:
+        steam_copy = (self._mods.get(mod_id) or {}) if mod_id else {}
+        if r["gone"] and steam_copy.get("source") == "workshop":
+            # both places: the SteamCMD copy shadowed a Steam Workshop copy, which the rescan now shows
+            log(f"remove download {r['path']} ({name}): a Steam Workshop copy remains at {steam_copy['path']}")
+            self._notice("Remove", f"Removed {name}'s SteamCMD download. It's also subscribed on Steam "
+                                   f"({steam_copy['path']}); use Unsubscribe to remove that copy too.")
+        elif r["gone"]:
             self._notice("Remove", f"Removed {name}'s SteamCMD download.")
         else:
             why = (f"{left} item{' was' if left == 1 else 's were'} locked or in use" if left
@@ -2595,8 +2767,11 @@ class RimWorldMainScreen(QWidget):
         unsubscribeNow's messages): a notice when Steam dropped it and its
         folder is gone, a warning naming what was left behind, or the failure
         (still subscribed after the verify checks: its files were left alone)."""
+        if self._closed:  # the screen was left meanwhile (_request_back)
+            return
         self._steam_jobs.pop(result.get("carrier"), None)
         self._unsubscribing.discard(result["mod_id"])
+        self._apply_games_button()
         wid, name, r, failure = result["wid"], result["name"], result["result"], result["failure"]
         if failure:
             self._warn("Unsubscribe", failure)
@@ -2615,13 +2790,203 @@ class RimWorldMainScreen(QWidget):
         else:
             self._notice("Unsubscribe", text)
 
+    # ---- Fetch / Remove completely (the mod menu, RIMWORLD.md #52) ----
+    def _fetch(self, mod_id: str) -> None:
+        """Fetch (SteamCMD / GOG modes) on a not-found row: copy the SteamCMD
+        library's cached copy into <game>/Mods/<wid> with the SteamCMD marker
+        (steam_cmd.fetch_from_library; the mode in effect = the marker mode,
+        so Sync picks a 'steamcmd' copy up), then a rescan - the row resolves
+        to the mod. No library copy: a pending Workshop row falls back to
+        Subscribe's SteamCMD download (_subscribe). Refused, with a notice,
+        when <Mods>/<wid> already exists (never replaced from here)."""
+        lib = steam_cmd.library_copy(self.app_root, mod_id)
+        via = self._acquire_via()
+        log(f"fetch: {mod_id} via {via}, library copy {lib[1] if lib else None}")
+        if lib is None:
+            if mod_list_io.not_found_workshop_id(mod_id, self._mods):
+                log(f"fetch: {mod_id} has no library copy - downloading it with SteamCMD instead")
+                self._subscribe(mod_id)
+                return
+            self._warn("Fetch", f"The SteamCMD library has no copy of {mod_id}, so there's nothing to fetch.")
+            return
+        if self.game_dir is None:
+            self._warn("Fetch", "RimWorld install folder is not set.")
+            return
+        wid = lib[0]
+        try:
+            dest = self._busy(lambda: steam_cmd.fetch_from_library(self.app_root, self.game_dir / "Mods", wid, via))
+        except (steam_cmd.SteamCmdError, ValueError, OSError) as err:
+            log(f"fetch: {mod_id} ({wid}) FAILED - {err}")
+            if (self.game_dir / "Mods" / wid).exists():
+                self._notice("Fetch", str(err))  # already installed: not an error
+            else:
+                self._warn("Fetch", str(err))
+            return
+        log(f"fetch: {mod_id} ({wid}) copied into {dest}, rescanning")
+        self.rescan()
+        self._notice("Fetch", f"Fetched {self._mod_display_name(mod_id)} from the SteamCMD library into {dest}.")
+
+    def _remove_completely(self, mod_id: str) -> None:
+        """Remove completely (every mode): delete the mod's files from every
+        place VOLT scans (mod_removal.plan_removal / run_removal: its
+        <game>/Mods copies - hand-installed or SteamCMD -, a folder left in
+        Steam's Workshop folder that Steam says it is NOT subscribed to, and,
+        only with the confirm's checkbox ticked, the SteamCMD library's cached
+        copy), then drop the row from the Active list: on screen, from the
+        unsaved-changes baseline and undo steps, and from the current load
+        order's saved file, so nothing else unsaved gets saved with it.
+        Refused (a warning) for official Core/DLC mods, for a Workshop item
+        Steam reports subscribed (Unsubscribe's job), and when Steam can't be
+        asked (unavailable / the query failed - never guessed). The Steam
+        question runs on a daemon thread (_check_workshop_subscribed ->
+        _on_remove_check_done, the Unsubscribe pattern); the confirm follows
+        (_remove_completely_confirm). Best effort: a locked file is skipped
+        and reported; the row is dropped either way (a leftover then shows
+        in Inactive)."""
+        if self.game_dir is None:
+            self._warn("Remove completely", "RimWorld install folder is not set.")
+            return
+        mod = self._mods.get(mod_id)
+        name = self._mod_display_name(mod_id)
+        try:
+            plan = self._busy(lambda: mod_removal.plan_removal(self.game_dir, self.app_root, mod_id, mod))
+        except OSError as err:
+            log(f"remove completely: {mod_id} - scanning FAILED: {err}")
+            self._warn("Remove completely", str(err))
+            return
+        log(f"remove completely: {mod_id} ({name}) plan: {clip(plan)}")
+        if plan["refuse"]:
+            log(f"remove completely: {mod_id} refused - {plan['refuse']}")
+            self._warn("Remove completely", plan["refuse"])
+            return
+        wids = mod_removal.workshop_ids(plan)
+        if not wids:
+            self._remove_completely_confirm(mod_id, name, plan)
+            return
+        available, reason = self._refresh_steam()
+        if not available:
+            text = (f"{name} has a folder in Steam's Workshop folder ({', '.join(map(str, plan['workshop']))}), and "
+                    f"VOLT can't ask Steam whether you're subscribed to it ({reason}), so nothing was removed.")
+            log(f"remove completely: {mod_id} refused - Steam isn't available to check {wids} ({reason})")
+            self._warn("Remove completely", text)
+            return
+        self._unsubscribing.add(mod_id)  # its menu entries grey out meanwhile
+        self._notice("Remove completely", f"Asking Steam whether you're subscribed to {name}...")
+        carrier = _SteamClientDone()  # no parent: owned by _steam_jobs and the thread
+        carrier.done.connect(self._on_remove_check_done, Qt.ConnectionType.QueuedConnection)
+        thread = threading.Thread(
+            target=_check_workshop_subscribed,
+            args=(_steam_ops_for(self.app_root, self.game_dir), wids, {"mod_id": mod_id, "name": name, "plan": plan},
+                  carrier),
+            name=f"steam-remove-check-{wids[0]}", daemon=True,
+        )
+        self._steam_jobs[carrier] = thread
+        self._apply_games_button()
+        thread.start()
+        log(f"remove completely: {mod_id} - asking Steam about {wids} (thread {thread.name})")
+
+    @Slot(object)
+    def _on_remove_check_done(self, result: dict) -> None:
+        """Steam answered (or failed to) whether Remove completely's Workshop
+        folders are subscribed (on the GUI thread, via a queued connection):
+        any subscribed, or no answer -> refused with a warning; none -> the
+        confirm, their folders listed as leftovers."""
+        if self._closed:  # the screen was left meanwhile (_request_back)
+            return
+        self._steam_jobs.pop(result.get("carrier"), None)
+        mod_id, name, plan = result["mod_id"], result["name"], result["plan"]
+        self._unsubscribing.discard(mod_id)
+        self._apply_games_button()
+        if result["failure"]:
+            log(f"remove completely: {mod_id} refused - Steam couldn't be asked: {result['failure']}")
+            self._warn("Remove completely", f"VOLT couldn't ask Steam whether you're subscribed to {name} "
+                                            f"({result['failure']}), so nothing was removed.")
+            return
+        subscribed = [w for w, sub in result["subscribed"].items() if sub]
+        if subscribed:
+            log(f"remove completely: {mod_id} refused - Steam reports {subscribed} subscribed")
+            self._warn("Remove completely", mod_removal.subscribed_refusal(name, subscribed))
+            return
+        log(f"remove completely: {mod_id} - Steam reports {list(result['subscribed'])} NOT subscribed: leftovers")
+        self._remove_completely_confirm(mod_id, name, {**plan, "workshop_not_subscribed": True})
+
+    def _remove_completely_confirm(self, mod_id: str, name: str, plan: dict) -> None:
+        """Remove completely after the checks: the confirm (every path it will
+        delete; the library checkbox), then the deletes and the load-order
+        drop (see _remove_completely)."""
+        lines = "".join(f"\n\u2022 {p}" for p in plan["mods"]) + "".join(
+            f"\n\u2022 {p} (a leftover in Steam's Workshop folder: Steam isn't subscribed to it)"
+            for p in plan.get("workshop") or [])
+        if lines:
+            message = (f"This deletes:{lines}\n\nIt's also removed from this load order's Active list, and from its "
+                       "saved file right away.")
+        else:
+            message = ("Nothing of this mod is in your Mods folder, so no mod files are deleted. This removes it from "
+                       "this load order's Active list, and from its saved file right away.")
+        if plan["library"]:
+            message += (f"\n\nIts SteamCMD library copy ({plan['library']}) is kept unless you tick the box below; "
+                        "Fetch can bring the mod back from it.")
+        if lines or plan["library"]:
+            message += ("\n\nRemoving files is best-effort: a file that's locked or in use is skipped rather than "
+                        "failing the whole operation.")
+        confirmed, include_library = self._confirm_checked(
+            f"Remove {name} completely?", message, confirm_label="Remove completely",
+            checkbox="Also delete the SteamCMD library copy" if plan["library"] else None)
+        if not confirmed:
+            log(f"remove completely: {mod_id} cancelled, nothing changed")
+            return
+        log(f"remove completely: {mod_id} confirmed (library copy: {'delete' if include_library else 'keep'})")
+        results = self._busy(lambda: mod_removal.run_removal(self.game_dir, self.app_root, plan, include_library))
+        left = []
+        for r in results:
+            if "refused" in r:
+                log(f"remove completely: {r['path']} REFUSED - {r['refused']}")
+                left.append(f"{r['path']} (refused: {r['refused']})")
+            elif r["gone"]:
+                log(f"remove completely: {r['path']} deleted ({r['removed']} file(s))")
+            else:
+                log(f"remove completely: {r['path']} NOT fully deleted - {r['removed']} file(s) removed, "
+                    f"{len(r['skipped'])} couldn't be: {clip(r['skipped'])}")
+                left.append(f"{r['path']} ({len(r['skipped'])} locked or in use)")
+        self._drop_from_load_order(mod_id)
+        self.rescan()
+        if left:
+            self._warn("Remove completely", f"Removed {name} from the load order, but some files couldn't be deleted:"
+                       + "".join(f"\n\u2022 {x}" for x in left) + "\n\nClose whatever is using them (the game, say) "
+                       "and try again.")
+        elif results:
+            self._notice("Remove completely", f"Removed {name} completely.")
+        else:
+            self._notice("Remove completely", f"Removed {name} from the load order (no files to delete).")
+
+    def _drop_from_load_order(self, mod_id: str) -> None:
+        """Remove completely's list half: `mod_id` leaves the on-screen Active
+        list, the unsaved-changes baseline, every undo step and the current
+        load order's saved file (only that id - other unsaved edits stay
+        unsaved). The caller rescans."""
+        self._baseline = [i for i in self._baseline if i != mod_id]
+        self._history = [[i for i in h if i != mod_id] for h in self._history]
+        self.active_list.set_mod_ids([i for i in self.active_list.mod_ids() if i != mod_id])
+        if not self.current_load_order:
+            return
+        try:
+            saved = load_orders.load_load_order(self.app_root, self.current_load_order)
+            load_orders.save_load_order(self.app_root, self.current_load_order,
+                                        active=[i for i in saved["active"] if i != mod_id],
+                                        inactive=[i for i in saved["inactive"] if i != mod_id])
+        except (OSError, ValueError) as err:
+            log(f"remove completely: dropping {mod_id} from saved load order {self.current_load_order} FAILED: {err}")
+            self._warn("Remove completely", f"Couldn't update the saved load order: {err}")
+            return
+        log(f"remove completely: {mod_id} dropped from load order {self.current_load_order} (saved file and screen)")
+
     # ---- Sync to Steam (App.jsx syncToSteam) ----
     def _sync_to_steam(self) -> None:
         """The actions column's Sync button (only it, never Save): make every
         SteamCMD-downloaded mod (source 'steamcmd' with a Workshop id - never
         a permanent 'gog' copy) a real Steam subscription, then drop its
         SteamCMD copy once Steam's own download is on disk
-        (steam_ops.sync_steamcmd_mods, two passes, on a daemon thread running
+        (steam_ops.sync_steamcmd_mods, per item, on a daemon thread running
         _sync_to_steam_run -> _on_sync_done). Refused while one is running
         (`_syncing`; the button reads "Syncing..."), with Steam unavailable,
         or with nothing to sync. Past those, the heads-up dialog
@@ -2668,6 +3033,7 @@ class RimWorldMainScreen(QWidget):
             daemon=True,
         )
         self._steam_jobs[carrier] = thread
+        self._apply_games_button()
         thread.start()
         log(f"sync: background run started for {count} SteamCMD mod(s) (thread {thread.name})")
 
@@ -2678,12 +3044,18 @@ class RimWorldMainScreen(QWidget):
         was synced or is pending (a pending copy can have changed on disk
         too - a partly deleted one); then App.jsx syncToSteam's summary: how
         many of the total synced, that Steam has them and the copies are gone,
-        how many are pending (subscribed but the download unconfirmed or the
-        copy locked - the next sync finishes them) and how many couldn't be
+        how many are subscribed but not downloaded by Steam yet (real hardware
+        2026-09-30: Steam can hold the download until it's restarted - so say
+        that, and that a later Sync finishes it), how many are on Steam but
+        their copy was locked (the next sync removes it), which ones Steam
+        reports installed but whose Steam copy isn't a complete mod (copy
+        kept; restart Steam or verify, then Sync again) and how many couldn't be
         subscribed (the first reason) - a notice when everything synced, a
         warning otherwise."""
+        if self._closed:  # the screen was left meanwhile (_request_back)
+            return
         self._steam_jobs.pop(result.get("carrier"), None)
-        self._syncing = False
+        self._syncing = False  # _apply_load_order_state below re-applies the Games button
         self._apply_load_order_state()
         r, failure = result["result"], result["failure"]
         if failure:
@@ -2695,12 +3067,30 @@ class RimWorldMainScreen(QWidget):
         text = f"Synced {n} of {total} mod{'' if total == 1 else 's'} to Steam."
         if n:
             text += " Steam downloaded them into its Workshop folder and their SteamCMD copies were removed."
-        if pending:
+        waiting = len(r["not_downloaded"])
+        incomplete = r.get("incomplete") or []
+        locked = pending - waiting - len(incomplete)
+        if waiting:
+            one = waiting == 1
             text += (
-                f" {pending} {'is' if pending == 1 else 'are'} subscribed on Steam but still "
-                f"{'has its SteamCMD copy' if pending == 1 else 'have their SteamCMD copies'} (Steam didn't confirm the "
-                f"download within {SUBSCRIBE_TIMEOUT_S:g} seconds, or a file in the copy was locked or in use - the log "
-                f"says which); the next sync finishes {'it' if pending == 1 else 'them'}."
+                f" {waiting} {'is' if one else 'are'} subscribed on Steam, but Steam hasn't downloaded "
+                f"{'it' if one else 'them'} yet. Restarting Steam (or waiting a while) gets "
+                f"{'the download' if one else 'the downloads'} going; then run Sync again to finish. "
+                f"{'Its SteamCMD copy is' if one else 'Their SteamCMD copies are'} kept until then."
+            )
+        if incomplete:
+            one = len(incomplete) == 1
+            names = ", ".join(i["name"] for i in incomplete[:3]) + (f" and {len(incomplete) - 3} more" if len(incomplete) > 3 else "")
+            text += (
+                f" Steam's copy of {names} {'is' if one else 'are'} incomplete, so "
+                f"{'its SteamCMD copy was' if one else 'their SteamCMD copies were'} kept. Restart Steam or verify "
+                "RimWorld's files in Steam (Properties > Installed Files), then run Sync again."
+            )
+        if locked:
+            one = locked == 1
+            text += (
+                f" {locked} {'is' if one else 'are'} on Steam now, but {'its SteamCMD copy' if one else 'their SteamCMD copies'} "
+                f"couldn't be removed (a file was locked or in use); the next sync removes {'it' if one else 'them'}."
             )
         if failed:
             text += (f" {failed} couldn't be subscribed ({r['failed'][0]['error']}) and stay as SteamCMD downloads until "
@@ -2768,6 +3158,9 @@ class RimWorldMainScreen(QWidget):
         row.setContentsMargins(BAR_SIDE, 8, BAR_SIDE, 0)
         row.setSpacing(GAP)
 
+        self.games_button = _games_button()  # far left: back to game select
+        row.addWidget(self.games_button)
+        row.addSpacing(16 - GAP)  # the same 16px as after Settings
         self.settings_button = _button("Settings")
         row.addWidget(self.settings_button)
         row.addSpacing(16 - GAP)  # .settings-btn margin-right: 16px
@@ -2932,7 +3325,18 @@ class RimWorldMainScreen(QWidget):
         'workshop') needs Steam available, a SteamCMD download (source
         'steamcmd' / 'gog') was never subscribed, so it only deletes its
         files and needs no Steam; disabled while that mod's own Unsubscribe
-        is still running, _unsubscribe."""
+        is still running, _unsubscribe. Per mode (steam_ops.menu_pair,
+        RIMWORLD.md #52 as re-decided 2026-09-30): 'steamcmd' and
+        'steamworks' share that pair, the second item labelled Delete for a
+        SteamCMD / GOG copy and Unsubscribe otherwise; Subscribe is also
+        enabled on a package-id-only not-found row whose Workshop id resolves
+        from the SteamCMD library or Steam's Workshop folder
+        (_resolve_workshop_id -> _subscribe_package_row). 'gog' shows Fetch
+        (_fetch: the library copy, else a pending row's download; greyed with
+        nothing to fetch or <Mods>/<id> already there) + Delete (the 'delete'
+        kind). Then, every mode, Remove completely... (_remove_completely),
+        greyed for official Core/DLC mods and while the row downloads /
+        unsubscribes."""
         index = pane.indexAt(pos)
         mod_id = pane.mod_model.id_at(index.row()) if index.isValid() else None
         if mod_id is None:
@@ -2944,15 +3348,28 @@ class RimWorldMainScreen(QWidget):
         color = self._mod_color(mod_id)
         pkg = mod["package_id"] if mod else mod_id  # a not-found mod's id is its lowercased packageId
         kind = steam_ops.unsubscribe_kind(mod)  # None | 'delete' | 'steam'
+        via = self._acquire_via()
         log(f"context menu: {mod_id} in {self._pane_name(pane)} (workshop={bool(urls)}, color={color}, "
-            f"pending={pending}, unsubscribe={kind})")
+            f"pending={pending}, unsubscribe={kind}, source={mod['source'] if mod else None}, mode={via})")
 
         menu = QMenu(pane)
+        # Where the mod comes from (mods.origin, the details pane's Source row too): a disabled, never-clickable
+        # header - Qt's keyboard navigation skips disabled items, so Up/Down land on the real ones.
+        menu.addAction(mods.origin(mod, pending)[0]).setEnabled(False)
+        menu.addSeparator()
 
         def item(target: QMenu, label: str, enabled, fn) -> None:
             action = target.addAction(label)
             action.setEnabled(bool(enabled))
-            action.triggered.connect(lambda: fn())
+            action.triggered.connect(lambda: run(label, fn))
+
+        def run(label: str, fn) -> None:
+            # An unexpected error in a menu action goes to volt.log with its traceback (not only the console).
+            try:
+                fn()
+            except Exception as err:  # noqa: BLE001 - logged and shown, the app carries on
+                log(f"context menu: {label} on {mod_id} FAILED:\n{traceback.format_exc()}")
+                self._warn(label.rstrip("."), f"Something went wrong: {err!r}. The details are in volt.log.")
 
         item(menu, "Open folder", mod, lambda: self._open_folder(mod["path"]))
         item(menu, "Open URL in browser", urls, lambda: self._open_url(urls["web"]))
@@ -2963,6 +3380,7 @@ class RimWorldMainScreen(QWidget):
         sub = menu.addMenu("Copy to clipboard")
         item(sub, "Copy URL", urls, lambda: self._copy_text(urls["web"], "Copied the Workshop URL."))
         item(sub, "Copy PackageId", pkg, lambda: self._copy_text(pkg, f'Copied "{pkg}".'))
+        item(sub, "Copy path", mod, lambda: self._copy_text(str(mod["path"]), "Copied the mod's folder path."))
         sub = menu.addMenu("Mod color")
         item(sub, "Change mod color", True, lambda: self._pick_mod_color(mod_id, color))
         item(sub, "Discolor mod", color, lambda: self._set_mod_color(mod_id, None))
@@ -2970,11 +3388,31 @@ class RimWorldMainScreen(QWidget):
         item(sub, "Create rule", True, lambda: self._create_rule(pkg))
         item(sub, "Show rules", True, lambda: self._show_rules())
         menu.addSeparator()
-        item(menu, "Subscribe", pending and mod_id not in self.downloading and self._subscribe_ready(),
-             lambda: self._subscribe(mod_id))
-        item(menu, "Unsubscribe",
-             kind is not None and mod_id not in self._unsubscribing and (kind == "delete" or self._steam_available),
-             lambda: self._unsubscribe(mod_id))
+        first, second = steam_ops.menu_pair(via, mod)
+        if via == "gog":
+            # GOG mode (RIMWORLD.md #52): Fetch from the SteamCMD library / Delete a copy
+            lib = None if mod else steam_cmd.library_copy(self.app_root, mod_id)  # only a not-found row is looked up
+            installed = bool(lib and self.game_dir and (self.game_dir / "Mods" / lib[0]).exists())
+            if not mod:
+                log(f"context menu: {mod_id} SteamCMD library copy {lib[1] if lib else None}"
+                    f"{' (Mods copy already present)' if installed else ''}")
+            item(menu, first, not mod and mod_id not in self.downloading and not installed and (lib or pending),
+                 lambda: self._fetch(mod_id))
+            item(menu, second, kind == "delete" and mod_id not in self._unsubscribing,
+                 lambda: self._unsubscribe(mod_id))
+        else:
+            # SteamCMD-then-sync / Steam client: Subscribe, then Delete (a SteamCMD copy) or Unsubscribe (a real
+            # subscription) - the pre-#52 behaviours, plus Subscribe on a package-id row whose Workshop id resolves
+            wid = None if (mod or pending) else self._resolve_workshop_id(mod_id)
+            item(menu, first, (pending or wid) and mod_id not in self.downloading and self._subscribe_ready(),
+                 lambda: self._subscribe(mod_id) if pending else self._subscribe_package_row(mod_id, wid))
+            item(menu, second,
+                 kind is not None and mod_id not in self._unsubscribing and (kind == "delete" or self._steam_available),
+                 lambda: self._unsubscribe(mod_id))
+        official = (mod and mod["source"] == "official") or pkg.lower().startswith("ludeon.")
+        item(menu, "Remove completely...",
+             not official and mod_id not in self.downloading and mod_id not in self._unsubscribing,
+             lambda: self._remove_completely(mod_id))
         menu.exec(pane.viewport().mapToGlobal(pos))
         menu.deleteLater()
 

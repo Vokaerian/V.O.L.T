@@ -15,9 +15,12 @@ ctypes wrapper that loads a separately obtained native library at runtime. The
 library reads its runtime files from the process's CURRENT WORKING DIRECTORY
 first, which steam_client.py sets to <app_root>/steamworks/:
   steam_appid.txt      the app id (294100), written by steam_client.py itself
-  SteamworksPy64.dll   pre-built: https://github.com/philippj/SteamworksPy/releases
-  steam_api64.dll      Valve's redistributable; RimWorld's own install folder
-                       ships one (Unity keeps it under RimWorldWin64_Data/Plugins)
+  SteamworksPy64.dll   built for Steamworks SDK 1.64: redist/windows in the
+                       SteamworksPy repo (the old 1.6.5 release still loads, see below)
+  steam_api64.dll      from THE SAME Steamworks SDK (sdk/redistributable_bin/win64).
+                       The 1.64 DLL imports SteamInternal_SteamAPI_Init, which
+                       RimWorld's own (2023) copy lacks - that copy only pairs
+                       with the 1.6.5 release DLL. The two files go together.
 The `steamworks/` package itself is found through the normal import path (the
 venv), or - because that same cwd is also on sys.path here - dropped into that
 folder as a plain source folder. steam_client.availability() checks all of this
@@ -32,7 +35,7 @@ QUERY_EXPORTS per workshop_item call). See _patch_loader.
 
 Protocol, one JSON object per line, stdin -> stdout:
   in:  {"seq": n, "action": a, "id": "<workshop id>"}
-         a: subscribe | unsubscribe | install_info | is_subscribed | workshop_item
+         a: subscribe | unsubscribe | install_info | is_subscribed | workshop_item | download
        {"action": "shutdown"}                     -> exits 0 (so does stdin EOF)
   out: {"seq": n, "ok": true, "value": ...} | {"seq": n, "ok": false, "error": "..."}
 The protocol writes go to a private duplicate of the original stdout; the
@@ -300,7 +303,9 @@ class Worker:
         except Exception as err:
             raise WorkerError(
                 f"The Steamworks native library couldn't be loaded from {os.getcwd()} ({err!s}). "
-                "steam_appid.txt, SteamworksPy64.dll and steam_api64.dll must all be in that folder."
+                "steam_appid.txt, SteamworksPy64.dll and steam_api64.dll must all be in that folder, and "
+                "steam_api64.dll must come from the same Steamworks SDK as SteamworksPy64.dll "
+                "(RimWorld's copy only fits the old 1.6.5 release)."
             ) from err
         try:
             sw.initialize()  # SteamAPI_Init: SteamNotRunningException / SteamConnectionException / GenericSteamException
@@ -402,6 +407,25 @@ class Worker:
         sw = self.client()
         return self._sdk("status check", lambda: item_status(sw, item))
 
+    def download(self, item: int) -> dict:
+        """(Re-)requests a high-priority download of an item, the same call
+        subscribe's priority bump makes (Sync re-asks when Steam never starts
+        a subscribed item's download). Never raises for a missing export or a
+        refused call - an error would end the caller's operation, and its
+        helper is the one that can see the item: {"requested": bool,
+        "reason": str | None, "status": item_status}."""
+        sw = self.client()
+        gone = [n for n in DOWNLOAD_EXPORTS if n in self._missing]
+        requested, reason = False, None
+        if gone:
+            reason = f"this SteamworksPy64.dll build doesn't export {', '.join(gone)}"
+        else:
+            try:
+                requested = bool(sw.Workshop.DownloadItem(item, True, callback=self._on_download))
+            except Exception as err:
+                reason = f"Steam download request failed: {err!s}"
+        return {"requested": requested, "reason": reason, "status": self._sdk("status check", lambda: item_status(sw, item))}
+
     def is_subscribed(self, item: int) -> bool:
         return self.install_info(item)["subscribed"]
 
@@ -449,6 +473,7 @@ class Worker:
         "install_info": install_info,
         "is_subscribed": is_subscribed,
         "workshop_item": workshop_item,
+        "download": download,
     }
 
     def handle(self, msg) -> dict:

@@ -41,7 +41,8 @@ Thunderstore game actually needs today:
   bepinex_launch (reset_refusal, wipe_game_folder); here: disabled while
   busy, refused while the game exe runs, the screen's Enter-confirms
   _confirm naming the folder, then a result box.
-  0.6.2 layout: four groups, each a copper side-rule terminal heading
+  0.6.2 layout: four groups (settings_window._group, shared with RimWorld's
+  window since 0.6.8), each a copper side-rule terminal heading
   (painters.TerminalLabel rule="heading", the Rules / Warnings dialog
   headings) over a muted one-line description and its buttons, SECTION_GAP
   apart: LOGS (Open log file, Open previous log file, Copy log to
@@ -76,17 +77,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, painters, paths
+from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, paths
 from volt_py.applog import log, read_tail, troubleshooting_text
 from volt_py.screens.settings_window import (
     GAP,
+    LOGS_NOTE,
     NO_LOG_TOOLTIP,
     NO_PREV_LOG_TOOLTIP,
     PATH_LABEL_WIDTH,
+    SECTION_GAP,
     SOURCE_LABEL,
     WINDOW_SIZE,
     _button,
     _button_row,
+    _group,
     _key,
     _muted,
     _page,
@@ -111,9 +115,7 @@ UNITY_LAUNCH_ARG_EXAMPLES = (
     ("-window-mode borderless", "borderless fullscreen"),
     ("-screen-width 1920 -screen-height 1080", "sets the resolution"),
 )
-SECTION_GAP = 12  # extra space between a tab's groups (8 + 12 + 8 = 28px, vs GAP inside a group)
 DATA_FOLDER_NOTE = "VOLT's own files for this game: load orders, mod cache and settings."
-LOGS_NOTE = "VOLT's record of what it did this run and the run before (development builds only)."
 SUPPORT_NOTE = "Versions, paths and the load order (plus the log's last lines), ready to paste into a bug report."
 
 
@@ -311,16 +313,6 @@ class BepInExSettingsWindow(QDialog):
         self.launch_args_edit.editingFinished.connect(lambda: self._save_launch_args())
         return page
 
-    @staticmethod
-    def _group(layout: QVBoxLayout, heading: str, text: str, *buttons) -> None:
-        """One Troubleshooting group: a copper side-rule terminal heading, a muted
-        line saying what it's for, then its buttons."""
-        layout.addWidget(painters.TerminalLabel(heading, rule="heading"))
-        note = _muted(text)
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        layout.addLayout(_button_row(*buttons))
-
     def _build_troubleshooting(self) -> QWidget:
         page, layout = _page()
         self.log_button = _button("Open log file")
@@ -336,19 +328,19 @@ class BepInExSettingsWindow(QDialog):
         self.copy_log_button = _button("Copy log to clipboard")
         self.copy_log_button.setEnabled(self._log_path is not None)
         self.copy_log_button.setToolTip(COPY_LOG_TOOLTIP if self._log_path else NO_LOG_TOOLTIP)
-        self._group(layout, "Logs", LOGS_NOTE, self.log_button, self.prev_log_button, self.copy_log_button)
+        _group(layout, "Logs", LOGS_NOTE, self.log_button, self.prev_log_button, self.copy_log_button)
         layout.addSpacing(SECTION_GAP)
         self.copy_info_button = _button("Copy troubleshooting info")
         self.copy_info_button.setToolTip(COPY_INFO_TOOLTIP)
-        self._group(layout, "Support info", SUPPORT_NOTE, self.copy_info_button)
+        _group(layout, "Support info", SUPPORT_NOTE, self.copy_info_button)
         layout.addSpacing(SECTION_GAP)
         self.clean_cache_button = _button("Clean cache")
         self._apply_clean_state()
-        self._group(layout, "Mod cache", f"{CLEAN_CACHE_TOOLTIP}.", self.clean_cache_button)
+        _group(layout, "Mod cache", f"{CLEAN_CACHE_TOOLTIP}.", self.clean_cache_button)
         layout.addStretch(1)  # the destructive group sits apart, at the bottom of the page
         self.reset_button = _button("Reset installation")
         self._apply_clean_state()
-        self._group(
+        _group(
             layout, "Reset installation",
             f"Fixes problems from corrupted or leftover modding files. Deletes everything in the {self._game_name} "
             "folder, then asks Steam to verify and re-download the game files. Your load orders and mods in VOLT's "

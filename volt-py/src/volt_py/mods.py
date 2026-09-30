@@ -143,6 +143,30 @@ def workshop_id(mod: dict | None) -> str | None:
     return None
 
 
+
+# Where a list row's mod comes from (RimWorld, 0.6.8 / RIMWORLD.md #52, user decision 2026-09-30): the mod
+# right-click menu's header (<= 14 chars, so the menu never widens) and the details pane's Source row. One table,
+# so the two can't disagree; keyed by the scan's source (scan_dir: the root, or a Mods folder's SteamCMD marker mode).
+ORIGINS = {
+    "workshop": ("Steam Workshop", "Steam Workshop (Steam's own folder)"),
+    "steamcmd": ("SteamCMD copy", "SteamCMD download in your Mods folder (not synced to Steam yet)"),
+    "gog": ("GOG copy", "SteamCMD download kept in your Mods folder (GOG)"),
+    "local": ("Local mod", "Local mod (installed by hand in your Mods folder)"),
+    "official": ("Official", "Official (Core / DLC)"),
+    "pending": ("Pending", "Pending Steam Workshop item (not installed yet)"),
+    "missing": ("Not installed", "Not installed"),
+}
+
+
+def origin(mod: dict | None, pending: bool = False) -> tuple[str, str]:
+    """(menu header, details-pane text) for a row: its scanned mod's source,
+    or for a not-found row (mod None) 'Pending' when it's a pending Workshop
+    id (mod_list_io.not_found_workshop_id - the caller's answer), else
+    'Not installed'."""
+    if mod is None:
+        return ORIGINS["pending" if pending else "missing"]
+    return ORIGINS.get(mod["source"], ORIGINS["local"])
+
 def workshop_urls(mod: dict | None) -> dict | None:
     """lists.js workshopUrls: {"web", "steam"} links to the mod's Workshop page, or None."""
     wid = workshop_id(mod)

@@ -61,11 +61,17 @@ class MainWindow(QMainWindow):
         self.resize(max(width, MIN_SIZE[0]), max(height, MIN_SIZE[1]))
 
         # Game-selection screen first (port of Electron's GameSelect/GameGate).
-        # One game per run: no way back to it, and the pick isn't persisted
-        # (TODO.md #30, Electron parity).
+        # The pick isn't persisted (TODO.md #30); each manager's "Games" button
+        # / Alt+Left comes back here (_on_back_requested, 0.6.8).
+        self.setCentralWidget(self._game_select())
+
+    def _game_select(self) -> GameSelectScreen:
+        # A fresh screen every time (first launch and every way back), so no
+        # tile keeps a hover/focus state from before (no origin-tile focus, by
+        # decision).
         game_select = GameSelectScreen()
         game_select.gameSelected.connect(self._on_game_selected)
-        self.setCentralWidget(game_select)
+        return game_select
 
     def _on_game_selected(self, slug: str) -> None:
         # Constructing the game's screen is the whole "activation" (Electron's
@@ -77,12 +83,27 @@ class MainWindow(QMainWindow):
         # Animations mode applied), then swapped in under a MOTION_SCREEN
         # crossfade of the game-select snapshot (painters.crossfade: phase 4
         # M1; the new screen and its mod lists are live at once, no effect).
+        # A fresh screen on every pick, re-entering the same game included: its
+        # own log (re)start, migration and scan run again (nothing is cached
+        # on the old, deleted screen).
         if slug == "rimworld":
             screen = RimWorldMainScreen()
         elif slug == "valheim":
             screen = ValheimMainScreen()
         else:
             return
+        screen.back_requested.connect(self._on_back_requested)
+        self._swap_to(screen)
+
+    def _on_back_requested(self) -> None:
+        # A manager's "Games" button / Alt+Left, already past its own guard
+        # (unsaved-changes confirm, not busy) and teardown (_request_back):
+        # the reverse of _on_game_selected - a new game-select screen under
+        # the same MOTION_SCREEN crossfade. Emitted from the manager's own
+        # click/shortcut handler; setCentralWidget only deleteLater()s it.
+        self._swap_to(self._game_select())
+
+    def _swap_to(self, screen) -> None:
         old = self.centralWidget()
         area = old.geometry() if old is not None else None
         crossfade(self, lambda: self.setCentralWidget(screen), theme.MOTION_SCREEN, area)

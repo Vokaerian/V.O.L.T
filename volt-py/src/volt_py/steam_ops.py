@@ -5,7 +5,7 @@ App.jsx unsubscribeNow's unsubscribe-verify sequence and main.js's
 steam:deleteItemFolder). steam_client.py is the per-call primitive (one
 Steam helper process per operation); these are the sequences the screen
 runs on a background thread: subscribe and wait for the download, unsubscribe
-and verify it took, and Sync to Steam's two passes.
+and verify it took, and Sync to Steam's per-item flow.
 
 Every flow takes the Steam calls as a `steam` object (the JS passed a plain
 object of functions) rather than calling steam_client directly, so the check
@@ -24,15 +24,17 @@ Blocking, stdlib only; every step is logged with its real answer
 
 import json
 import math
+import os
 import threading
 import time
 
 from .applog import log as _applog
-from .fsutil import remove_tree_best_effort
+from .fsutil import find_child_ci, is_dir, remove_tree_best_effort
 from .mods import workshop_id
 from .paths import has_steam_appid, workshop_dir_for
 from .steam_client import SteamClientError
 from .steam_cmd import to_workshop_id
+from .steamcmd_marker import LEGACY_MARKER, MARKER
 
 
 def uses_steam_cmd(acquire_via) -> bool:
@@ -59,6 +61,21 @@ def unsubscribe_kind(mod) -> str | None:
         return None
     return "delete" if mod["source"] in ("steamcmd", "gog") else "steam"
 
+
+
+def menu_pair(acquire_via, mod) -> tuple[str, str]:
+    """The mod right-click menu's two acquisition items, after Rules...
+    (RIMWORLD.md #52 as re-decided by the user 2026-09-30): the GOG mode
+    ('gog': permanent SteamCMD copies, no Steam) shows Fetch / Delete; the
+    SteamCMD-then-sync ('steamcmd') and Steam-client ('steamworks') modes
+    share Subscribe plus a label that follows the row's real state:
+    'Delete' for a SteamCMD / GOG copy (unsubscribe_kind 'delete' - never a
+    Steam subscription), else 'Unsubscribe' (a real subscription, or
+    greyed for anything that isn't a Workshop mod). Labels only; the
+    screen decides what's enabled."""
+    if acquire_via == "gog":
+        return "Fetch", "Delete"
+    return "Subscribe", "Delete" if unsubscribe_kind(mod) == "delete" else "Unsubscribe"
 
 def workshop_page(wid) -> str:
     """App.jsx workshopPage: the item's Workshop page, opened by the Steam client."""
@@ -187,9 +204,51 @@ def delete_workshop_folder(game_dir, wid) -> dict:
     return {"path": dir, **remove_tree_best_effort(dir)}
 
 
+def _tree_size(root) -> tuple[int, int]:
+    """(files, bytes) under `root`, VOLT's SteamCMD marker files not counted;
+    an unreadable entry is skipped."""
+    files = size = 0
+    for dirpath, _dirs, names in os.walk(root):
+        for name in names:
+            if name in (MARKER, LEGACY_MARKER):
+                continue
+            try:
+                size += os.path.getsize(os.path.join(dirpath, name))
+                files += 1
+            except OSError:
+                pass
+    return files, size
+
+
+def steam_copy_problem(folder, copy_path, min_ratio: float = 0.9) -> str | None:
+    """Why Steam's install `folder` (install_info's) can't replace the SteamCMD
+    copy at `copy_path` yet, or None when it can: it exists, has
+    About/About.xml (case-insensitive, as the scan finds it) and holds at
+    least `min_ratio` of the copy's bytes. Real hardware 2026-09-30: Steam
+    reported an item installed (state 4, its manifest's disk_size) over a
+    folder with no About.xml, and Sync deleted the only good copy.
+    ponytail: a byte ratio, not a per-file compare; an author shrinking the
+    mod by >10% between the SteamCMD and the Steam download reads as
+    incomplete (the copy is kept, never lost)."""
+    if not folder:
+        return "Steam reported no install folder"
+    if not is_dir(folder):
+        return f"Steam's folder {folder} doesn't exist"
+    about = find_child_ci(folder, "About")
+    if not (about and find_child_ci(about, "About.xml")):
+        return f"Steam's folder {folder} has no About/About.xml"
+    steam_files, steam_bytes = _tree_size(folder)
+    copy_files, copy_bytes = _tree_size(copy_path)
+    if steam_bytes < copy_bytes * min_ratio:
+        return (f"Steam's folder {folder} holds {steam_files} file(s), {steam_bytes} bytes; the SteamCMD copy "
+                f"{copy_path} holds {copy_files} file(s), {copy_bytes} bytes")
+    return None
+
+
 def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0, poll_s: float = 2.0,
-                       timeout_s: float = 120.0, concurrency: int = 5, subscribe_concurrency: int | None = None,
-                       on_progress=None) -> dict:
+                       timeout_s: float = 120.0, concurrency: int = 5, redownload_after_s: float = 10.0,
+                       redownload_every_s: float = 15.0, redownloads: int = 3, never_started_s: float = 60.0,
+                       verify_grace_s: float = 30.0, copy_problem=steam_copy_problem, on_progress=None) -> dict:
     """"Sync to Steam" (lists.js syncSteamCmdMods): every SteamCMD-downloaded
     mod in the scan (source 'steamcmd': a <game>/Mods/<id> folder whose marker
     records the temporary 'steamcmd' mode; a 'gog'-mode copy is permanent and
@@ -197,41 +256,61 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
     once Steam's own download is on disk (it takes over in the Workshop scan
     root).
 
-    Two passes, because registering a subscription is fast while waiting for
-    Steam's download is slow and serialized by Steam itself:
-     1. Subscribe pass, up to `subscribe_concurrency` (default `concurrency`)
-        at once: subscribe, then verify it took the way Unsubscribe does
-        (re-check is_subscribed up to `tries` times, `wait_s` apart), then
-        steam.release(wid) the item's Steam helper so a long list doesn't
-        pile them up. A failure here is final for this run (failed).
-     2. Install pass, over the items pass 1 verified, up to `concurrency` at
-        once: poll install_info every `poll_s` until installed (up to
-        `timeout_s`), then delete_copy(mod["path"]). The copy is what the game
-        loads, so it's never deleted before Steam's is on disk: a download not
-        confirmed (timeout or install_info error) keeps the copy and is
-        pending. So is an item whose delete didn't finish: delete_copy
-        (steam_cmd.delete_item) is best effort and reports a locked file as
-        gone False rather than raising - only gone True counts as synced. The
-        next sync picks every pending item up again (subscribing is
-        idempotent).
+    One flow per item, up to `concurrency` items at once, all of it in the
+    ONE Steam helper that did the subscribe (steam_client keys the operation
+    by id: subscribe starts it, every install_info joins it). Real hardware
+    2026-09-30: a FRESH helper can't see an item another helper just
+    subscribed - state 0, not subscribed, for well over 30 s, restarting it
+    doesn't help - while the subscribing helper always sees it. So:
+     1. subscribe; verify it took: the subscribe's own status, else re-read
+        install_info up to `tries` times, `wait_s` apart (install_info, not
+        is_subscribed: a False is_subscribed ends the operation, losing the
+        helper). Not subscribed after that = failed, final for this run.
+     2. poll install_info every `poll_s` until installed (up to `timeout_s`),
+        then delete_copy(mod["path"]). Real hardware 2026-09-30: Steam
+        sometimes registers the subscribe but never starts the download - the
+        subscribing helper itself then reads state 0 (not subscribed, not
+        downloading) for good. So once a poll streak of state 0 reaches
+        `redownload_after_s`, steam.download(wid) re-requests a high-priority
+        download in the same helper, every `redownload_every_s`, at most
+        `redownloads` times; a streak reaching `never_started_s` stops the
+        wait early (pending, not downloaded). Only an unbroken state-0 streak
+        counts: an item whose state moves keeps the full `timeout_s`.
+        Installed isn't enough to delete the copy: `copy_problem(folder,
+        mod["path"])` (steam_copy_problem) must pass too. While it fails the
+        copy is kept, the download re-requested once, and the folder
+        re-checked every `poll_s` for up to `verify_grace_s`; still failing =
+        pending, listed in `incomplete`. The copy is what the game loads, so it's
+        never deleted before Steam's is on disk: a download not confirmed
+        (timeout or install_info error) keeps the copy and is pending. So is
+        an item whose delete didn't finish: delete_copy (steam_cmd.delete_item)
+        is best effort and reports a locked file as gone False rather than
+        raising - only gone True counts as synced. The next sync picks every
+        pending item up again (subscribing is idempotent).
+     3. steam.release(wid), on every exit path (an installed status already
+        ended the operation; release is then a logged no-op). App quit ends
+        whatever is left (steam_client.stop_all).
     A failed item is left untouched for the next sync; no retries within a
-    run. on_progress(done, total), if given, runs once per item as its FINAL
-    outcome lands (failed in pass 1, or synced / pending / failed in pass 2),
-    never for the subscribe step alone. Returns {"total", "synced", "pending",
-    "failed": [{"wid", "error"}]}, each list in completion order."""
+    run. on_progress(done, total), if given, runs once per item as its final
+    outcome lands. Returns {"total", "synced", "pending", "not_downloaded",
+    "incomplete": [{"wid", "name"}], "failed": [{"wid", "error"}]}, each list
+    in completion order; not_downloaded and incomplete are the parts of
+    pending whose Steam download wasn't confirmed / whose Steam copy wasn't a
+    complete mod (the rest of pending is a copy that couldn't be deleted), so
+    the summary can say which. On real hardware a subscribed item's download
+    sometimes didn't start until Steam was restarted (2026-09-30)."""
     log = _log_of(steam)
     by_wid: dict[str, dict] = {}
     for m in mods.values():
         wid = workshop_id(m) if m.get("source") == "steamcmd" else None
         if wid and wid not in by_wid:
             by_wid[wid] = m
-    if subscribe_concurrency is None:
-        subscribe_concurrency = concurrency
     total = len(by_wid)
     synced: list[str] = []
     pending: list[str] = []
+    not_downloaded: list[str] = []
+    incomplete: list[dict] = []  # {"wid", "name"}: Steam says installed, its folder isn't a complete mod
     failed: list[dict] = []
-    verified: set[str] = set()
     lock = threading.Lock()
     done = 0  # items whose final outcome has landed
 
@@ -243,75 +322,106 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
         if on_progress is not None:
             on_progress(d, total)
 
-    def fail(wid: str, err: BaseException) -> None:
-        error = _text(err)
-        log(f"sync {wid}: FAILED - {error}")
-        failed.append({"wid": wid, "error": error})
-
     log(
         f"sync: {total} SteamCMD mod(s) to sync: {', '.join(by_wid)}"
-        + (f"; subscribe pass up to {max(1, min(subscribe_concurrency, total))} at once, then install pass up to "
-           f"{max(1, min(concurrency, total))} at once" if total else "")
+        + (f"; up to {max(1, min(concurrency, total))} at once, each in one Steam helper from subscribe to install"
+           if total else "")
     )
 
-    # Pass 1: register every subscription.
-    def subscribe_pass(item) -> None:
+    def sync_item(item) -> None:
         wid, mod = item
         try:
-            steam.subscribe(wid)
-            log(f"sync {wid} ({mod['id']}): subscribe call returned, verifying")
-            ok = False
-            for i in range(tries):
-                if ok:
-                    break
-                if i:
-                    steam.sleep(wait_s)
-                ok = bool(steam.is_subscribed(wid))
-                log(f"sync {wid}: isSubscribed check {i + 1}/{tries} -> {ok}")
-            if not ok:
-                raise SteamClientError("Steam doesn't list it as subscribed")
-            verified.add(wid)
-            log(f"sync {wid}: verified subscribed (subscribe pass); its download is waited on in the install pass")
-        except Exception as err:  # noqa: BLE001 - one item's failure never ends the run
-            fail(wid, err)
-            finish()
-        finally:
-            release = getattr(steam, "release", None)
-            if release is not None:
-                try:
-                    release(wid)
-                except Exception as err:  # noqa: BLE001
-                    log(f"sync {wid}: couldn't release its Steam helper ({_text(err)}); it ends on its own idle timeout")
-
-    run_pool(by_wid.items(), subscribe_concurrency, subscribe_pass)
-    log(f"sync: subscribe pass done: {len(verified)} of {total} subscribed, {len(failed)} failed; "
-        "waiting for Steam's downloads")
-
-    # Pass 2: wait for Steam's download, then delete the copy. Original order
-    # (Steam downloads roughly in the order it was subscribed).
-    def install_pass(item) -> None:
-        wid, mod = item
-        try:
-            installed = False
-            last = ""
             try:
-                for i in range(math.ceil(timeout_s / poll_s)):
+                st = steam.subscribe(wid)
+                log(f"sync {wid} ({mod['id']}): subscribe returned {json.dumps(st)}")
+                ok = _flag(st, "subscribed")
+                for i in range(tries if not ok else 0):
+                    if i:
+                        steam.sleep(wait_s)
+                    st = steam.install_info(wid)
+                    ok = _flag(st, "subscribed")
+                    log(f"sync {wid}: subscribed check {i + 1}/{tries} -> {ok}")
+                    if ok:
+                        break
+                if not ok:
+                    raise SteamClientError("Steam doesn't list it as subscribed")
+            except Exception as err:  # noqa: BLE001 - one item's failure never ends the run
+                error = _text(err)
+                log(f"sync {wid}: FAILED - {error}")
+                failed.append({"wid": wid, "error": error})
+                return
+            log(f"sync {wid}: verified subscribed; waiting for Steam's download in the same Steam helper")
+            installed = _flag(st, "installed")
+            last = json.dumps(st)
+            dl = {"fn": getattr(steam, "download", None)}
+
+            def request_download() -> None:
+                try:
+                    r = dl["fn"](wid)
+                except Exception as err:  # noqa: BLE001 - the polls go on
+                    r = {"requested": False, "reason": _text(err)}
+                requested = r.get("requested") if isinstance(r, dict) else r
+                reason = r.get("reason") if isinstance(r, dict) else None
+                log(f"sync {wid}: download request -> requested {requested}" + (f" ({reason})" if reason else ""))
+                if reason and "doesn't export" in reason:
+                    dl["fn"] = None  # the old 1.6.5 DLL: no DownloadItem, nothing more to ask
+            zero = 0.0  # seconds of unbroken state 0 (nothing subscribed / downloading / installed)
+            asked, asked_at = 0, 0.0
+            try:
+                for _ in range(math.ceil(timeout_s / poll_s)):
                     if installed:
                         break
-                    if i:
-                        steam.sleep(poll_s)
+                    steam.sleep(poll_s)
                     st = steam.install_info(wid)
                     installed = _flag(st, "installed")
                     now = json.dumps(st)
                     if now != last:
                         log(f"sync {wid}: install status {now}")
                     last = now
+                    moving = installed or _flag(st, "subscribed") or _flag(st, "downloading")
+                    zero = 0.0 if moving else zero + poll_s
+                    if zero >= never_started_s:
+                        break
+                    if (dl["fn"] is not None and asked < redownloads and zero >= redownload_after_s
+                            and (not asked or zero - asked_at >= redownload_every_s)):
+                        asked += 1
+                        asked_at = zero
+                        log(f"sync {wid}: state 0 for {zero:g}s after a verified subscribe; re-requesting the download "
+                            f"({asked}/{redownloads})")
+                        request_download()
             except Exception as err:  # noqa: BLE001 - can't confirm the download: keep the copy, like a timeout
                 log(f"sync {wid}: install status check failed: {_text(err)}")
+            if not installed and zero >= never_started_s:
+                log(f"sync {wid}: PENDING - subscribed on Steam, but Steam hasn't started the download after "
+                    f"{zero:g}s (state 0 since); stopped waiting, SteamCMD copy kept")
+                pending.append(wid)
+                not_downloaded.append(wid)
+                return
             if not installed:
                 log(f"sync {wid}: PENDING - subscribed but download not confirmed, SteamCMD copy kept")
                 pending.append(wid)
+                not_downloaded.append(wid)
                 return
+            folder = st.get("folder") if isinstance(st, dict) else None
+            problem = copy_problem(folder, mod["path"])
+            if problem:
+                log(f"sync {wid}: Steam reports it installed, but its copy isn't complete: {problem}; SteamCMD copy kept, "
+                    f"re-checking for up to {verify_grace_s:g}s")
+                if dl["fn"] is not None:
+                    log(f"sync {wid}: re-requesting the download (Steam's copy incomplete)")
+                    request_download()
+                waited = 0.0
+                while problem and waited < verify_grace_s:
+                    steam.sleep(poll_s)
+                    waited += poll_s
+                    problem = copy_problem(folder, mod["path"])
+                if problem:
+                    log(f"sync {wid}: PENDING - Steam's copy is incomplete ({problem}); SteamCMD copy kept - restart "
+                        "Steam or verify RimWorld's files in Steam, then Sync again")
+                    pending.append(wid)
+                    incomplete.append({"wid": wid, "name": mod.get("name") or mod["id"]})
+                    return
+                log(f"sync {wid}: Steam's copy is complete now (after {waited:g}s)")
             r = None
             why = ""
             try:
@@ -333,10 +443,19 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
                 f"deleted ({why}); the next sync retries the delete")
             pending.append(wid)
         except Exception as err:  # noqa: BLE001
-            fail(wid, err)
+            error = _text(err)
+            log(f"sync {wid}: FAILED - {error}")
+            failed.append({"wid": wid, "error": error})
         finally:
+            release = getattr(steam, "release", None)
+            if release is not None:
+                try:
+                    release(wid)
+                except Exception as err:  # noqa: BLE001
+                    log(f"sync {wid}: couldn't release its Steam helper ({_text(err)}); it ends on its own idle timeout")
             finish()
 
-    run_pool([(w, m) for w, m in by_wid.items() if w in verified], concurrency, install_pass)
+    run_pool(by_wid.items(), concurrency, sync_item)
     log(f"sync done: {len(synced)} synced, {len(pending)} pending, {len(failed)} failed of {total}")
-    return {"total": total, "synced": synced, "pending": pending, "failed": failed}
+    return {"total": total, "synced": synced, "pending": pending, "not_downloaded": not_downloaded,
+            "incomplete": incomplete, "failed": failed}

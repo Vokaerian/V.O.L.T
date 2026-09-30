@@ -1,8 +1,9 @@
 """Game-selection screen: port of Electron's GameSelect.jsx (+ styles.css's
 .game-select / .game-tile rules). Shown first on every launch; picking a game
 emits GameSelectScreen.gameSelected(slug), which MainWindow answers by
-swapping in that game's screen. One game per run, not persisted, no way back
-(TODO.md #30, Electron parity). RimWorld's and Valheim's tiles are enabled so far.
+swapping in that game's screen. The pick isn't persisted (TODO.md #30); each
+manager's "Games" button / Alt+Left comes back to a fresh GameSelectScreen
+(0.6.8). RimWorld's and Valheim's tiles are enabled so far.
 
 Layout (top to bottom, centered, in a QScrollArea - CSS overflow-y: auto):
 the "V. O. L. T." header, a 64x2 copper rule, the subtitle, the "Select a game"

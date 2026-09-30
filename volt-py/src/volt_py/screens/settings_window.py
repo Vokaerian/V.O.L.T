@@ -1,21 +1,25 @@
 """Settings window (port of SettingsWindow.jsx): a modal dialog, a header
-(title + Close) over three tabs.
+(title + Close) over three tabs. Every tab is built from groups (_group,
+0.6.8, the Thunderstore window's pattern, shared from here): a copper
+side-rule terminal heading, a muted one-line description, then the group's
+controls directly under it; SECTION_GAP between groups.
 
-- General: the game / local mods / config folder paths (the game folder's
-  storefront tag; Browse... for the game and config folders - local mods is
-  always <game folder>/Mods, so it has none), then Autodetect paths.
-- Steam: "Download via" - the three exclusive mod-acquisition modes
+- General: FOLDERS - the game / local mods / config folder paths (plain row
+  labels; the game folder's storefront tag; Browse... for the game and
+  config folders - local mods is always <game folder>/Mods, so it has none),
+  then Autodetect paths. ANIMATIONS (phase 4, animations_row without its
+  key, shared with the Thunderstore games' window): Windows (default: follow
+  Windows' "Animation effects") / On / Off, saved at once (settings.json
+  "animations", this game's) and applied app-wide (theme.set_animation_mode).
+- Steam: DOWNLOAD MODS VIA - the three exclusive mod-acquisition modes
   (settings steam_acquire_via; unset = auto: 'gog' for a GOG install, else
-  'steamcmd' - settings.effective_acquire_via), then Check for missing
-  Workshop mods.
-- Troubleshooting: Open log file (<app_root>/volt.log, applog.py) and Open
-  previous log file (volt.log.prev, disabled when there isn't one).
+  'steamcmd' - settings.effective_acquire_via); MISSING WORKSHOP MODS -
+  Check for missing Workshop mods.
+- Troubleshooting: LOGS - Open log file (<app_root>/volt.log, applog.py) and
+  Open previous log file (volt.log.prev, disabled when there isn't one).
 
-General also ends with ANIMATIONS (phase 4, animations_row, shared with the
-Thunderstore games' window): Windows (default: follow Windows' "Animation
-effects") / On / Off, saved at once (settings.json "animations", this game's)
-and applied app-wide (theme.set_animation_mode); the tabs themselves slide
-their underline and crossfade their pages (painters.animate_tabs).
+The tabs themselves slide their underline and crossfade their pages
+(painters.animate_tabs).
 
 Opened from the paths bar's Settings button (RimWorldMainScreen._show_settings).
 Browse / Autodetect are the screen's own (on_browse / on_autodetect: they
@@ -28,7 +32,8 @@ own edits.
 Tabs: a plain QTabWidget styled by theme.py (QDialog#settings), in place of
 the Electron window's row of tab buttons over a panel - since design step 3.4
 the Browse Mods detail's underline tabs (underline_tabs paints the rule past
-the last tab), and the path / option labels are copper terminal keys (_key).
+the last tab). The copper terminal key (_key) is now only used by the
+Thunderstore window's key rows; here the copper is the group headings.
 
 Check for missing Workshop mods calls the screen's handler (on_check_missing:
 RimWorldMainScreen._check_missing_workshop): every not-found Workshop row of
@@ -37,8 +42,9 @@ chosen above, through the same path as a row's Subscribe. Always enabled, as
 in Electron (whose only disable is its own "Checking..." re-entrancy flag,
 not ported: the screen's `downloading` set already covers a second click).
 
-Logging is dev-only in the Python port (applog.py): in a packaged build there
-is no log file, so both log buttons are disabled.
+Logging is on in every build (applog.py, since 0.6.6); only a run whose log
+couldn't be written (read-only app root) has none, and then both log buttons
+are disabled.
 """
 
 from collections.abc import Callable
@@ -91,7 +97,7 @@ assert tuple(mode for mode, _, _ in ACQUIRE_OPTIONS) == ACQUIRE_VIA
 CHECK_MISSING_TOOLTIP = (
     "Download every mod in the active list that isn't found on disk but has a Workshop id, via the method chosen above"
 )
-NO_LOG_TOOLTIP = "No log file: logging is only on in development builds."
+NO_LOG_TOOLTIP = "No log file for this run."
 # General > Animations: (mode, label, tooltip); modes = settings.ANIMATIONS.
 ANIMATION_OPTIONS = (
     ("windows", "Windows", "Follow Windows' own \"Animation effects\" setting (Settings > Accessibility > Visual effects)"),
@@ -100,11 +106,21 @@ ANIMATION_OPTIONS = (
 )
 assert tuple(mode for mode, _, _ in ANIMATION_OPTIONS) == ANIMATIONS
 NO_PREV_LOG_TOOLTIP = "No previous log yet (created on the next launch)"
+# Group descriptions (the muted line under each heading).
+FOLDERS_NOTE = "Where RimWorld and its config live. Local mods is always the game folder's Mods folder."
+ANIMATIONS_NOTE = "Screen, page and tab transitions. Windows follows Windows' own \"Animation effects\" setting."
+ACQUIRE_NOTE = (
+    "How VOLT gets Workshop mods: SteamCMD, then sync to Steam; the Steam client directly; or SteamCMD, "
+    "kept in the Mods folder (for GOG installs)."
+)
+CHECK_MISSING_NOTE = "Downloads every active mod that isn't on disk but has a Workshop id, using the method above."
+LOGS_NOTE = "VOLT's record of what it did this run and the run before."
 
 # .modal.settings-window: 900 x 600, at most the viewport minus 32px.
 WINDOW_SIZE = (900, 600)
 PATH_LABEL_WIDTH = 118  # .path-label (step 3.4: 118px, the mockup's key column - CONFIG FOLDER in copper caps is ~106px)
 GAP = 8  # .path-row / .button-row / .settings-panel gap
+SECTION_GAP = 12  # extra space between a tab's groups (8 + 12 + 8 = 28px, vs GAP inside a group)
 
 
 def _repolish(widget: QWidget) -> None:
@@ -165,17 +181,19 @@ def underline_tabs(tabs: QTabWidget) -> None:
     painters.animate_tabs(tabs)
 
 
-def animations_row(settings: SettingsStore, parent: QWidget) -> QHBoxLayout:
+def animations_row(settings: SettingsStore, parent: QWidget, *, key: bool = True) -> QHBoxLayout:
     """General's ANIMATIONS row (both Settings windows): the copper key in the
-    path key column, then Windows / On / Off (the stored mode checked); a
+    path key column (key=False: none - RimWorld's ANIMATIONS group heading
+    names it), then Windows / On / Off (the stored mode checked); a
     click saves it (settings.set_animations) and applies it app-wide at once
     (theme.set_animation_mode). A failed save warns via log only - the choice
     still applies for this run."""
     row = QHBoxLayout()
     row.setSpacing(GAP)
-    name = _key("Animations")
-    name.setFixedWidth(PATH_LABEL_WIDTH)
-    row.addWidget(name)
+    if key:
+        name = _key("Animations")
+        name.setFixedWidth(PATH_LABEL_WIDTH)
+        row.addWidget(name)
     group = QButtonGroup(parent)  # exclusive, whatever other radios share the page
     current = effective_animations(settings.get().get("animations"))
     for mode, label, hint in ANIMATION_OPTIONS:
@@ -207,6 +225,18 @@ def _button_row(*buttons: QPushButton) -> QHBoxLayout:
         row.addWidget(button)
     row.addStretch(1)
     return row
+
+
+def _group(layout: QVBoxLayout, heading: str, text: str, *buttons: QPushButton) -> None:
+    """One settings group (both Settings windows): a copper side-rule terminal
+    heading, a muted line saying what it's for, then its buttons in a
+    _button_row (none: the caller adds the group's controls right after)."""
+    layout.addWidget(painters.TerminalLabel(heading, rule="heading"))
+    note = _muted(text)
+    note.setWordWrap(True)
+    layout.addWidget(note)
+    if buttons:
+        layout.addLayout(_button_row(*buttons))
 
 
 def _page() -> tuple[QWidget, QVBoxLayout]:
@@ -268,7 +298,7 @@ class SettingsWindow(QDialog):
         (Check for missing Workshop mods): the screen's own actions,
         reporting any failure themselves over `parent` (this window).
         warn(title, message, parent): the screen's _warn. log_path: this
-        run's volt.log, None when there's no log (packaged build)."""
+        run's volt.log, None when there's no log (it couldn't be written)."""
         super().__init__(parent)
         self.setObjectName("settings")
         self.setWindowTitle("Settings")
@@ -322,6 +352,7 @@ class SettingsWindow(QDialog):
     # ---- tabs ----
     def _build_general(self) -> QWidget:
         page, layout = _page()
+        _group(layout, "Folders", FOLDERS_NOTE)
         self.game_value = _PathValue()
         self.game_tag = QLabel()
         self.game_tag.setProperty("role", "tag")
@@ -336,7 +367,7 @@ class SettingsWindow(QDialog):
         ):
             row = QHBoxLayout()  # .path-row
             row.setSpacing(GAP)
-            name = _key(label)  # .path-label: a copper terminal key (step 3.4)
+            name = QLabel(label)  # a plain row label: the FOLDERS heading carries the copper (0.6.8)
             name.setFixedWidth(PATH_LABEL_WIDTH)
             row.addWidget(name)
             row.addWidget(value, 1)
@@ -345,7 +376,9 @@ class SettingsWindow(QDialog):
             layout.addLayout(row)
         self.autodetect_button = _button("Autodetect paths")
         layout.addLayout(_button_row(self.autodetect_button))
-        layout.addLayout(animations_row(self._settings, page))
+        layout.addSpacing(SECTION_GAP)
+        _group(layout, "Animations", ANIMATIONS_NOTE)
+        layout.addLayout(animations_row(self._settings, page, key=False))
         layout.addStretch(1)
 
         self.game_browse.clicked.connect(lambda: self._browse("game"))
@@ -355,10 +388,10 @@ class SettingsWindow(QDialog):
 
     def _build_steam(self) -> QWidget:
         page, layout = _page()
+        _group(layout, "Download mods via", ACQUIRE_NOTE)
         # The radio row wraps (flex-wrap in the .jsx): three options plus the
         # GOG note can outgrow the window's width.
         flow = FlowLayout(horizontal_spacing=GAP, vertical_spacing=GAP, center_rows=False)
-        flow.addWidget(_key("Download via"))  # a copper terminal key (step 3.4; was "Download mods via:")
         # Siblings under one parent: Qt keeps them mutually exclusive (autoExclusive).
         self.acquire_radios: dict[str, QRadioButton] = {}
         for mode, label, hint in ACQUIRE_OPTIONS:
@@ -374,7 +407,8 @@ class SettingsWindow(QDialog):
         self.check_missing_button = _button("Check for missing Workshop mods")
         self.check_missing_button.setToolTip(CHECK_MISSING_TOOLTIP)
         self.check_missing_button.clicked.connect(lambda: self._check_missing())
-        layout.addLayout(_button_row(self.check_missing_button))
+        layout.addSpacing(SECTION_GAP)
+        _group(layout, "Missing Workshop mods", CHECK_MISSING_NOTE, self.check_missing_button)
         layout.addStretch(1)
         return page
 
@@ -390,7 +424,7 @@ class SettingsWindow(QDialog):
             else NO_LOG_TOOLTIP if self._log_path is None
             else NO_PREV_LOG_TOOLTIP
         )
-        layout.addLayout(_button_row(self.log_button, self.prev_log_button))
+        _group(layout, "Logs", LOGS_NOTE, self.log_button, self.prev_log_button)
         layout.addStretch(1)
 
         self.log_button.clicked.connect(lambda: self._open_log(self._log_path))

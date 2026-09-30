@@ -167,7 +167,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -176,7 +175,7 @@ from PySide6.QtWidgets import (
 
 from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, bepinex_share as share, icons, painters, paths, theme
 from volt_py import thunderstore as ts
-from volt_py.app_root import resolve_app_root
+from volt_py.app_root import migrate_legacy_app_root, resolve_app_root
 from volt_py.applog import clip, init_log, log
 from volt_py.bepinex_install import BEPINEX_DIR, PackageError
 from volt_py.mods import natural_key
@@ -186,7 +185,7 @@ from volt_py.screens.bepinex_config_window import BepInExConfigWindow
 from volt_py.screens.bepinex_issues_window import BepInExIssuesWindow
 from volt_py.screens.bepinex_local_import_dialog import LocalModDialog
 from volt_py.screens.bepinex_mod_list import BepInExModListView, RowInfo
-from volt_py.screens.details_panel import details_key
+from volt_py.screens.details_panel import details_well, readout
 from volt_py.screens.bepinex_settings_window import BepInExSettingsWindow
 from volt_py.screens.help_window import HelpWindow
 from volt_py.screens.rimworld_main_screen import (
@@ -194,6 +193,7 @@ from volt_py.screens.rimworld_main_screen import (
     BAR_SIDE,
     GAP,
     GRID_MIN_WIDTH,
+    GAMES_TOOLTIP,
     GRID_STRETCH,
     NOTICE_BOTTOM,
     SOURCE_LABEL,
@@ -202,6 +202,7 @@ from volt_py.screens.rimworld_main_screen import (
     _StatusText,
     _button,
     _eye_icon,
+    _games_button,
     _issue_count_html,
     _label,
     _panel,
@@ -376,13 +377,6 @@ def _details_text(rich: bool = False) -> QLabel:
     return label
 
 
-# The ascent difference alone left the keys 6 device px (~5 px) above their
-# values' baseline at 125% on hardware (0.5.9): the selectable value labels
-# lay their text out lower than a plain label does. Measured correction;
-# re-check on a second DPR (step 3.1 amendment).
-_KEY_BASELINE_NUDGE = 5
-
-
 class ThunderstoreDetailsPanel(QFrame):
     """The mockup's .details: a deprecated package's warn banner (the Browse
     Mods page's, DEPRECATED_BANNER) at the top, the package icon
@@ -397,7 +391,9 @@ class ThunderstoreDetailsPanel(QFrame):
     (painters.ThumbFrame), copper terminal keys with a 1px rule between the
     rows (a grid, so key and value cells share each row's height and the
     rule runs unbroken), and the description in a recessed well that takes
-    the pane's leftover height."""
+    the pane's leftover height. The readout and well are details_panel's
+    readout() / details_well() since the 0.6.8 follow-up (RimWorld's pane
+    uses them too)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -424,69 +420,23 @@ class ThunderstoreDetailsPanel(QFrame):
         self.details_icon.setVisible(False)
         body_layout.addWidget(self.details_icon, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        form = QGridLayout()  # .details-grid, as a readout: rows between rules, no gaps
-        form.setHorizontalSpacing(0)
-        form.setVerticalSpacing(0)
-        form.setColumnStretch(1, 1)
-        # the mockup's key column: 2px row padding + a 106px key (.dkey), so
-        # the values line up at 108px whatever the widest key measures
-        form.setColumnMinimumWidth(0, 108)
+        # .details-grid as a readout, and the description's recessed well:
+        # details_panel.readout / details_well, shared with RimWorld's pane
+        # (0.6.8 follow-up; moved there unchanged)
         self.details_fields: dict[str, QLabel] = {}
-        keys: list[QLabel] = []
-        for row, (key, title, rich) in enumerate((
+        rows = []
+        for key, title, rich in (
             ("name", "Name", False),
             ("author", "Author", False),
             ("version", "Version", True),
             ("updated", "Last updated", False),
             ("website", "Website", True),
-        )):
-            label = details_key(title)
-            label.setProperty("readout", True)
-            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-            value = self.details_fields[key] = _details_text(rich)
-            value.setProperty("role", "details-value")
-            value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-            for cell in (label, value):
-                cell.setProperty("first", row == 0)
-            form.addWidget(label, row, 0)
-            form.addWidget(value, row, 1)
-            keys.append(label)
-        body_layout.addLayout(form)
-        # Baseline-align each key with its value's first line: the mono key
-        # has a smaller ascent than the 13px value (the rules stay aligned -
-        # this only pads the key's text down inside its cell).
-        first_value = self.details_fields["name"]
-        first_value.ensurePolished()
-        for label in keys:
-            label.ensurePolished()
-            drop = first_value.fontMetrics().ascent() - label.fontMetrics().ascent()
-            label.setContentsMargins(0, max(0, drop) + _KEY_BASELINE_NUDGE, 0, 0)
-
-        # the description's recessed well (theme.py QFrame#detailsWell): the
-        # scroll area inside the 1px border, the 7px top shade strip over it
+        ):
+            rows.append((title, _details_text(rich)))
+            self.details_fields[key] = rows[-1][1]
+        body_layout.addLayout(readout(rows))
         self.details_description = _details_text()
-        self.details_description.setObjectName("detailsWellText")
-        self.details_description.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        well = QFrame()
-        well.setObjectName("detailsWell")
-        well_layout = QGridLayout(well)
-        well_layout.setContentsMargins(1, 1, 1, 1)
-        well_layout.setSpacing(0)
-        scroll = QScrollArea()
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(self.details_description)
-        scroll.viewport().setAutoFillBackground(False)
-        self.details_description.setAutoFillBackground(False)
-        well_layout.addWidget(scroll, 0, 0)
-        shade = QWidget()
-        shade.setObjectName("detailsWellShade")
-        shade.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-        shade.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        shade.setFixedHeight(7)
-        well_layout.addWidget(shade, 0, 0, Qt.AlignmentFlag.AlignTop)
-        body_layout.addWidget(well, 1)
+        body_layout.addWidget(details_well(self.details_description), 1)
         layout.addWidget(body, 1)
         self._icon_source = None
 
@@ -568,6 +518,8 @@ class BepInExMainScreen(QWidget):
     `game`: that game's module (valheim.py's shape); `help_entries`: its
     Help window entries."""
 
+    back_requested = Signal()  # the "Games" button / Alt+Left: back to the game select screen
+
     def __init__(self, game, help_entries: list[dict], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.game = game
@@ -611,13 +563,20 @@ class BepInExMainScreen(QWidget):
         # The launch being watched (Run): exe_name, load_order_name, modded,
         # phase "starting" / "running", started (monotonic). None when idle.
         self._launch: dict | None = None
+        # Set once this screen is left for game select (_request_back): every
+        # job's queued result / progress is dropped from then on (the screen
+        # is being deleted; its threads just finish on their own).
+        self._closed = False
         self._poll_timer = QTimer(self)
         self._poll_timer.setSingleShot(True)  # re-armed after each poll's result, so polls never overlap
         self._poll_timer.timeout.connect(self._poll_launch)
 
         self.app_root = resolve_app_root(game.SLUG)
+        moved = migrate_legacy_app_root(game.SLUG)  # before init_log creates the new folder
         self._log_path: Path | None = init_log(self.app_root)
         log(f"app root: {self.app_root} ({self.game_name})")
+        if moved:
+            log(moved)
         self._settings = SettingsStore(self.app_root)
         # Settings > General > Animations, app-wide from here on (phase 4)
         theme.set_animation_mode(self._settings.get()["animations"])
@@ -804,6 +763,17 @@ class BepInExMainScreen(QWidget):
         self.save_button.setEnabled(ready and has_lo)
         self.run_button.setEnabled(ready and has_lo)
         self.vanilla_button.setEnabled(ready)  # no load order needed for a vanilla launch (user-directed 2026-09-28)
+        # Games (back to game select): disabled for the whole of any busy
+        # state, a running game included (leaving would skip its modded-run
+        # cleanup); the tooltip says why.
+        self.games_button.setEnabled(not busy)
+        if not busy:
+            self.games_button.setToolTip(GAMES_TOOLTIP)
+        elif self._launch is not None:
+            running = "starting" if self._launch["phase"] == "starting" else "running"
+            self.games_button.setToolTip(f"Can't go back to game select while {self.game_name} is {running}.")
+        else:
+            self.games_button.setToolTip(f"Can't go back to game select until this finishes: {self._busy}")
         dirty = self._dirty()
         if dirty != self._was_dirty:
             log(f"unsaved changes: {'yes' if dirty else 'none'} ({len(self._history)} undo steps)")
@@ -862,6 +832,9 @@ class BepInExMainScreen(QWidget):
         self._apply_load_order_state()
 
     def _connect_signals(self) -> None:
+        self.games_button.clicked.connect(lambda: self._request_back())
+        # Alt+Left = the Games button (window context, Qt's default), through the same guard
+        QShortcut(QKeySequence("Alt+Left"), self).activated.connect(lambda: self._request_back())
         self.settings_button.setEnabled(True)
         self.settings_button.clicked.connect(lambda: self._show_settings())
         self.help_button.setEnabled(True)
@@ -980,6 +953,22 @@ class BepInExMainScreen(QWidget):
             "Unsaved changes", "Discard unsaved changes to the current list?", confirm_label="Discard changes"
         )
 
+    def _request_back(self) -> None:
+        """The Games button and Alt+Left (0.6.8): back to the game select
+        screen (MainWindow swaps a fresh one in and deleteLater()s this one).
+        Does nothing while the button is disabled (busy - the shortcut
+        doesn't follow it on its own) or when the unsaved-changes confirm is
+        cancelled. Then _closed: jobs still running (an update check, a
+        Browse fetch left behind when its window closed) finish on their own
+        and their results are dropped (_run_job / _finish_job), and the
+        launch poll timer is stopped."""
+        if not self.games_button.isEnabled() or not self._confirm_discard():
+            return
+        self._closed = True
+        self._poll_timer.stop()
+        log(f"back to game select: leaving the {self.game_name} manager")
+        self.back_requested.emit()
+
     # ---- background jobs ----
     def _run_job(self, name: str, fn, on_done, *, progress=None) -> None:
         """Runs fn(report) on a daemon thread; on_done({"ok": result} or
@@ -988,7 +977,8 @@ class BepInExMainScreen(QWidget):
         carrier = _JobDone()
         carrier.done.connect(lambda payload: self._finish_job(carrier, on_done, payload), Qt.ConnectionType.QueuedConnection)
         if progress is not None:
-            carrier.progress.connect(progress, Qt.ConnectionType.QueuedConnection)
+            carrier.progress.connect(lambda text: None if self._closed else progress(text),
+                                     Qt.ConnectionType.QueuedConnection)
 
         def run() -> None:
             try:
@@ -1005,6 +995,8 @@ class BepInExMainScreen(QWidget):
 
     def _finish_job(self, carrier: _JobDone, on_done, payload: dict) -> None:
         self._jobs.pop(carrier, None)
+        if self._closed:  # finished after the screen was left (_request_back): nothing to show it on
+            return
         on_done(payload)
 
     def _set_busy(self, text: str | None) -> None:
@@ -2415,6 +2407,9 @@ class BepInExMainScreen(QWidget):
         column.setSpacing(6)  # .paths-bar gap between its two rows
         row = QHBoxLayout()
         row.setSpacing(GAP)
+        self.games_button = _games_button()  # far left: back to game select
+        row.addWidget(self.games_button)
+        row.addSpacing(16 - GAP)
         self.settings_button = _button("Settings")
         row.addWidget(self.settings_button)
         row.addSpacing(16 - GAP)

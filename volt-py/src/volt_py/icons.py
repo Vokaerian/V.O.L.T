@@ -91,6 +91,14 @@ def _draw_box_checked(p, c, u):  # the checked one: a filled 13-unit square in `
     _stroke_path(p, _lines([(4.85, 8.2), (6.9, 10.25), (11.15, 5.75)]), QColor(theme.INK), u)
 
 
+def _draw_grid(p, c, u):  # the game select (header "Games" button): four rounded squares, a 2x2 tile grid
+    path = QPainterPath()
+    for x in (2.25, 9.25):
+        for y in (2.25, 9.25):
+            path.addRoundedRect(QRectF(x, y, 4.5, 4.5), 1, 1)
+    _stroke_path(p, path, c, u)
+
+
 def _draw_radio(p, c, u):  # an unchecked radio button (step 3.4): a 12.5-unit ring, 1.5 stroke
     _stroke_path(p, _dot(8, 8, 6.25), c, u)
 
@@ -220,6 +228,7 @@ DRAW = {
     "check": _draw_check,
     "box": _draw_box,
     "box-checked": _draw_box_checked,
+    "grid": _draw_grid,
     "radio": _draw_radio,
     "radio-on": _draw_radio_on,
     "x": _draw_x,
@@ -445,10 +454,15 @@ def dwm_attributes(popup: bool) -> tuple[tuple[int, int], ...]:
 
 class _DwmColors(QObject):
     """Filter on every top-level window: on each Show, once per native
-    window, sets its DWM colours (dwm_attributes)."""
+    window, sets its DWM colours (dwm_attributes). Only while it IS a window:
+    polish installs this on a widget that's a window at polish time, e.g. a
+    parentless QFrame() polished before it goes into a layout - winId() on it
+    once it's a child would make it a native child window (Qt then warns
+    'QWidgetWindow(..., name="QFrameClassWindow") must be a top level window'
+    when a tooltip / popup takes it as transient parent, 0.6.8 hardware)."""
 
     def eventFilter(self, obj, event) -> bool:
-        if event.type() == QEvent.Type.Show:
+        if event.type() == QEvent.Type.Show and obj.isWindow():
             try:
                 hwnd = int(obj.winId())
                 if obj.property("voltDwm") != hwnd:

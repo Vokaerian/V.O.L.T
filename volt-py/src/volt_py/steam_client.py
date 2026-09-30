@@ -13,16 +13,18 @@ One helper per operation, keyed by Workshop item id. The screen drives each
 operation as a sequence of calls, so the boundaries are read from those calls
 (as the Electron renderer's App.jsx did):
   Subscribe:    subscribe(id) starts a fresh helper; install_info(id) polls
-                reuse it. Ends when a status comes back installed.
+                reuse it. Ends when a status comes back installed. Sync to
+                Steam runs the same way per item (verify + polls in the
+                subscribing helper: a fresh helper can't see an item another
+                one just subscribed, real hardware 2026-09-30).
   Unsubscribe:  unsubscribe(id) starts a fresh helper; is_subscribed(id) checks
                 reuse it. Ends when is_subscribed comes back False.
   Install wait: install_info(id) with no operation in flight for that id starts
-                one (Sync to Steam's wait-for-install pass, after its subscribe
-                pass released the subscribe operation); later polls reuse it.
+                one; later polls reuse it.
   Any:          any error (SDK failure, helper crash, no answer) ends it, and so
-                does release(id) (Sync's subscribe pass, once an item's
-                subscription is verified). A caller's own give-up never reaches
-                here, so an operation with no new call for TIMING idle_s ends too.
+                does release(id) (Sync, once an item is done, whatever the
+                outcome). A caller's own give-up never reaches here, so an
+                operation with no new call for TIMING idle_s ends too.
 is_subscribed / workshop_item with no operation in flight for that id run in a
 one-shot helper (started, asked once, stopped).
 
@@ -34,10 +36,14 @@ checks. Whether Steam is running is reported by the first real action.
 Runtime folder <app_root>/steamworks/ (the helper's cwd; SteamworksPy looks
 there first for all three):
   steam_appid.txt      written here (ensure_runtime_dir), no user action
-  SteamworksPy64.dll   the user's step: pre-built release from
-                       https://github.com/philippj/SteamworksPy/releases
-  steam_api64.dll      the user's step: copy from the RimWorld install folder
-                       (Unity keeps it under RimWorldWin64_Data/Plugins/...)
+  SteamworksPy64.dll   the user's step: built for Steamworks SDK 1.64
+                       (redist/windows in the SteamworksPy repo); the old 1.6.5
+                       release still works but can't start downloads or look up titles
+  steam_api64.dll      the user's step: from the SAME Steamworks SDK
+                       (sdk/redistributable_bin/win64). RimWorld's own copy only
+                       pairs with the 1.6.5 release (the 1.64 DLL needs
+                       SteamInternal_SteamAPI_Init, which it lacks). VOLT never
+                       copies either file itself.
   steamworks/          optional: the package's source folder, when it isn't
                        installed into volt-py's venv (cwd is on the helper's sys.path)
 
@@ -69,7 +75,8 @@ from .steam_cmd import to_workshop_id
 
 WORKER_MODULE = "volt_py.steam_worker"
 _SRC_DIR = Path(__file__).resolve().parents[1]  # volt-py/src, the folder holding the volt_py package
-RELEASES_URL = "https://github.com/philippj/SteamworksPy/releases"
+REPO_URL = "https://github.com/philippj/SteamworksPy"
+RELEASES_URL = REPO_URL + "/releases"
 INSTALL_HINT = 'uv add "steamworks @ git+https://github.com/philippj/SteamworksPy"'
 
 # Seconds (the JS's `timing`, in ms). A dict, so a check harness can shrink them.
@@ -138,18 +145,6 @@ def binding_installed(app_root) -> bool:
         return False
 
 
-def find_steam_api_lib(game_dir, name: str) -> Path | None:
-    """Where the game's own copy of Valve's steam_api library sits, if it can be
-    found (Unity layout: <game>/<X>_Data/Plugins/[x86_64/]<name>), so the setup
-    message can name the exact file to copy."""
-    if not game_dir:
-        return None
-    try:
-        return next(Path(game_dir).glob(f"*_Data/Plugins/**/{name}"), None)
-    except OSError:
-        return None
-
-
 def availability(app_root, game_dir) -> AvailabilityResult:
     """Whether Steam Workshop actions through the Steam client can be offered
     for this install. Starts no helper, loads no native code, writes nothing."""
@@ -172,11 +167,10 @@ def availability(app_root, game_dir) -> AvailabilityResult:
     missing = [n for n in names if not exists(dir / n)]
     if missing:
         bridge, api = names
-        found = find_steam_api_lib(game_dir, api)
         where = {
-            bridge: f"pre-built download from {RELEASES_URL}",
-            api: f"copy it from your RimWorld install: {found}" if found
-            else f"copy it from your RimWorld install folder ({game_dir}; search it for {api})",
+            bridge: f"built for Steamworks SDK 1.64: redist/windows in {REPO_URL}; the old 1.6.5 release "
+            f"({RELEASES_URL}) works but can't start downloads or look up titles",
+            api: "from the same Steamworks SDK: redistributable_bin/win64; RimWorld's copy only fits the 1.6.5 release",
         }
         what = "these files" if len(missing) > 1 else "this file"
         return AvailabilityResult(
@@ -479,6 +473,13 @@ def install_info(app_root, game_dir, id) -> dict:
     return _job(app_root, game_dir, id, "install_info", begin=True, done=_installed)
 
 
+def download_item(app_root, game_dir, id) -> dict:
+    """Re-requests a high-priority download in the operation in flight on
+    `id` (Sync, for a subscribed item whose download Steam never started):
+    steam_worker.Worker.download's {"requested", "reason", "status"}."""
+    return _job(app_root, game_dir, id, "download", begin=True)
+
+
 def unsubscribe(app_root, game_dir, id) -> dict:
     """Unsubscribe. A returned status isn't proof it took: callers verify with
     is_subscribed(), which ends the operation once it reports False."""
@@ -498,10 +499,10 @@ def workshop_item(app_root, game_dir, id) -> dict:
 
 def release(id) -> bool:
     """Ends the operation in flight on `id`, if any, without waiting for its
-    helper to exit. Sync to Steam's subscribe pass calls it once an item's
-    subscription is verified: that pass subscribes a whole list back to back,
-    and leaving each helper for the idle timeout would pile up dozens of live
-    helpers. An operation with a call still awaiting an answer is left alone.
+    helper to exit. Sync to Steam calls it once an item is done, whatever
+    the outcome, so a timed-out or failed item's helper doesn't linger for the
+    idle timeout. An operation with a call still awaiting an answer is left
+    alone.
     Returns whether one was ended."""
     key = to_workshop_id(id)
     with _lock:

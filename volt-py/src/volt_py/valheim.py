@@ -16,7 +16,7 @@ from .bepinex_load_orders import ThunderstoreGame
 from .fsutil import exists, is_dir
 
 NAME = "Valheim"  # shown in the manager screen's messages (screens/bepinex_main_screen.py)
-SLUG = "valheim"  # APP-ROOT subfolder (app_root.resolve_app_root) and game-select id
+SLUG = "valheim"  # APP-ROOT folder name under games/ (app_root.resolve_app_root) and game-select id
 COMMUNITY = "valheim"  # Thunderstore community slug (thunderstore.io/c/valheim/)
 STEAM_APPID = "892970"  # the client; the dedicated server is a separate app (896660)
 STEAM_INSTALLDIR = "Valheim"  # appmanifest installdir fallback when the .acf is missing

@@ -55,9 +55,12 @@ from typing import Callable, NamedTuple
 
 from . import net
 from .applog import clip, log
-from .fsutil import exists, is_dir, remove_tree_best_effort
+from .fsutil import exists, find_child_ci, is_dir, read_text, remove_tree_best_effort
+from .mods import parse_about_xml
 from .paths import STEAM_APPID
 from .steamcmd_marker import MARKER, MARKER_MODES, marker_text
+
+_ROW_WORKSHOP_ID = re.compile(r"(?:workshop:)?(\d{1,20})", re.ASCII)
 
 STEAMCMD_ZIP_URL = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip"
 EXE = "steamcmd.exe"
@@ -634,3 +637,74 @@ def delete_item(mods_dir, mod_path) -> dict:
         log(f"[steamcmd] delete of {dir} INCOMPLETE - folder still on disk: {r['removed']} file(s) removed, "
             f"{len(r['skipped'])} couldn't be (locked or in use?): {clip(r['skipped'])}{restored}")
     return {"path": Path(dir), **r}
+
+
+def _about_package_id(item_dir) -> str | None:
+    """An item folder's About/About.xml packageId, lowercased (the scan's mod
+    id), or None when there's no readable About.xml / no packageId."""
+    about = find_child_ci(item_dir, "About")
+    about_file = about and find_child_ci(about, "About.xml")
+    if not about_file:
+        return None
+    try:
+        return parse_about_xml(read_text(about_file))["package_id"].lower() or None
+    except (OSError, ValueError, SyntaxError):
+        return None
+
+
+def find_item(root, row_id) -> tuple[str, Path] | None:
+    """A Workshop item folder <root>/<digits> for a list row: (Workshop id,
+    folder) or None. `root` is a Workshop content folder (the SteamCMD
+    library's, or Steam's own). A Workshop-id row ('workshop:<id>' / a bare
+    id) is looked up by id; a package-id row (a not-found row that lost its
+    Workshop id) by scanning every <root>/<digits>/About/About.xml for that
+    packageId, case-insensitively - so this also maps a package id back to
+    its Workshop id. Only a folder with an About.xml counts (a half-download
+    isn't a copy). ponytail: a linear About.xml scan per call (stops at the
+    first match), no index cache - add one if a big folder makes the menu slow."""
+    if not root or not row_id:
+        return None
+    root = Path(root)
+    m = _ROW_WORKSHOP_ID.fullmatch(str(row_id))
+    if m:
+        d = root / m[1]
+        return (m[1], d) if is_dir(d) and _about_package_id(d) is not None else None
+    pkg = str(row_id).lower()
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except OSError:
+        return None
+    for e in entries:
+        if re.fullmatch(r"\d{1,20}", e.name, re.ASCII) and e.is_dir() and _about_package_id(e.path) == pkg:
+            return e.name, Path(e.path)
+    return None
+
+
+def library_copy(app_root, row_id) -> tuple[str, Path] | None:
+    """The SteamCMD library's cached copy of a list row (the context menu's
+    Fetch / Subscribe / Remove completely, RIMWORLD.md #52): find_item over
+    <content_dir>."""
+    return find_item(content_dir(app_root), row_id) if app_root else None
+
+
+def fetch_from_library(app_root, mods_dir, wid, mode: str) -> Path:
+    """Fetch (the context menu, SteamCMD / GOG modes): copy the SteamCMD
+    library's cached item <content_dir>/<wid> into <mods_dir>/<wid> with the
+    MARKER (`mode`, MARKER_MODES) - exactly what a finished download does
+    (install_into_mods), so the scan tags it and Sync picks it up - without
+    running SteamCMD. Refuses (SteamCmdError) when the library has no copy
+    or <mods_dir>/<wid> already exists (installed already: never replaced
+    from here). Returns the new folder."""
+    wid = to_workshop_id(wid)
+    if mode not in MARKER_MODES:
+        raise ValueError(f"Unknown SteamCMD copy mode: {mode}")
+    src = content_dir(app_root) / wid
+    if not is_dir(src) or _about_package_id(src) is None:
+        raise SteamCmdError(f"The SteamCMD library has no usable copy of Workshop item {wid} ({src}).")
+    dest = Path(mods_dir) / wid
+    if exists(dest):
+        raise SteamCmdError(f"It's already installed: {dest} exists, so nothing was copied.")
+    Path(mods_dir).mkdir(parents=True, exist_ok=True)
+    install_into_mods(src, mods_dir, wid, mode)
+    log(f"[steamcmd] fetched {wid} from the library {src} -> {dest} (marker mode {mode})")
+    return dest

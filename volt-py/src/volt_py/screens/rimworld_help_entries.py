@@ -14,8 +14,9 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "name": "Settings",
         "short": "Opens the Settings window, where you tell VOLT where RimWorld and its files live.",
         "long": (
-            "General has the game, mods and config folder fields, each with a Browse button, plus Autodetect "
-            "to find a RimWorld install for you. Steam lets you choose how Workshop mods are downloaded and "
+            "General has the game, local mods and config folders (Browse for the game and config ones), "
+            "Autodetect to find a RimWorld install for you, and the Animations setting. Steam lets you choose how "
+            "Workshop mods are downloaded and "
             "check for Workshop mods that are missing. Troubleshooting opens VOLT's log file (or the one from "
             "the previous run), which is handy when reporting a problem."
         ),
@@ -134,11 +135,19 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "name": "Mod right-click menu",
         "short": "Right-click any mod in either list for more things you can do with it.",
         "long": (
-            "Open folder shows the mod's files, and Open URL in browser or in Steam goes to a Workshop mod's "
-            "page. Filter by narrows the list to mods by the same author or with the same color, and Copy to "
-            "clipboard copies a Workshop mod's URL or any mod's package ID. Mod color tags the mod with a color "
-            "swatch or removes it, and Rules lets you create or view your own sort rules for it. Subscribe and "
-            "Unsubscribe manage Workshop mods, and options that don't apply to a mod are greyed out."
+            "Open folder shows the mod's files, Open URL goes to a Workshop mod's page, Filter by narrows the list "
+            "to mods by the same author or color, Copy to clipboard copies its URL, package ID or folder path, Mod color tags "
+            "it with a color, and Rules creates or shows your own sort rules for it. Subscribe downloads a missing "
+            "Workshop mod (even one the list only knows by its package ID, when VOLT can find its Workshop ID), and "
+            "the next item reads Unsubscribe for a Steam subscription or Delete for a SteamCMD download, which "
+            "removes it from the Mods folder; for a GOG install, Fetch puts a missing mod back from VOLT's SteamCMD "
+            "download cache (or downloads it) and Delete removes it. Remove completely deletes a mod's files from "
+            "every place VOLT looks for mods, including a leftover folder Steam isn't subscribed to, and takes it "
+            "out of the load order after listing exactly what it will delete; it keeps the download cache unless "
+            "you tick the box and refuses RimWorld's own Core/DLC and anything Steam still has you subscribed to "
+            "(use Unsubscribe first). Options that don't apply to a mod are greyed out, and the greyed line at the top "
+            "says where the mod comes from (Steam Workshop, SteamCMD copy, Local mod and so on), as the details "
+            "pane's Source row does."
         ),
     },
     # ---- actions column ----
