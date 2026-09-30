@@ -6,12 +6,12 @@ manager's "Games" button / Alt+Left comes back to a fresh GameSelectScreen
 (0.6.8). RimWorld's and Valheim's tiles are enabled so far.
 
 Layout (top to bottom, centered, in a QScrollArea - CSS overflow-y: auto):
-the "V. O. L. T." header, a 64x2 copper rule, the subtitle, the "Select a game"
-caption, then the tiles in a FlowLayout (flex-wrap, centered rows, 28px gap,
-1440px max row width).
+the brand header (0.6.9, DESIGN.md §35: a fixed 459x176 mark + wordmark
+pixmap with the subtitle as a live tagline under the wordmark), the "Select a
+game" caption, then the tiles in a FlowLayout (flex-wrap, centered rows, 28px
+gap, 1440px max row width).
 
-Circuit (design step 3.4): the rule is copper (blue stays the hover ring),
-the caption a painters.TerminalLabel with a copper rule both sides, the
+Circuit (design step 3.4): the caption a painters.TerminalLabel with a copper rule both sides, the
 Coming-soon badge mono terminal caps on a --well, the scrim over the cover
 only (the name under it was 1.83:1), and every tile sits on the cached rest
 shadow (painters.install_shadows on the grid's host), hidden while a tile's
@@ -40,15 +40,17 @@ slack is a fixed pixel amount, so the flex numbers are just shifted by it
 identical to the CSS's in card terms.
 """
 
+import functools
 from pathlib import Path
 from typing import NamedTuple
 
-from PySide6.QtCore import Property, QEasingCurve, QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import Property, QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QEnterEvent,
     QFocusEvent,
     QFont,
+    QFontMetricsF,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -73,6 +75,10 @@ from volt_py.screens.flow_layout import FlowLayout
 # volt_py/assets/covers/<slug>.jpg (this module is volt_py/screens/game_select.py).
 # Copies of Electron's src/renderer/src/assets/covers/*.jpg.
 COVERS_DIR = Path(__file__).resolve().parent.parent / "assets" / "covers"
+# volt_py/assets/brand/header-lockup@<scale>.png: the header pixmap (mark +
+# wordmark) rendered per device pixel ratio, each HEADER_SIZE logical px.
+BRAND_DIR = COVERS_DIR.parent / "brand"
+HEADER_FRAMES = ((1.0, "1x"), (1.25, "1.25x"), (1.5, "1.5x"), (2.0, "2x"))
 
 
 class Game(NamedTuple):
@@ -116,6 +122,12 @@ PAD_H = 80
 CAPTION_TO_GRID = 26
 CAPTION_WIDTH = 420  # the SELECT A GAME caption with its rules (step 3.4)
 
+# ---- brand header (DESIGN.md §35) ----
+HEADER_SIZE = QSize(459, 176)  # the pixmap, logical px
+HEADER_HEIGHT = 178  # the header widget: the tagline runs 2px below the pixmap
+TAGLINE_RECT = QRect(124, 161, 335, 17)  # under the wordmark: its x and width
+TAGLINE_MAX_SPACING = 3.0
+
 
 def _css_ease() -> QEasingCurve:
     """CSS `ease` = cubic-bezier(0.25, 0.1, 0.25, 1)."""
@@ -143,6 +155,72 @@ def _spaced_label(text: str, role: str, letter_spacing: float) -> QLabel:
     font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, letter_spacing)
     label.setFont(font)
     return label
+
+
+def _header_frame_name(dpr: float) -> str:
+    """The frame at or above `dpr` (175% -> 2x; past 2x the 2x frame)."""
+    return next((name for scale, name in HEADER_FRAMES if scale >= dpr - 1e-3), HEADER_FRAMES[-1][1])
+
+
+@functools.lru_cache(maxsize=4)
+def _header_pixmap(name: str) -> QPixmap:
+    """header-lockup@<name>.png, loaded once, tagged with its own scale so it
+    draws at HEADER_SIZE logical px (null if the file is missing)."""
+    pixmap = QPixmap(str(BRAND_DIR / f"header-lockup@{name}.png"))
+    if not pixmap.isNull():
+        pixmap.setDevicePixelRatio(pixmap.height() / HEADER_SIZE.height())
+    return pixmap
+
+
+class _HeaderPixmap(QLabel):
+    """The header's mark + wordmark: the frame for the widget's current device
+    pixel ratio, re-picked on show and whenever the ratio changes (another
+    screen, a new Windows scale)."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._pick()
+
+    def _pick(self) -> None:
+        self.setPixmap(_header_pixmap(_header_frame_name(self.devicePixelRatioF())))
+
+    def showEvent(self, event) -> None:
+        self._pick()
+        super().showEvent(event)
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.DevicePixelRatioChange:
+            self._pick()
+        return super().event(event)
+
+
+def _fit_spacing(natural: float, chars: int, width: float) -> float:
+    """Letter spacing that makes `chars` glyphs of `natural` total advance
+    span `width` (the gaps between them), clamped to [0, TAGLINE_MAX_SPACING]."""
+    return min(max((width - natural) / (chars - 1), 0.0), TAGLINE_MAX_SPACING)
+
+
+def _brand_header() -> QWidget:
+    """The fixed-size header: the pixmap, with the subtitle (the live tagline)
+    left-aligned under the wordmark, spaced out to the wordmark's width."""
+    header = QWidget()
+    header.setFixedSize(HEADER_SIZE.width(), HEADER_HEIGHT)
+    _HeaderPixmap(header).setGeometry(QRect(0, 0, HEADER_SIZE.width(), HEADER_SIZE.height()))
+    # text-transform: uppercase in the CSS; typed pre-uppercased here.
+    tagline = _spaced_label("VOKAERIAN'S OMNI-GAME LOAD-ORDER TOOL", "game-select-subtitle", 0)
+    tagline.setParent(header)  # after the pixmap: stacked above it
+    tagline.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    tagline.setGeometry(TAGLINE_RECT)
+    # The QSS rule's size/weight land on polish; measure that font, unspaced.
+    # The stylesheet is set once (apply_theme), so one fit holds.
+    tagline.ensurePolished()
+    font = tagline.font()
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
+    text = tagline.text()
+    spacing = _fit_spacing(QFontMetricsF(font).horizontalAdvance(text), len(text), TAGLINE_RECT.width())
+    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+    tagline.setFont(font)
+    return header
 
 
 def _load_cover(slug: str) -> QPixmap | None:
@@ -463,17 +541,8 @@ class GameSelectScreen(QWidget):
         column.setContentsMargins(PAD_H - RING_PX, PAD_V, PAD_H - RING_PX, PAD_V - RING_PX)
         column.setSpacing(0)
 
-        # .game-select-header
-        column.addWidget(_spaced_label("V. O. L. T.", "game-select-title", 11), 0, Qt.AlignmentFlag.AlignHCenter)
-        column.addSpacing(16)
-        accent_bar = QFrame()
-        accent_bar.setProperty("role", "game-select-accent-bar")
-        accent_bar.setFixedSize(64, 2)
-        column.addWidget(accent_bar, 0, Qt.AlignmentFlag.AlignHCenter)
-        column.addSpacing(14)
-        # text-transform: uppercase in the CSS; typed pre-uppercased here.
-        subtitle = _spaced_label("VOKAERIAN'S OMNI-GAME LOAD-ORDER TOOL", "game-select-subtitle", 3)
-        column.addWidget(subtitle, 0, Qt.AlignmentFlag.AlignHCenter)
+        # .game-select-header: the brand header (mark + wordmark + tagline)
+        column.addWidget(_brand_header(), 0, Qt.AlignmentFlag.AlignHCenter)
 
         column.addSpacing(44)
         caption = painters.TerminalLabel("Select a game", rule="both")

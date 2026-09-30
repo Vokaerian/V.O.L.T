@@ -1517,19 +1517,8 @@ QLabel[role="rules-chip"][tier="self"] {{
 /* ---- Game-selection screen (screens/game_select.py; GameSelect.jsx / .game-select) ----
    The tile's own frame (background, border, hover ring/shadow/lift) is painted
    by GameTile so it can animate; these rules style the pieces inside it. */
-/* .game-select-header h1 */
-QLabel[role="game-select-title"] {{
-    font-size: 46px;
-    font-weight: bold;
-}}
-/* the header rule under V. O. L. T. (step 3.4): a 2px copper rule (was the
-   blue accent bar - blue stays interactive-only, the tiles' hover ring) */
-QFrame[role="game-select-accent-bar"] {{
-    background: {SIGNAL};
-    border: 0;
-    border-radius: 1px;
-}}
-/* .game-select-subtitle / .game-select-caption (letter-spacing: set on the font) */
+/* .game-select-subtitle (the brand header's tagline) / .game-select-caption
+   (letter-spacing: set on the font) */
 QLabel[role="game-select-subtitle"], QLabel[role="game-select-caption"] {{
     color: {MUTED};
     font-size: 12px;

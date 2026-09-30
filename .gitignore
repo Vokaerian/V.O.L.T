@@ -25,3 +25,6 @@ release.bat
 # OS cruft.
 .DS_Store
 Thumbs.db
+
+# Brand/design source assets kept locally (alternate lockups, wordmarks, header sources); docs/brand/ holds only what GitHub shows.
+/docs/app/
