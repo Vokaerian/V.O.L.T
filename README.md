@@ -12,7 +12,8 @@
 
 ## What VOLT is
 
-**VOLT** (Vokaerian's Omni-game Load-order Tool) is a mod manager and troubleshooter for a variety of games, built around one idea: one app, one familiar way to manage load orders, whichever game you play.
+**VOLT** (Vokaerian's Omni-game Load-order Tool) is a mod manager and troubleshooter for a variety of games, built around one idea: one app, one familiar way to manage load orders, whichever game you play.  
+Developed for personal use with [Claude](https://claude.ai) (Anthropic).
 
 | Game | Status |
 | --- | --- |
