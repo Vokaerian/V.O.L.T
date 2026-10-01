@@ -1,7 +1,10 @@
 """Steamworks helper process (port of Electron's src/electron/lib/steamWorker.js).
-Never imported by the app itself: steam_client.py runs it as a fresh
-`python -m volt_py.steam_worker` subprocess, one per Workshop operation, and
-ends it when the operation ends.
+Never imported by the GUI: steam_client.py runs it as a fresh subprocess, one
+per Workshop operation, and ends it when the operation ends - in dev as
+`python -m volt_py.steam_worker`; in a packaged (Nuitka) build as
+`VOLT.exe --steam-worker`, where volt_py.main() calls main() below before any
+Qt import (volt_py.STEAM_WORKER_FLAG), so the helper is the same exe with no
+window and no Qt loaded.
 
 Why a separate process: initializing the Steamworks SDK registers the calling
 process with Steam as "RimWorld, running". Done in VOLT's own process, Steam's
@@ -13,8 +16,10 @@ app as an ordinary error by steam_client.py).
 The binding is philippj/SteamworksPy (`import steamworks`, MIT): a pure-Python
 ctypes wrapper that loads a separately obtained native library at runtime. The
 library reads its runtime files from the process's CURRENT WORKING DIRECTORY
-first, which steam_client.py sets to <app_root>/steamworks/:
+first, which steam_client.py sets to its native_dir(): the bundled
+<exe folder>/steamworks/ in a packaged build, else <app_root>/steamworks/:
   steam_appid.txt      the app id (294100), written by steam_client.py itself
+                       on every helper start (never shipped in a release)
   SteamworksPy64.dll   built for Steamworks SDK 1.64: redist/windows in the
                        SteamworksPy repo (the old 1.6.5 release still loads, see below)
   steam_api64.dll      from THE SAME Steamworks SDK (sdk/redistributable_bin/win64).
@@ -22,9 +27,9 @@ first, which steam_client.py sets to <app_root>/steamworks/:
                        RimWorld's own (2023) copy lacks - that copy only pairs
                        with the 1.6.5 release DLL. The two files go together.
 The `steamworks/` package itself is found through the normal import path (the
-venv), or - because that same cwd is also on sys.path here - dropped into that
-folder as a plain source folder. steam_client.availability() checks all of this
-before a helper is ever started.
+venv; compiled into VOLT.exe in a packaged build), or - because that same cwd
+is also on sys.path here - dropped into that folder as a plain source folder.
+steam_client.availability() checks all of this before a helper is ever started.
 
 The only prebuilt SteamworksPy64.dll anyone can download (release 1.6.5,
 2021-11) is years older than the wrapper and lacks 26 of its exports, and the
@@ -528,7 +533,17 @@ def serve(inp, out, worker=None) -> int:
         worker.close()
 
 
+EXIT_NO_STDIO = 3  # a windowed exe started without the three pipes: nothing to talk over
+
+
 def main() -> int:
+    # A windowed (packaged) exe gets sys.stdin/stdout None when it was started
+    # without standard handles (pythonw.exe behaviour). steam_client always
+    # passes three pipes, so this only fires for a hand-started exe - exit with
+    # a distinct code rather than a traceback nobody can see.
+    if sys.stdin is None or sys.stdout is None or sys.stderr is None:
+        _eprint("no standard input/output to speak the protocol over; this process must be started by steam_client.py")
+        return EXIT_NO_STDIO
     # Protocol writes get their own handle on the original stdout; fd 1 itself
     # then points at stderr so nothing else can write into the protocol stream.
     proto = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", newline="\n")

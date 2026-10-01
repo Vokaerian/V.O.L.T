@@ -34,4 +34,4 @@ Code and implementation by [Claude](https://claude.ai) (Anthropic).
 
 ## License
 
-VOLT's source code is released under the [MIT License](LICENSE). The licence covers the code only. It does not cover the VOLT logo, lettering and other artwork in `docs/brand/` (all rights reserved), the game cover art and names shown in the app (they belong to their respective owners), or bundled third-party components such as PySide6 (LGPL) and the Steamworks libraries, which keep their own licences.
+VOLT's source code is released under the [MIT License](LICENSE). The licence covers the code only. It does not cover the VOLT logo, lettering and other artwork in `docs/brand/` (all rights reserved), the game cover art and names shown in the app (they belong to their respective owners), or bundled third-party components such as PySide6 (LGPL) and the Steamworks libraries, which keep their own licences — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) (shipped in every release folder, with the LGPL/GPL texts in `licenses/`).

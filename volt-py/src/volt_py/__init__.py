@@ -1,7 +1,22 @@
+# Hidden command-line flag: run this process as the Steam Workshop helper
+# (steam_worker.main) instead of opening the GUI. steam_client.py starts
+# `VOLT.exe --steam-worker` in a packaged build, where sys.executable is
+# VOLT.exe itself and `python -m volt_py.steam_worker` (the dev spawn) has
+# no interpreter to run in. Never user-facing.
+STEAM_WORKER_FLAG = "--steam-worker"
+
+
 def main() -> None:
     # Imports are deferred so that importing the volt_py package (or a
     # stdlib-only submodule such as volt_py.sort) does not require PySide6.
     import sys
+
+    # First thing, before any Qt import: the helper must start fast and
+    # never show a window (steam_worker.py is stdlib + the binding only).
+    if STEAM_WORKER_FLAG in sys.argv[1:]:
+        from volt_py.steam_worker import main as steam_worker_main
+
+        sys.exit(steam_worker_main())
 
     from pathlib import Path
 

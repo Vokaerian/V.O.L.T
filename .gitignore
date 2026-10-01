@@ -22,6 +22,14 @@ release.bat
 # Packaged release output.
 /releases/
 
+# Steamworks native files: redistributed only inside a built release zip
+# (tools/release.py copies them from the gitignored dev app root); never
+# tracked, wherever they turn up. Same for any unpacked Steamworks SDK.
+SteamworksPy64.dll
+steam_api64.dll
+steam_appid.txt
+steamworks_sdk*/
+
 # OS cruft.
 .DS_Store
 Thumbs.db
