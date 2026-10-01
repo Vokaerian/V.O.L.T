@@ -138,17 +138,21 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "long": (
             "Open folder shows the mod's files, Open URL goes to a Workshop mod's page, Filter by narrows the list "
             "to mods by the same author or color, Copy to clipboard copies its URL, package ID or folder path, Mod color tags "
-            "it with a color, and Rules creates or shows your own sort rules for it. Subscribe downloads a missing "
-            "Workshop mod (even one the list only knows by its package ID, when VOLT can find its Workshop ID), and "
-            "the next item reads Unsubscribe for a Steam subscription or Delete for a SteamCMD download, which "
+            "it with a color, and Rules creates or shows your own sort rules for it. With Settings > Steam set to "
+            "download with SteamCMD and sync later, Download fetches a missing Workshop mod with SteamCMD (even one "
+            "the list only knows by its package ID, when VOLT can find its Workshop ID), and Subscribe turns a mod "
+            "VOLT downloaded that way into a real Steam subscription, exactly like the Sync button but for that one "
+            "mod (Steam must be running); with the Steam client setting, Subscribe itself subscribes a missing mod on "
+            "Steam; the next item reads Unsubscribe for a Steam subscription or Delete for a SteamCMD download, which "
             "removes it from the Mods folder; for a GOG install, Fetch puts a missing mod back from VOLT's SteamCMD "
             "download cache (or downloads it) and Delete removes it. Remove completely deletes a mod's files from "
             "every place VOLT looks for mods, including a leftover folder Steam isn't subscribed to, and takes it "
             "out of the load order after listing exactly what it will delete; it keeps the download cache unless "
             "you tick the box and refuses RimWorld's own Core/DLC and anything Steam still has you subscribed to "
-            "(use Unsubscribe first). Options that don't apply to a mod are greyed out, and the greyed line at the top "
-            "says where the mod comes from (Steam Workshop, SteamCMD copy, Local mod and so on), as the details "
-            "pane's Source row does."
+            "(use Unsubscribe first). Options that don't apply to a mod are greyed out (a row that isn't installed yet "
+            "only shows the ones that can apply to it, such as Download), and the greyed line at the top says where "
+            "the mod comes from (Steam Workshop, SteamCMD copy, Local mod and so on), as the details pane's Source "
+            "row does."
         ),
     },
     # ---- actions column ----

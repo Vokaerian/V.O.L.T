@@ -604,7 +604,7 @@ SUFFIX_FONT_PX = 11
 # padding, a 1px --accent border (--muted on hover: button:hover), --radius
 # corners (a pill at this height), --panel-2 fill, --accent text; pushed to
 # the row's right end (margin-left: auto).
-SUBSCRIBE_TEXT = "Subscribe"
+SUBSCRIBE_TEXT = "Subscribe"  # the default; the view's subscribe_label() gives the mode's word (steam_ops.fetch_label)
 SUBSCRIBE_FONT_PX = 11
 SUBSCRIBE_HEIGHT = 18  # line-height 16 + the 1px border top and bottom
 SUBSCRIBE_SIDES = 18  # padding 8 + border 1, both sides
@@ -1004,7 +1004,7 @@ class ModRowDelegate(QStyledItemDelegate):
             paint_issue_icons(painter, icons, view)
         if subscribe is not None:
             paint_subscribe_button(painter, subscribe, view, view.subscribe_hovered(index.row()),
-                                   view.subscribe_is_enabled())
+                                   view.subscribe_is_enabled(), view.subscribe_label())
         if decor.conflict:
             paint_conflict_outline(painter, bars_rect)
         elif decor.pending:
@@ -1291,21 +1291,21 @@ def subscribe_font(widget):
     return font
 
 
-def subscribe_width(widget) -> int:
+def subscribe_width(widget, text: str = SUBSCRIBE_TEXT) -> int:
     """The Subscribe button's border-box width: its text + padding + border.
     (Module level so the check harnesses, which have no real fonts, can
     patch it, as issue_glyph_width.)"""
     from PySide6.QtGui import QFontMetrics
 
-    return QFontMetrics(subscribe_font(widget)).horizontalAdvance(SUBSCRIBE_TEXT) + SUBSCRIBE_SIDES
+    return QFontMetrics(subscribe_font(widget)).horizontalAdvance(text) + SUBSCRIBE_SIDES
 
 
-def paint_subscribe_button(painter, rect, widget, hover: bool, enabled: bool = True) -> None:
+def paint_subscribe_button(painter, rect, widget, hover: bool, enabled: bool = True, text: str = SUBSCRIBE_TEXT) -> None:
     """The .row-subscribe button in `rect` (ModListView.subscribe_rect):
     --panel-2 fill, a 1px --accent border (--muted while `hover`:
     button:hover:not(:disabled) beats button.accent-outline's border
     color), --radius corners clamped to a pill (CSS clamps a radius to half
-    the height), "Subscribe" centered in --accent. Not `enabled`
+    the height), `text` ("Subscribe" / "Download", the mode's word) centered in --accent. Not `enabled`
     (button:disabled): the whole button at half opacity, no hover look. The
     caller saves/restores the painter."""
     r = QRectF(rect)
@@ -1319,7 +1319,7 @@ def paint_subscribe_button(painter, rect, widget, hover: bool, enabled: bool = T
     painter.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
     painter.setFont(subscribe_font(widget))
     painter.setPen(QColor(theme.ACCENT))
-    painter.drawText(r, Qt.AlignmentFlag.AlignCenter, SUBSCRIBE_TEXT)
+    painter.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
 
 
 def issue_tooltip_text(issues, severity: str, mods: dict) -> str:
@@ -1402,7 +1402,11 @@ class ModListView(QListView):
     while hovered (subscribe_hovered), and `subscribe_tooltip()` as its
     tooltip (ModList.jsx .row-subscribe's title). `subscribe_enabled()`
     (ModList.jsx canSubscribe; None = always) false disables it: half
-    opacity, no hover look or hand cursor, a click does nothing."""
+    opacity, no hover look or hand cursor, a click does nothing.
+    `subscribe_label()` (None = SUBSCRIBE_TEXT) is the word painted on it,
+    read at every paint / hit-test so it follows the acquisition mode
+    (steam_ops.fetch_label: "Download" in the SteamCMD modes, "Subscribe"
+    in the Steam-client mode; user decision 2026-10-01, 0.6.14)."""
 
     # Drag state: None | "pending" (left-pressed on a row, not yet past the
     # drag distance) | "dragging" | "cancelled" (Esc / focus loss; input is
@@ -1429,6 +1433,7 @@ class ModListView(QListView):
     _on_subscribe = None
     _subscribe_tooltip = None
     _subscribe_enabled = None
+    _subscribe_label = None
     _subscribe_hover: str | None = None
 
     def __init__(
@@ -1449,12 +1454,14 @@ class ModListView(QListView):
         on_subscribe: Callable[[str], None] | None = None,
         subscribe_tooltip: Callable[[], str] | None = None,
         subscribe_enabled: Callable[[], bool] | None = None,
+        subscribe_label: Callable[[], str] | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_show_issue = on_show_issue
         self._on_subscribe = on_subscribe
         self._subscribe_tooltip = subscribe_tooltip
         self._subscribe_enabled = subscribe_enabled
+        self._subscribe_label = subscribe_label
         self._issues = issues
         self._scanned_mods = scanned_mods
         self.draggable = draggable
@@ -1652,7 +1659,7 @@ class ModListView(QListView):
             return None
         _left, top, right_margin, bottom = theme.row_margins(self)
         right = min(rect.right(), self.viewport().rect().right()) - right_margin - ROW_PADDING
-        left = right - subscribe_width(self) + 1
+        left = right - subscribe_width(self, self.subscribe_label()) + 1
         card_top, card_h = rect.top() + top, rect.height() - top - bottom
         y = card_top + (card_h - SUBSCRIBE_HEIGHT) // 2
         return rect.adjusted(left - rect.left(), y - rect.top(), right - rect.right(),
@@ -1690,7 +1697,12 @@ class ModListView(QListView):
         if row is None:
             return None
         rect = self.subscribe_rect(self.mod_model.decor_at(row), self.visualRect(self.mod_model.index(row, 0)))
-        return (self._subscribe_tooltip() if self._subscribe_tooltip is not None else SUBSCRIBE_TEXT), rect
+        return (self._subscribe_tooltip() if self._subscribe_tooltip is not None else self.subscribe_label()), rect
+
+    def subscribe_label(self) -> str:
+        """The word on the pending rows' button (the `subscribe_label`
+        callable, else SUBSCRIBE_TEXT)."""
+        return self._subscribe_label() if self._subscribe_label is not None else SUBSCRIBE_TEXT
 
     def subscribe_is_enabled(self) -> bool:
         """Whether the Subscribe buttons are usable (ModList.jsx canSubscribe;

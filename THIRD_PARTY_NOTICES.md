@@ -16,42 +16,30 @@ Agreement, section 1.1(b), which licenses the files in the SDK's
 `redistributable_bin` folder for distribution along with software that uses
 the Steamworks services, in object code form, under the terms of that
 agreement (https://partner.steamgames.com/documentation/sdk_access_agreement).
-No other part of the Steamworks SDK is included. VOLT is not affiliated with
-or endorsed by Valve.
+It is the only Steamworks file VOLT ships: no other part of the SDK, and no
+wrapper or binding library, is included. VOLT's own code (MIT) calls the
+library's exported C API directly. VOLT is not affiliated with or endorsed by
+Valve.
 
-VOLT uses this library only to talk to the Steam client already running and
-signed in on your machine (subscribe / unsubscribe / download status for
-RimWorld Workshop items). It is loaded by a short-lived helper process, never
-by the VOLT window itself.
+How VOLT uses it: only to talk to the Steam client already running and signed
+in on your machine, and only from a short-lived helper process (`VOLT.exe
+--steam-worker`), never from the VOLT window itself. The helper subscribes to,
+unsubscribes from, and reads the download state of RimWorld Workshop items on
+RimWorld's behalf (its App ID, 294100), so that an item you pick in VOLT is
+downloaded and kept up to date by Steam itself, exactly as if you had
+subscribed on the Workshop website. While a helper is connected, Steam shows
+RimWorld as running for a moment; that is inherent to the SDK.
 
-## SteamworksPy (`steamworks/SteamworksPy64.dll` and the `steamworks` Python package)
-
-https://github.com/philippj/SteamworksPy - MIT License.
-Copyright (c) 2016 GP Garcia, CoaguCo Industries.
-
-The repository's `LICENSE` file (MIT, text below) covers the whole repository,
-including the C++ source of the native wrapper (`library/SteamworksPy.cpp`),
-which carries no separate licence header. VOLT's `SteamworksPy64.dll` is built
-from that source at commit `c021d1c` (upstream master as of 2026-05-25, via the
-fork `Vokaerian/SteamworksPyV`, which changes no licence terms) against the
-Steamworks SDK 1.64 headers and import library. Because it is compiled against
-the SDK, the binary also derives from Valve's SDK headers; Valve's agreement
-names only `redistributable_bin` explicitly (section 1.1(b)), so the wrapper
-DLL's standing under that agreement should be taken as "built from the SDK
-under the agreement's general licence" - verify against the current agreement
-if you redistribute it separately from VOLT. The Python package is compiled
-into `VOLT.exe` unmodified apart from a runtime patch of its library loader
-(tolerating missing exports), applied in VOLT's own code.
-
-```
-Copyright (c) 2016 GP Garcia, CoaguCo Industries
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
+A plain statement of where this stands: VOLT is a mod manager, not a game.
+Valve's Workshop documentation describes `ISteamUGC::SubscribeItem` and
+`UnsubscribeItem` as supporting "in-game item subscription management", and we
+have found no Valve statement that either permits or prohibits a third-party
+tool from making those calls on a game's behalf. VOLT's author treats this as
+an unresolved gray area, accepts it knowingly, and ships the feature on that
+basis, as other community mod managers for RimWorld do (RimSort, among others,
+bundles the same redistributable for the same purpose). If Valve clarifies its
+position, this notice and the feature will follow. This is a good-faith
+description, not legal advice.
 
 ## Qt for Python (PySide6, shiboken6) and the Qt 6 libraries (`PySide6/`, `shiboken6/`)
 

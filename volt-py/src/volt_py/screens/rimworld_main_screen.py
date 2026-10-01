@@ -1559,7 +1559,7 @@ class RimWorldMainScreen(QWidget):
             )
             + (
                 f" {pending} {'is' if one else 'are'}n't installed yet and {'is' if one else 'are'} shown as pending; "
-                f"Subscribe downloads {'it' if one else 'them'}."
+                f"{self._fetch_label()} downloads {'it' if one else 'them'}."
                 if pending else ""
             )
             + (
@@ -1645,6 +1645,7 @@ class RimWorldMainScreen(QWidget):
             lambda query: steam_web_api.resolve_collection(query, app_version),
             self._may_import_collection,
             parent=self,
+            fetch_label=self._fetch_label(),
         )
         if dialog.exec() and dialog.payload is not None:
             self._on_collection_import(dialog.payload)
@@ -1691,7 +1692,7 @@ class RimWorldMainScreen(QWidget):
                 self._notice(
                     "Import",
                     f"Added {name} to the end of the active list"
-                    f"{' as pending; Subscribe downloads it' if pending else ''}.",
+                    f"{f' as pending; {self._fetch_label()} downloads it' if pending else ''}.",
                 )
             self._refresh_workshop_rows()
             if pending:
@@ -1735,7 +1736,7 @@ class RimWorldMainScreen(QWidget):
             if pending:
                 message += (
                     f" {pending} {'is' if one_pending else 'are'}n't installed yet and {'is' if one_pending else 'are'} "
-                    f"shown as pending; Subscribe downloads {'it' if one_pending else 'them'}."
+                    f"shown as pending; {self._fetch_label()} downloads {'it' if one_pending else 'them'}."
                 )
             if added_official:
                 message += (
@@ -2491,8 +2492,9 @@ class RimWorldMainScreen(QWidget):
         ))
         if not rows:
             return
+        title = steam_ops.fetch_label("steamcmd")  # the SteamCMD fetch's word ("Download"), 0.6.14
         if self.game_dir is None:  # a pending row can't be on screen without a game, but never trust the caller
-            self._warn("Subscribe", "RimWorld install folder is not set.")
+            self._warn(title, "RimWorld install folder is not set.")
             return
         wids = list(dict.fromkeys(mod_list_io.not_found_workshop_id(i, self._mods) for i in rows))
         via = effective_acquire_via(self._settings.get()["steam_acquire_via"], self._game_source)
@@ -2503,7 +2505,7 @@ class RimWorldMainScreen(QWidget):
         self._dl = download_state.start_download(self._dl, rows, wids)
         self._render_download_bar()
         self._notice(
-            "Subscribe",
+            title,
             start_text or
             f"Downloading {f'Workshop item {wids[0]}' if len(wids) == 1 else f'{len(wids)} Workshop items'} with SteamCMD...",
         )
@@ -2566,16 +2568,17 @@ class RimWorldMainScreen(QWidget):
                 f"(SteamCMD reported {reported}{detail})")
         done = len(wids) - len(missing)
         log(f"steamcmd download: {done} of {len(wids)} on disk{' (paused by the user)' if report and report.get('cancelled') else ''}")
+        title = steam_ops.fetch_label("steamcmd")  # the SteamCMD fetch's word, whatever the mode is by now (0.6.14)
         if report and report.get("cancelled") and missing:
             self._notice(
-                "Subscribe",
+                title,
                 f"SteamCMD download paused: {done} of {len(wids)} Workshop item{'' if len(wids) == 1 else 's'} on disk. "
                 "Resume continues it.",
             )
             return True
         if not missing:
             self._notice(
-                "Subscribe",
+                title,
                 f"Downloaded Workshop item {wids[0]} with SteamCMD." if len(wids) == 1
                 else f"Downloaded all {len(wids)} Workshop items with SteamCMD.",
             )
@@ -2586,12 +2589,12 @@ class RimWorldMainScreen(QWidget):
             text = f"Couldn't download Workshop item {wids[0]} with SteamCMD"
         else:
             text = (f"Downloaded {done} of {len(wids)} Workshop items with SteamCMD; {len(missing)} couldn't be "
-                    "downloaded and stay pending (Subscribe on a row retries it)")
+                    f"downloaded and stay pending ({title} on a row retries it)")
         text += f" ({why})" if why else ""
         text += "."
         if len(wids) == 1:
             text += f" You can open its Workshop page in Steam instead: https://steamcommunity.com/sharedfiles/filedetails/?id={wids[0]}"
-        self._warn("Subscribe", text)
+        self._warn(title, text)
         return False
 
     @Slot(object)
@@ -2988,31 +2991,36 @@ class RimWorldMainScreen(QWidget):
         log(f"remove completely: {mod_id} dropped from load order {self.current_load_order} (saved file and screen)")
 
     # ---- Sync to Steam (App.jsx syncToSteam) ----
-    def _sync_to_steam(self) -> None:
+    def _sync_to_steam(self, only: str | None = None) -> None:
         """The actions column's Sync button (only it, never Save): make every
         SteamCMD-downloaded mod (source 'steamcmd' with a Workshop id - never
         a permanent 'gog' copy) a real Steam subscription, then drop its
         SteamCMD copy once Steam's own download is on disk
         (steam_ops.sync_steamcmd_mods, per item, on a daemon thread running
-        _sync_to_steam_run -> _on_sync_done). Refused while one is running
-        (`_syncing`; the button reads "Syncing..."), with Steam unavailable,
-        or with nothing to sync. Past those, the heads-up dialog
-        (_confirm_sync; skipped once "Don't ask me again" stored
-        skip_sync_confirm) - Cancel there aborts. Progress: Electron showed a
-        running "X/N remaining" in the status bar; this port's status text
-        isn't wired yet, so that goes to volt.log, and the screen shows one
-        notice at the start and one summary at the end."""
+        _sync_to_steam_run -> _on_sync_done). With `only` (a mod id: the
+        right-click menu's Subscribe on an installed SteamCMD copy in the
+        SteamCMD-then-sync mode, user decision 2026-10-01) the same run,
+        same guards, same heads-up and same summary, for that one mod.
+        Refused while one is running (`_syncing`; the button reads
+        "Syncing..."), with Steam unavailable, or with nothing to sync. Past
+        those, the heads-up dialog (_confirm_sync; skipped once "Don't ask me
+        again" stored skip_sync_confirm) - Cancel there aborts. Progress:
+        Electron showed a running "X/N remaining" in the status bar; this
+        port's status text isn't wired yet, so that goes to volt.log, and the
+        screen shows one notice at the start and one summary at the end."""
+        what = f"sync ({only})" if only else "sync"
         if self._syncing:
-            log("sync: refused - a Sync to Steam is already running")
+            log(f"{what}: refused - a Sync to Steam is already running")
             self._notice("Sync to Steam", "A Sync to Steam is already running.")
             return
         if self.game_dir is None:
             self._warn("Sync to Steam", "RimWorld install folder is not set.")
             return
-        count = sum(1 for m in self._mods.values() if m["source"] == "steamcmd" and mods.workshop_id(m))
+        snapshot = {only: self._mods[only]} if only and only in self._mods else ({} if only else dict(self._mods))
+        count = sum(1 for m in snapshot.values() if m["source"] == "steamcmd" and mods.workshop_id(m))
         available, reason = self._refresh_steam()
         if not available:
-            log(f"sync: refused - Steam isn't available ({reason}); {count} SteamCMD mod(s) would have been synced")
+            log(f"{what}: refused - Steam isn't available ({reason}); {count} SteamCMD mod(s) would have been synced")
             self._warn(
                 "Sync to Steam",
                 "Steam isn't available (not a Steam install, or the Steamworks library isn't installed), so nothing "
@@ -3020,13 +3028,17 @@ class RimWorldMainScreen(QWidget):
             )
             return
         if not count:
-            log("sync: nothing to sync (no SteamCMD-downloaded mod with a Workshop id)")
-            self._notice("Sync to Steam", "Nothing to sync: every Workshop mod is already subscribed on Steam.")
+            if only:
+                log(f"{what}: nothing to sync (not an installed SteamCMD download with a Workshop id)")
+                self._notice("Sync to Steam", "Nothing to sync: this mod isn't a SteamCMD download with a Workshop ID.")
+            else:
+                log("sync: nothing to sync (no SteamCMD-downloaded mod with a Workshop id)")
+                self._notice("Sync to Steam", "Nothing to sync: every Workshop mod is already subscribed on Steam.")
             return
         if self._settings.get()["skip_sync_confirm"]:
-            log("sync: confirmation skipped (skip_sync_confirm set)")
+            log(f"{what}: confirmation skipped (skip_sync_confirm set)")
         elif not self._confirm_sync():
-            log(f"sync: cancelled at the confirmation; {count} SteamCMD mod(s) not synced")
+            log(f"{what}: cancelled at the confirmation; {count} SteamCMD mod(s) not synced")
             return
         self._syncing = True
         self._apply_load_order_state()  # the Sync button: disabled, "Syncing..."
@@ -3035,14 +3047,14 @@ class RimWorldMainScreen(QWidget):
         carrier.done.connect(self._on_sync_done, Qt.ConnectionType.QueuedConnection)
         thread = threading.Thread(
             target=_sync_to_steam_run,
-            args=(_steam_ops_for(self.app_root, self.game_dir, self.game_dir / "Mods"), dict(self._mods), carrier),
+            args=(_steam_ops_for(self.app_root, self.game_dir, self.game_dir / "Mods"), snapshot, carrier),
             name="steam-sync",
             daemon=True,
         )
         self._steam_jobs[carrier] = thread
         self._apply_games_button()
         thread.start()
-        log(f"sync: background run started for {count} SteamCMD mod(s) (thread {thread.name})")
+        log(f"{what}: background run started for {count} SteamCMD mod(s) (thread {thread.name})")
 
     @Slot(object)
     def _on_sync_done(self, result: dict) -> None:
@@ -3106,6 +3118,12 @@ class RimWorldMainScreen(QWidget):
             self._warn("Sync to Steam", text)
         else:
             self._notice("Sync to Steam", text)
+
+    def _fetch_label(self) -> str:
+        """The word for fetching a pending row in the mode in effect
+        (steam_ops.fetch_label): the painted row button's text, the import
+        notices' "<label> downloads it", the SteamCMD fetch's toast titles."""
+        return steam_ops.fetch_label(self._acquire_via())
 
     def _subscribe_tooltip(self) -> str:
         """The Subscribe button's title (ModList.jsx .row-subscribe), by the
@@ -3343,7 +3361,24 @@ class RimWorldMainScreen(QWidget):
         nothing to fetch or <Mods>/<id> already there) + Delete (the 'delete'
         kind). Then, every mode, Remove completely... (_remove_completely),
         greyed for official Core/DLC mods and while the row downloads /
-        unsubscribes."""
+        unsubscribes. **SteamCMD-then-sync mode since 0.6.13 (user decision
+        2026-10-01)**: Subscribe on an INSTALLED SteamCMD copy runs Sync to
+        Steam for that one mod (_sync_to_steam(only=...), same heads-up and
+        summary; enabled with Steam available, no sync / delete / download
+        of it in flight), and the SteamCMD fetch of a pending / resolvable
+        row is the 'Download' item right below it (steam_ops.menu_download;
+        enabled exactly as Subscribe used to be). Subscribe is greyed on a
+        pending row (nothing installed to sync) and Download on an installed
+        copy. The Steam-client mode keeps the old pair (no Download item).
+        Tooltips say what each does (menu.setToolTipsVisible). **0.6.14 (user
+        decision 2026-10-01)**: on a row that isn't an installed mod (`mod`
+        None: pending / not found) the entries that could never apply are
+        left out instead of greyed (steam_ops.menu_pair returns None for
+        them): the Unsubscribe/Delete item in every mode, and in the
+        SteamCMD-then-sync mode Subscribe too - so that row's menu ends
+        Download / Remove completely... ('steamcmd'), Subscribe / Remove
+        completely... ('steamworks'), Fetch / Remove completely... ('gog').
+        Installed rows keep every entry, greyed where it doesn't apply."""
         index = pane.indexAt(pos)
         mod_id = pane.mod_model.id_at(index.row()) if index.isValid() else None
         if mod_id is None:
@@ -3360,14 +3395,17 @@ class RimWorldMainScreen(QWidget):
             f"pending={pending}, unsubscribe={kind}, source={mod['source'] if mod else None}, mode={via})")
 
         menu = QMenu(pane)
+        menu.setToolTipsVisible(True)  # only the items given a tip below show one
         # Where the mod comes from (mods.origin, the details pane's Source row too): a disabled, never-clickable
         # header - Qt's keyboard navigation skips disabled items, so Up/Down land on the real ones.
         menu.addAction(mods.origin(mod, pending)[0]).setEnabled(False)
         menu.addSeparator()
 
-        def item(target: QMenu, label: str, enabled, fn) -> None:
+        def item(target: QMenu, label: str, enabled, fn, tip: str | None = None) -> None:
             action = target.addAction(label)
             action.setEnabled(bool(enabled))
+            if tip:
+                action.setToolTip(tip)
             action.triggered.connect(lambda: run(label, fn))
 
         def run(label: str, fn) -> None:
@@ -3395,7 +3433,7 @@ class RimWorldMainScreen(QWidget):
         item(sub, "Create rule", True, lambda: self._create_rule(pkg))
         item(sub, "Show rules", True, lambda: self._show_rules())
         menu.addSeparator()
-        first, second = steam_ops.menu_pair(via, mod)
+        first, second = steam_ops.menu_pair(via, mod)  # None = left out: a not-found row's never-applicable entries (0.6.14)
         if via == "gog":
             # GOG mode (RIMWORLD.md #52): Fetch from the SteamCMD library / Delete a copy
             lib = None if mod else steam_cmd.library_copy(self.app_root, mod_id)  # only a not-found row is looked up
@@ -3405,17 +3443,35 @@ class RimWorldMainScreen(QWidget):
                     f"{' (Mods copy already present)' if installed else ''}")
             item(menu, first, not mod and mod_id not in self.downloading and not installed and (lib or pending),
                  lambda: self._fetch(mod_id))
-            item(menu, second, kind == "delete" and mod_id not in self._unsubscribing,
-                 lambda: self._unsubscribe(mod_id))
+            if second:
+                item(menu, second, kind == "delete" and mod_id not in self._unsubscribing,
+                     lambda: self._unsubscribe(mod_id))
         else:
             # SteamCMD-then-sync / Steam client: Subscribe, then Delete (a SteamCMD copy) or Unsubscribe (a real
             # subscription) - the pre-#52 behaviours, plus Subscribe on a package-id row whose Workshop id resolves
             wid = None if (mod or pending) else self._resolve_workshop_id(mod_id)
-            item(menu, first, (pending or wid) and mod_id not in self.downloading and self._subscribe_ready(),
-                 lambda: self._subscribe(mod_id) if pending else self._subscribe_package_row(mod_id, wid))
-            item(menu, second,
-                 kind is not None and mod_id not in self._unsubscribing and (kind == "delete" or self._steam_available),
-                 lambda: self._unsubscribe(mod_id))
+            can_fetch = (pending or wid) and mod_id not in self.downloading and self._subscribe_ready()
+            fetch = lambda: self._subscribe(mod_id) if pending else self._subscribe_package_row(mod_id, wid)  # noqa: E731
+            download = steam_ops.menu_download(via)
+            if download:
+                # SteamCMD-then-sync (0.6.13): Subscribe = Sync to Steam for this one installed SteamCMD copy;
+                # Download = the SteamCMD fetch a pending / resolvable row gets (what Subscribe did before)
+                copy = bool(mod and mod["source"] == "steamcmd" and mods.workshop_id(mod))
+                if first:
+                    item(menu, first,
+                         copy and self._steam_available and not self._syncing and mod_id not in self._unsubscribing
+                         and mod_id not in self.downloading,
+                         lambda: self._sync_to_steam(only=mod_id),
+                         tip="Subscribe to this mod on Steam and let Steam take over the download; VOLT's own copy is "
+                             "removed once Steam has it (Sync to Steam, for this mod only)")
+                item(menu, download, can_fetch, fetch,
+                     tip="Download this mod with SteamCMD into the Mods folder, without a Steam subscription")
+            elif first:
+                item(menu, first, can_fetch, fetch)
+            if second:
+                item(menu, second,
+                     kind is not None and mod_id not in self._unsubscribing and (kind == "delete" or self._steam_available),
+                     lambda: self._unsubscribe(mod_id))
         official = (mod and mod["source"] == "official") or pkg.lower().startswith("ludeon.")
         item(menu, "Remove completely...",
              not official and mod_id not in self.downloading and mod_id not in self._unsubscribing,
@@ -3574,6 +3630,7 @@ class RimWorldMainScreen(QWidget):
             on_subscribe=self._subscribe if subscribe else None,
             subscribe_tooltip=self._subscribe_tooltip if subscribe else None,
             subscribe_enabled=self._subscribe_ready if subscribe else None,  # ModList.jsx canSubscribe
+            subscribe_label=self._fetch_label if subscribe else None,  # "Download" / "Subscribe" by mode (0.6.14)
         )
         mod_list.setEnabled(False)
         mod_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

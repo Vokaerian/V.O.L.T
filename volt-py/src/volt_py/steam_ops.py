@@ -50,6 +50,18 @@ def subscribe_ready(acquire_via, steam_available) -> bool:
     return uses_steam_cmd(acquire_via) or bool(steam_available)
 
 
+def fetch_label(acquire_via) -> str:
+    """What fetching a pending / not-found Workshop row is called wherever
+    the user sees it - the painted row button, the context-menu item, the
+    import notices, the toast titles of that fetch, the help text - by the
+    acquisition mode in effect (user decision 2026-10-01, 0.6.14, "rename
+    all three together"): 'Download' in the SteamCMD modes ('steamcmd',
+    'gog': a SteamCMD download into Mods, never a Steam subscription),
+    'Subscribe' in the Steam-client mode, where that same button / path
+    really subscribes on Steam. The one source for that word."""
+    return "Download" if uses_steam_cmd(acquire_via) else "Subscribe"
+
+
 def unsubscribe_kind(mod) -> str | None:
     """How Unsubscribe removes a scanned mod: 'steam' for a real Steam
     subscription (source 'workshop': unsubscribe, verify, then delete its
@@ -63,19 +75,38 @@ def unsubscribe_kind(mod) -> str | None:
 
 
 
-def menu_pair(acquire_via, mod) -> tuple[str, str]:
-    """The mod right-click menu's two acquisition items, after Rules...
-    (RIMWORLD.md #52 as re-decided by the user 2026-09-30): the GOG mode
-    ('gog': permanent SteamCMD copies, no Steam) shows Fetch / Delete; the
-    SteamCMD-then-sync ('steamcmd') and Steam-client ('steamworks') modes
-    share Subscribe plus a label that follows the row's real state:
-    'Delete' for a SteamCMD / GOG copy (unsubscribe_kind 'delete' - never a
-    Steam subscription), else 'Unsubscribe' (a real subscription, or
-    greyed for anything that isn't a Workshop mod). Labels only; the
-    screen decides what's enabled."""
+def menu_pair(acquire_via, mod) -> tuple[str | None, str | None]:
+    """The mod right-click menu's acquisition items, after Rules... (RIMWORLD.md
+    #52 as re-decided by the user 2026-09-30): the GOG mode ('gog': permanent
+    SteamCMD copies, no Steam) shows Fetch / Delete; the SteamCMD-then-sync
+    ('steamcmd') and Steam-client ('steamworks') modes share Subscribe plus a
+    label that follows the row's real state: 'Delete' for a SteamCMD / GOG
+    copy (unsubscribe_kind 'delete' - never a Steam subscription), else
+    'Unsubscribe' (a real subscription, or greyed for anything that isn't a
+    Workshop mod). What Subscribe DOES differs by mode (user decision
+    2026-10-01, 0.6.13): in 'steamworks' it subscribes a pending row on the
+    Steam client; in 'steamcmd' it is Sync to Steam for one installed
+    SteamCMD copy, and the SteamCMD fetch of a pending row moved to a
+    'Download' item right below it (menu_download). A None means the item
+    is left out of the menu (user decision 2026-10-01, 0.6.14): on a row
+    that isn't an installed mod (`mod` None: pending / not found) the
+    entries that could never apply are hidden rather than greyed - the
+    second item in every mode (nothing to unsubscribe or delete), and in
+    'steamcmd' the first too (nothing installed to sync; Download is the
+    row's item). Labels only; the screen decides what's enabled."""
+    if mod is None:
+        return ("Fetch" if acquire_via == "gog" else None if acquire_via == "steamcmd" else "Subscribe"), None
     if acquire_via == "gog":
         return "Fetch", "Delete"
     return "Subscribe", "Delete" if unsubscribe_kind(mod) == "delete" else "Unsubscribe"
+
+
+def menu_download(acquire_via) -> str | None:
+    """The 'Download' item under Subscribe in the SteamCMD-then-sync mode
+    (what Subscribe used to do there: fetch a pending / not-found row with
+    SteamCMD into Mods). None in the other modes: 'gog' has Fetch for that,
+    and in 'steamworks' Subscribe itself is the download."""
+    return "Download" if acquire_via == "steamcmd" else None
 
 def workshop_page(wid) -> str:
     """App.jsx workshopPage: the item's Workshop page, opened by the Steam client."""
@@ -131,6 +162,19 @@ def _text(err: BaseException) -> str:
 
 def _flag(status, key: str) -> bool:
     return bool(isinstance(status, dict) and status.get(key))
+
+
+def _progress(status) -> bool:
+    """Whether Steam is doing anything at all with the item: a nonzero item
+    state (subscribed / installed / needs update / downloading / pending), or
+    download bytes reported. Real hardware 2026-10-01: for an item new to the
+    client, GetItemState read 0 (not subscribed) for ~5 s after a confirmed
+    subscribe while GetItemDownloadInfo already reported bytes_total, then
+    bytes_downloaded - the client lags its own subscription; the Workshop
+    page showed it subscribed all along."""
+    if not isinstance(status, dict):
+        return False
+    return bool(status.get("state")) or _flag(status, "downloading") or bool(status.get("bytes_total")) or bool(status.get("bytes_downloaded"))
 
 
 def steam_subscribe_and_wait(wid: str, steam, *, poll_s: float = 2.0, timeout_s: float = 120.0,
@@ -265,7 +309,16 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
      1. subscribe; verify it took: the subscribe's own status, else re-read
         install_info up to `tries` times, `wait_s` apart (install_info, not
         is_subscribed: a False is_subscribed ends the operation, losing the
-        helper). Not subscribed after that = failed, final for this run.
+        helper). Not subscribed after that AND no sign of progress in any of
+        those reads (_progress: state 0, no download bytes) = failed, final
+        for this run. Not subscribed but progressing (real hardware
+        2026-10-01: state 40 from the subscribe, then state 0 with
+        bytes_total / bytes_downloaded growing - the client lags its own
+        subscription for a few seconds) = carry on into step 2 unverified;
+        the subscribed bit is then expected to appear during the polls, and
+        an unbroken no-progress streak of `never_started_s` before it ever
+        does is the "Steam doesn't list it as subscribed" failure instead of
+        step 2's pending-not-downloaded outcome.
      2. poll install_info every `poll_s` until installed (up to `timeout_s`),
         then delete_copy(mod["path"]). Real hardware 2026-09-30: Steam
         sometimes registers the subscribe but never starts the download - the
@@ -275,7 +328,8 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
         download in the same helper, every `redownload_every_s`, at most
         `redownloads` times; a streak reaching `never_started_s` stops the
         wait early (pending, not downloaded). Only an unbroken state-0 streak
-        counts: an item whose state moves keeps the full `timeout_s`.
+        counts: an item whose state moves (or reports download bytes,
+        _progress) keeps the full `timeout_s`.
         Installed isn't enough to delete the copy: `copy_problem(folder,
         mod["path"])` (steam_copy_problem) must pass too. While it fails the
         copy is kept, the download re-requested once, and the folder
@@ -335,22 +389,29 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
                 st = steam.subscribe(wid)
                 log(f"sync {wid} ({mod['id']}): subscribe returned {json.dumps(st)}")
                 ok = _flag(st, "subscribed")
+                progressing = _progress(st)
                 for i in range(tries if not ok else 0):
                     if i:
                         steam.sleep(wait_s)
                     st = steam.install_info(wid)
                     ok = _flag(st, "subscribed")
+                    progressing = progressing or _progress(st)
                     log(f"sync {wid}: subscribed check {i + 1}/{tries} -> {ok}")
                     if ok:
                         break
-                if not ok:
+                if not ok and not progressing:
                     raise SteamClientError("Steam doesn't list it as subscribed")
             except Exception as err:  # noqa: BLE001 - one item's failure never ends the run
                 error = _text(err)
                 log(f"sync {wid}: FAILED - {error}")
                 failed.append({"wid": wid, "error": error})
                 return
-            log(f"sync {wid}: verified subscribed; waiting for Steam's download in the same Steam helper")
+            if ok:
+                log(f"sync {wid}: verified subscribed; waiting for Steam's download in the same Steam helper")
+            else:
+                log(f"sync {wid}: not listed as subscribed yet, but Steam is working on it ({json.dumps(st)}); waiting in "
+                    f"the same Steam helper for the subscription to show (the client lags a fresh subscription) - "
+                    f"{never_started_s:g}s of nothing happening fails it")
             installed = _flag(st, "installed")
             last = json.dumps(st)
             dl = {"fn": getattr(steam, "download", None)}
@@ -378,7 +439,10 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
                     if now != last:
                         log(f"sync {wid}: install status {now}")
                     last = now
-                    moving = installed or _flag(st, "subscribed") or _flag(st, "downloading")
+                    if not ok and _flag(st, "subscribed"):
+                        ok = True
+                        log(f"sync {wid}: now listed as subscribed (after {zero:g}s of state 0)")
+                    moving = installed or _flag(st, "subscribed") or _progress(st)
                     zero = 0.0 if moving else zero + poll_s
                     if zero >= never_started_s:
                         break
@@ -391,6 +455,8 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
                         request_download()
             except Exception as err:  # noqa: BLE001 - can't confirm the download: keep the copy, like a timeout
                 log(f"sync {wid}: install status check failed: {_text(err)}")
+            if not installed and zero >= never_started_s and not ok:
+                raise SteamClientError("Steam doesn't list it as subscribed")  # never did, and nothing moved for never_started_s
             if not installed and zero >= never_started_s:
                 log(f"sync {wid}: PENDING - subscribed on Steam, but Steam hasn't started the download after "
                     f"{zero:g}s (state 0 since); stopped waiting, SteamCMD copy kept")
@@ -398,7 +464,8 @@ def sync_steamcmd_mods(mods: dict, steam, *, tries: int = 5, wait_s: float = 1.0
                 not_downloaded.append(wid)
                 return
             if not installed:
-                log(f"sync {wid}: PENDING - subscribed but download not confirmed, SteamCMD copy kept")
+                log(f"sync {wid}: PENDING - {'subscribed' if ok else 'in progress on Steam (never listed as subscribed)'} "
+                    "but download not confirmed, SteamCMD copy kept")
                 pending.append(wid)
                 not_downloaded.append(wid)
                 return

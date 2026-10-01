@@ -32,31 +32,26 @@ is_subscribed / workshop_item with no operation in flight for that id run in a
 one-shot helper (started, asked once, stopped).
 
 availability() never starts a helper: it checks the steam_appid.txt gate (a GOG
-build has no Workshop), that the `steamworks` package is importable, and that
-the two native library files are in the native folder (native_dir) - all plain
-file checks. Whether Steam is running is reported by the first real action.
+build has no Workshop) and that the SDK library is in the native folder
+(native_dir) - plain file checks. Whether Steam is running is reported by the
+first real action.
 
-Native folder = the helper's cwd (SteamworksPy looks there first for all three
-files). Two candidates, native_dir() picks:
+Native folder = the helper's cwd (the SDK reads steam_appid.txt from there, and
+the helper loads the library from there). Two candidates, native_dir() picks:
   <exe folder>/steamworks/   packaged build only: VOLT's own bundled copy of
-                             both DLLs (tools/release.py puts them there, the
-                             SteamworksPy build + the SDK's steam_api64.dll it
-                             pairs with). Preferred whenever both files are in it.
+                             the SDK library (tools/release.py puts it there).
+                             Preferred whenever the file is in it.
   <app_root>/steamworks/     otherwise (dev always; a packaged build whose
-                             bundled copy is gone): the user's own copies.
+                             bundled copy is gone): the user's own copy.
 In the chosen folder:
   steam_appid.txt      written there (ensure_runtime_dir) on every helper start,
                        never shipped in a release (Valve: don't ship it)
-  SteamworksPy64.dll   built for Steamworks SDK 1.64 (redist/windows in the
-                       SteamworksPy repo); the old 1.6.5 release still loads but
-                       can't start downloads or look up titles
-  steam_api64.dll      from the SAME Steamworks SDK (sdk/redistributable_bin/
-                       win64). RimWorld's own copy only pairs with the 1.6.5
-                       release (the 1.64 DLL needs SteamInternal_SteamAPI_Init,
-                       which it lacks). VOLT never copies either file at runtime.
-  steamworks/          optional, dev only: the package's source folder, when it
-                       isn't installed into volt-py's venv (cwd is on the
-                       helper's sys.path; a packaged build compiles the package in)
+  steam_api64.dll      Valve's redistributable client library from Steamworks
+                       SDK 1.64 (sdk/redistributable_bin/win64) - the helper
+                       calls its flat C API directly (steam_worker.SteamApi;
+                       no wrapper library since 0.6.12). RimWorld's own 2023
+                       copy is older and fails loud at load. VOLT never copies
+                       the file at runtime.
 
 Blocking, stdlib only (subprocess + threading + json). Every public function
 blocks the calling thread for the round trip (a status read is immediate; a
@@ -67,7 +62,6 @@ to call from several threads at once. Every call is logged: action, item id,
 which kind of helper it ran in, and the real answer or error (CLAUDE.md §10).
 """
 
-import importlib.util
 import json
 import os
 import platform
@@ -89,9 +83,7 @@ from .steam_cmd import to_workshop_id
 WORKER_MODULE = "volt_py.steam_worker"
 BUNDLED_DIR_NAME = "steamworks"  # <exe folder>/steamworks/ in a packaged build (tools/release.py)
 _SRC_DIR = Path(__file__).resolve().parents[1]  # volt-py/src, the folder holding the volt_py package
-REPO_URL = "https://github.com/philippj/SteamworksPy"
-RELEASES_URL = REPO_URL + "/releases"
-INSTALL_HINT = 'uv add "steamworks @ git+https://github.com/philippj/SteamworksPy"'
+SDK_HINT = "Steamworks SDK 1.64, sdk/redistributable_bin/win64 (RimWorld's own copy is older and doesn't work)"
 
 # Seconds (the JS's `timing`, in ms). A dict, so a check harness can shrink them.
 TIMING = {
@@ -111,16 +103,16 @@ TIMING = {
 # non-existent <dist>/python.exe - that spawn failed with WinError 2 on the
 # first packaged test, 0.6.10). bundled_dir() uses the same path.
 env = types.SimpleNamespace(
-    platform=platform.system(), popen=subprocess.Popen, python=str(exe_path()), find_spec=importlib.util.find_spec,
-    packaged=is_packaged(),
+    platform=platform.system(), popen=subprocess.Popen, python=str(exe_path()), packaged=is_packaged(),
 )
-# The two native files SteamworksPy loads, per platform: its own bridge library,
-# then Valve's steam_api the bridge links against. Windows (64-bit) is what
-# VOLT targets; the Linux/macOS names are the library's, unverified here.
+# The native file(s) the helper loads from the native folder, per platform:
+# Valve's redistributable client library (steam_worker.LIBRARY_FILES, keyed by
+# sys.platform there). Windows (64-bit) is what VOLT targets; the Linux/macOS
+# names are the SDK's, unverified here.
 NATIVE_FILES = {
-    "Windows": ("SteamworksPy64.dll", "steam_api64.dll"),
-    "Linux": ("SteamworksPy.so", "libsteam_api.so"),
-    "Darwin": ("SteamworksPy.dylib", "libsteam_api.dylib"),
+    "Windows": ("steam_api64.dll",),
+    "Linux": ("libsteam_api.so",),
+    "Darwin": ("libsteam_api.dylib",),
 }
 
 
@@ -134,13 +126,13 @@ class AvailabilityResult(NamedTuple):
 
 
 def runtime_dir(app_root) -> Path:
-    """<app_root>/steamworks/: the user's own copies of the native files."""
+    """<app_root>/steamworks/: the user's own copy of the SDK library."""
     return Path(app_root) / "steamworks"
 
 
 def bundled_dir() -> Path | None:
     """<exe folder>/steamworks/ in a packaged build (where tools/release.py
-    puts VOLT's bundled copy of both DLLs); None in dev."""
+    puts VOLT's bundled copy of the SDK library); None in dev."""
     if not env.packaged:
         return None
     return Path(env.python).resolve().parent / BUNDLED_DIR_NAME
@@ -148,9 +140,9 @@ def bundled_dir() -> Path | None:
 
 def native_dir(app_root) -> Path:
     """The folder the helper runs in and loads the native library from: the
-    bundled copy when it holds both files (packaged build), else
-    runtime_dir(app_root). The bundled pair is the known-good build; a user's
-    older copy in the app root is only a fallback."""
+    bundled copy when it holds the file(s) (packaged build), else
+    runtime_dir(app_root). The bundled copy is the known-good build; a user's
+    own copy in the app root is only a fallback."""
     bundled = bundled_dir()
     names = NATIVE_FILES.get(env.platform, ())
     if bundled is not None and names and all(exists(bundled / n) for n in names):
@@ -173,18 +165,6 @@ def ensure_runtime_dir(app_root) -> Path:
     return dir
 
 
-def binding_installed(app_root) -> bool:
-    """Whether `import steamworks` would resolve in the helper: installed into
-    the venv (the same interpreter runs the helper), or dropped into the runtime
-    folder as a source folder. Loads nothing."""
-    if exists(runtime_dir(app_root) / "steamworks" / "__init__.py"):
-        return True
-    try:
-        return env.find_spec("steamworks") is not None
-    except (ImportError, ValueError):
-        return False
-
-
 def availability(app_root, game_dir) -> AvailabilityResult:
     """Whether Steam Workshop actions through the Steam client can be offered
     for this install. Starts no helper, loads no native code, writes nothing."""
@@ -198,37 +178,24 @@ def availability(app_root, game_dir) -> AvailabilityResult:
     if names is None:
         return AvailabilityResult(False, f"Steam Workshop actions through the Steam client aren't supported on {env.platform} yet.")
     dir = native_dir(app_root)
-    if not binding_installed(app_root):
-        return AvailabilityResult(
-            False,
-            "The SteamworksPy Python package isn't installed, so Steam Workshop actions are unavailable. Install it into "
-            f"volt-py's environment ({INSTALL_HINT}), or copy its steamworks/ source folder into {dir}.",
-        )
     missing = [n for n in names if not exists(dir / n)]
     if missing:
         bundled = bundled_dir()
+        files = ", ".join(missing)
         if bundled is not None:
-            # Packaged: the release ships both files in <exe folder>/steamworks/,
-            # so a miss means a damaged or partial install - no build-it-yourself
+            # Packaged: the release ships the library in <exe folder>/steamworks/,
+            # so a miss means a damaged or partial install - no get-it-yourself
             # instructions for an end user.
             return AvailabilityResult(
                 False,
-                "VOLT's Steamworks files are missing, so Steam Workshop actions are unavailable. "
-                f"{', '.join(names)} ship with VOLT in {bundled}; re-extract the VOLT release zip to restore them "
-                f"(or put your own copies of both in {dir}).",
+                f"VOLT's Steamworks library ({files}) is missing, so Steam Workshop actions are unavailable. "
+                f"It ships with VOLT in {bundled}; re-extract the VOLT release zip to restore it "
+                f"(or put your own copy in {dir}).",
             )
-        bridge, api = names
-        where = {
-            bridge: f"built for Steamworks SDK 1.64: redist/windows in {REPO_URL}; the old 1.6.5 release "
-            f"({RELEASES_URL}) works but can't start downloads or look up titles",
-            api: "from the same Steamworks SDK: redistributable_bin/win64; RimWorld's copy only fits the 1.6.5 release",
-        }
-        what = "these files" if len(missing) > 1 else "this file"
         return AvailabilityResult(
             False,
-            f"The Steamworks native library isn't set up, so Steam Workshop actions are unavailable. Put {what} in {dir}: "
-            + "; ".join(f"{n} ({where[n]})" for n in missing)
-            + ".",
+            f"The Steamworks library isn't set up, so Steam Workshop actions are unavailable. Put {files} in {dir}: "
+            f"{SDK_HINT}.",
         )
     return AvailabilityResult(True, None)
 
@@ -264,7 +231,8 @@ class _Helper:
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         # Dev: the helper imports volt_py.steam_worker, normally from the venv
         # (uv installs the project editable), but the source tree goes on its
-        # PYTHONPATH too so the spawn doesn't depend on that install. Packaged:
+        # PYTHONPATH too so the spawn doesn't depend on that install (the
+        # worker itself needs nothing beyond the stdlib). Packaged:
         # VOLT.exe re-run with the hidden flag (volt_py.main hands it to
         # steam_worker.main before any Qt import); PYTHONPATH is ignored there.
         child_env = dict(os.environ)

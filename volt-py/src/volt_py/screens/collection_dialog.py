@@ -42,10 +42,18 @@ RESOLVE_DELAY_MS = 500
 WIDTH = 420  # .modal: width 420px, max-width calc(100vw - 32px)
 
 TITLE = "Import from Steam Workshop"
-INTRO = (
-    "Paste a Steam Workshop collection's URL, or just its id (a single mod's link or id works too). "
-    "Installed mods are added as they are; the rest are added as pending, ready to Subscribe."
-)
+
+
+def intro(fetch_label: str = "Subscribe") -> str:
+    """The dialog's lead-in; `fetch_label` is what fetching a pending row is
+    called in the mode in effect (steam_ops.fetch_label: Download / Subscribe)."""
+    return (
+        "Paste a Steam Workshop collection's URL, or just its id (a single mod's link or id works too). "
+        f"Installed mods are added as they are; the rest are added as pending, ready to {fetch_label}."
+    )
+
+
+INTRO = intro()  # the default wording (the screen passes the mode's label)
 PLACEHOLDER = "https://steamcommunity.com/sharedfiles/filedetails/?id=..."
 LOOKING_UP = "Looking it up on Steam..."
 MODES = (("add", "Add to list"), ("replace", "Replace list"), ("new", "New load order..."))
@@ -60,7 +68,7 @@ def preview_of(value: dict, mods: dict) -> dict:
     """CollectionDialog.jsx's `preview` memo over a resolved collection:
     {"ids": the import's ids (packageIds / "workshop:<id>" placeholders),
     "total", "pending", "installed", "unavailable": pending items Steam no
-    longer returns (removed / private / banned) - Subscribe can't fetch
+    longer returns (removed / private / banned) - a fetch can't get
     these}."""
     items = value["items"]
     r = mod_list_io.resolve_workshop_placeholders([f"workshop:{it['id']}" for it in items], mods, keep_unmatched=True)
@@ -199,13 +207,16 @@ class CollectionDialog(QDialog):
         resolve: Callable[[str], dict],
         may_import: Callable[[dict], bool],
         parent: QWidget | None = None,
+        fetch_label: str = "Subscribe",
     ) -> None:
         """mods: the screen's scanned mods (id -> mod), for the installed /
         pending split; never modified. resolve(query) -> steam_web_api
         .resolve_collection's dict (raises on failure); runs on a worker
         thread. may_import(payload) -> bool: the screen's gate before the
-        dialog accepts (False keeps it open)."""
+        dialog accepts (False keeps it open). fetch_label: the lead-in's
+        word for fetching a pending row (steam_ops.fetch_label)."""
         super().__init__(parent)
+        self._intro = intro(fetch_label)
         self.setObjectName("collectionImport")
         self.setWindowTitle(TITLE)
         self.setModal(True)
@@ -228,7 +239,7 @@ class CollectionDialog(QDialog):
         layout.setSpacing(10)
         title = _label(TITLE, role="modal-title")
         layout.addWidget(title)
-        layout.addWidget(_label(INTRO, muted=True))
+        layout.addWidget(_label(self._intro, muted=True))
         self.input = QLineEdit()
         self.input.setPlaceholderText(PLACEHOLDER)
         layout.addWidget(self.input)

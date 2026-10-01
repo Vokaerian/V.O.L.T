@@ -104,19 +104,13 @@ wheels = [
 ]
 
 [[package]]
-name = "steamworks"
-version = "2.0.0"
-source = { git = "https://github.com/philippj/SteamworksPy#c021d1c186084d22a21817fc4fe5fad1e1c20a7e" }
-
-[[package]]
 name = "volt-py"
-version = "0.6.11"
+version = "0.6.14"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
     { name = "pyside6" },
     { name = "pyyaml" },
-    { name = "steamworks" },
 ]
 
 [package.dev-dependencies]
@@ -129,7 +123,6 @@ requires-dist = [
     { name = "certifi", specifier = ">=2025.1.31" },
     { name = "pyside6", specifier = ">=6.11.2" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "steamworks", git = "https://github.com/philippj/SteamworksPy" },
 ]
 
 [package.metadata.requires-dev]
