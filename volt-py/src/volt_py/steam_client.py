@@ -80,7 +80,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from . import STEAM_WORKER_FLAG
-from .app_root import is_packaged
+from .app_root import exe_path, is_packaged
 from .applog import clip, log
 from .fsutil import exists
 from .paths import STEAM_APPID, has_steam_appid
@@ -107,9 +107,11 @@ TIMING = {
 }
 # Check-harness seams (no real Windows / Steam / native library in the sandbox).
 # python: what runs the helper - the venv interpreter in dev, VOLT.exe itself
-# when packaged (Nuitka sets sys.executable to the exe; bundled_dir uses it too).
+# when packaged (app_root.exe_path; NOT sys.executable, which Nuitka points at a
+# non-existent <dist>/python.exe - that spawn failed with WinError 2 on the
+# first packaged test, 0.6.10). bundled_dir() uses the same path.
 env = types.SimpleNamespace(
-    platform=platform.system(), popen=subprocess.Popen, python=sys.executable, find_spec=importlib.util.find_spec,
+    platform=platform.system(), popen=subprocess.Popen, python=str(exe_path()), find_spec=importlib.util.find_spec,
     packaged=is_packaged(),
 )
 # The two native files SteamworksPy loads, per platform: its own bridge library,
@@ -268,17 +270,18 @@ class _Helper:
         child_env = dict(os.environ)
         child_env["PYTHONPATH"] = os.pathsep.join(p for p in (str(_SRC_DIR), child_env.get("PYTHONPATH")) if p)
         argv = [env.python, STEAM_WORKER_FLAG] if env.packaged else [env.python, "-m", WORKER_MODULE]
+        exe_note = f"{env.python} ({'exists' if exists(env.python) else 'MISSING'})"
         try:
             self.proc = env.popen(
                 argv, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, encoding="utf-8", errors="replace", env=child_env, **kwargs,
             )
         except (OSError, ValueError) as err:
-            e = SteamClientError(f"Couldn't start the Steam helper process: {err}")
+            e = SteamClientError(f"Couldn't start the Steam helper process ({exe_note}, cwd {cwd}): {err}")
             log(f"[steam] {e}")
             raise e from err
         self.pid = getattr(self.proc, "pid", "?")
-        log(f"[steam] helper process spawned (pid {self.pid}, cwd {cwd}, command {' '.join(argv)})")
+        log(f"[steam] helper process spawned (pid {self.pid}, cwd {cwd}, command {' '.join(argv)}, program {exe_note})")
         self._lock = threading.Lock()  # _pending, _seq, dead, _stopping, gone, _kill_timer, stdin writes
         self._pending: dict = {}  # seq -> _Pending
         self._seq = 0

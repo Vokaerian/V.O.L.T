@@ -14,6 +14,7 @@ Not ported yet: Electron's Linux AppImage branch (APPIMAGE env var) - Linux
 builds come later, and a Nuitka Linux build won't be an Electron AppImage.
 """
 
+import ctypes
 import os
 import sys
 from collections.abc import Mapping
@@ -41,6 +42,34 @@ def is_packaged() -> bool:
     return "__compiled__" in globals() or bool(getattr(sys, "frozen", False))
 
 
+def exe_path() -> Path:
+    """The program running this process: the venv's python.exe in dev, VOLT.exe
+    itself in a packaged build.
+
+    Don't read sys.executable for that in a packaged build: Nuitka standalone
+    sets it to <dist>/<basename of the BUILD machine's interpreter>, i.e.
+    <dist>/python.exe, a file that doesn't exist (Nuitka 4.2.2
+    code_generation/ConstantCodes.py `os.path.basename(sys.executable)` +
+    CompiledCodeHelpers.c getStandaloneSysExecutablePath; found the hard way
+    0.6.10: spawning it gave WinError 2). Only its directory is right.
+    Windows: GetModuleFileNameW(NULL) is this process's own exe, always.
+    Elsewhere Nuitka replaces argv[0] with the binary's absolute path
+    (MainProgram.c, the _NUITKA_NATIVE_WCHAR_ARGV == 0 branch), so
+    sys.argv[0] is it.
+    """
+    if not is_packaged():
+        return Path(sys.executable)
+    if sys.platform == "win32":
+        try:
+            buf = ctypes.create_unicode_buffer(32768)
+            n = ctypes.windll.kernel32.GetModuleFileNameW(None, buf, len(buf))
+            if 0 < n < len(buf):
+                return Path(buf.value)
+        except (AttributeError, OSError, ValueError):
+            pass
+    return Path(os.path.abspath(sys.argv[0]))
+
+
 def resolve_base_root(env: Mapping[str, str] | None = None) -> Path:
     if env is None:
         env = os.environ
@@ -48,7 +77,7 @@ def resolve_base_root(env: Mapping[str, str] | None = None) -> Path:
     if override:
         return Path(override).resolve()
     if is_packaged():
-        return Path(sys.executable).resolve().parent
+        return exe_path().resolve().parent
     return _PROJECT_ROOT / "dev-app-root"
 
 
