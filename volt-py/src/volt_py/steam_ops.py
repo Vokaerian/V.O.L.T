@@ -68,8 +68,9 @@ def unsubscribe_kind(mod) -> str | None:
     folder), 'delete' for a SteamCMD download (source 'steamcmd' or 'gog':
     never subscribed, so only its files are deleted - an explicit user action,
     unlike Sync's automatic delete, which never touches a 'gog' copy), None
-    for anything that isn't a Workshop mod."""
-    if not workshop_id(mod):
+    for anything that isn't a Workshop mod - and for an Offline copy
+    (source 'pinned'): it is the load order's own folder, never removed here."""
+    if not workshop_id(mod) or mod["source"] == "pinned":
         return None
     return "delete" if mod["source"] in ("steamcmd", "gog") else "steam"
 

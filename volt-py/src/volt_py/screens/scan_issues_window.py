@@ -26,6 +26,7 @@ unresolved side keeps its name plus a neutral note (titleText).
 import re
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, Signal, Slot
 from PySide6.QtWidgets import (
@@ -48,6 +49,7 @@ RAIL_LABEL = {
     "no-about": "Not a mod folder",
     "parse-error": "Unreadable About.xml",
     "duplicate-id": "Duplicate package ID",
+    "offline-missing": "Offline copy missing",  # offline_mods.overlay (0.6.16)
 }
 
 # ScanIssuesWindow.jsx WHY: static note per kind, under the specific message.
@@ -69,6 +71,11 @@ WHY = {
         "folder, in that order) and ignores the rest. This doesn't necessarily mean either mod is broken: it "
         "commonly happens when two different Workshop uploads are built from the same original mod and the fork "
         "never changed the internal ID.",
+    "offline-missing":
+        "This load order keeps its own Offline copy of this mod, but the copy's folder is missing, can't be read, "
+        "or now declares a different package ID. VOLT uses the live mod instead (or shows it as not found if it "
+        "isn't installed). To fix it, make the mod live again (its right-click menu, or untick it in Offline "
+        "mods), then make it Offline again if you still want a frozen copy.",
 }
 
 # .modal.validation-window: 900 x 600, at most the viewport minus 32px.
@@ -77,6 +84,18 @@ RAIL_WIDTH = 280  # .validation-body: grid-template-columns: 280px 1fr
 
 
 LOOKING_UP = "Looking up Steam Workshop titles..."
+
+
+def folder_to_open(problem: dict) -> Path:
+    """What Folder opens for a problem: its path - except a missing Offline
+    copy ('offline-missing'), whose folder doesn't exist: the nearest existing
+    of <LO>/local-mods, then the load order's folder (else the path as is)."""
+    p = Path(problem["path"])
+    if problem.get("kind") == "offline-missing":
+        for candidate in (p, p.parent, p.parent.parent):
+            if candidate.is_dir():
+                return candidate
+    return p
 
 
 def rail_label(problem: dict) -> str:
@@ -491,7 +510,7 @@ class ScanIssuesWindow(QDialog):
         if sel is None:
             return
         self._error = None
-        path = sel["path"]
+        path = folder_to_open(sel)
         try:
             paths.open_path(path)
         except OSError as err:

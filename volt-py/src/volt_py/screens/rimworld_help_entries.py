@@ -8,6 +8,8 @@ actions column) to make it easy to check against the screen. Update an
 entry whenever the control it describes changes.
 """
 
+from volt_py.offline_mods import OFFLINE_RUN_TEXT
+
 RIMWORLD_HELP_ENTRIES: list[dict] = [
     # ---- header ----
     {
@@ -63,8 +65,8 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "short": "Switches between your saved load orders.",
         "long": (
             "Pick a load order from the dropdown to show its Active and Inactive lists. If the one you're "
-            "leaving has unsaved changes, VOLT asks before discarding them. Right-click the dropdown to delete "
-            "a load order."
+            "leaving has unsaved changes, VOLT asks before discarding them. Right-click the dropdown to turn "
+            "the load order's own game data on or off, or to delete it."
         ),
     },
     {
@@ -83,7 +85,8 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "long": (
             "The new load order gets exactly what's on screen right now, in the same order, including any "
             "changes you haven't saved yet. You'll be asked for a name, and the copy becomes the one that's "
-            "open. The original load order stays as it was last saved."
+            "open. The original load order stays as it was last saved. Its Offline mods get their own, separate "
+            "copies in the new load order, made in the background right after."
         ),
     },
     {
@@ -100,9 +103,10 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "name": "Delete load order",
         "short": "Right-click the load order picker to delete a saved load order.",
         "long": (
-            "VOLT asks you to confirm first, because this can't be undone. Only the saved list is removed; "
-            "your mods themselves aren't touched. If you delete the load order that's open, VOLT switches to "
-            "another saved one, or shows an empty screen if none are left."
+            "VOLT asks you to confirm first, because this can't be undone. The saved list is removed, along with "
+            "the load order's own game data (its saves and settings) and its Offline mod copies if it has any; "
+            "your mods themselves aren't touched. If you delete the load order that's open, VOLT switches to another saved one, or shows an "
+            "empty screen if none are left."
         ),
     },
     # ---- panes ----
@@ -138,7 +142,9 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "long": (
             "Open folder shows the mod's files, Open URL goes to a Workshop mod's page, Filter by narrows the list "
             "to mods by the same author or color, Copy to clipboard copies its URL, package ID or folder path, Mod color tags "
-            "it with a color, and Rules creates or shows your own sort rules for it. With Settings > Steam set to "
+            "it with a color, Rules creates or shows your own sort rules for it, and Make Offline gives the open load "
+            "order its own frozen copy of the mod when its Own game data is on (Make live again, or Delete on an "
+            "Offline mod, deletes only that copy; Refresh Offline copy re-copies it from the live mod). With Settings > Steam set to "
             "download with SteamCMD and sync later, Download fetches a missing Workshop mod with SteamCMD (even one "
             "the list only knows by its package ID, when VOLT can find its Workshop ID), and Subscribe turns a mod "
             "VOLT downloaded that way into a real Steam subscription, exactly like the Sync button but for that one "
@@ -196,9 +202,9 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "name": "Save",
         "short": "Saves the Active and Inactive lists to the open load order.",
         "long": (
-            "This only saves VOLT's own copy of the load order; RimWorld won't use it until you Push. The Save "
-            "button is outlined in yellow while there are unsaved changes, and saving also clears the undo "
-            "history."
+            "This only saves VOLT's own copy of the load order; RimWorld won't use it until you Push, or until "
+            "you click Modded for a load order with its own game data. The Save button is outlined in yellow while "
+            "there are unsaved changes, and saving also clears the undo history."
         ),
     },
     {
@@ -236,16 +242,54 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
         "long": (
             "Push saves the load order in VOLT, then writes the Active list to RimWorld's ModsConfig.xml in the "
             "Config folder, keeping a backup of the old file. If there are unsaved changes, VOLT confirms before "
-            "saving them. It needs the Config folder set in Settings."
+            "saving them. It needs the Config folder set in Settings. A load order with its own game data doesn't "
+            "need a Push to play it with Modded."
         ),
     },
     {
-        "name": "Run",
-        "short": "Starts RimWorld.",
+        "name": "Modded",
+        "short": "Starts RimWorld with the open load order.",
         "long": (
-            "Run never saves or pushes for you: RimWorld starts with whatever mod list was last pushed. If you "
-            "have unsaved changes, VOLT warns you first, and you can cancel or choose Run without saving. "
-            "Push first if you want the game to use your latest changes."
+            "Modded never saves or pushes for you. With the load order's own game data on, RimWorld starts with "
+            "its saved mod list and its own saves and settings; with it off, RimWorld uses its usual data "
+            "folder and whatever mod list was last pushed, so Push first. If you have unsaved changes, VOLT warns "
+            "you first, and while the game runs VOLT keeps Modded, Vanilla, Games and Settings locked. With own game data "
+            "on, the load order's active Offline mods are linked into the game's Mods folder for the run and removed "
+            "again when the game closes (even after a crash, the next time VOLT starts)."
+        ),
+    },
+    {
+        "name": "Vanilla",
+        "short": "Starts a clean RimWorld: only Core and your DLCs, no mods of any kind.",
+        "long": (
+            "Vanilla uses its own data folder, vanilla-data in VOLT's folder, so it has its own saves and settings "
+            "and never touches your normal RimWorld data folder (your usual saves don't show up there). Before "
+            "every start VOLT resets its mod list to Core plus your installed DLCs, so a mod switched on in-game "
+            "last time doesn't stay on. It doesn't need a load order open, and like Modded it keeps VOLT locked "
+            "until the game exits."
+        ),
+    },
+    {
+        "name": "Own game data",
+        "short": "Gives a load order its own saves, settings and mod config.",
+        "long": (
+            "Right-click the load order picker and choose Own game data to turn it on or off; it's off for new "
+            "load orders. When it's on, Modded runs keep their saves, settings and mod config in the load "
+            "order's own data folder, starting fresh with default settings and no saves, while your existing "
+            "ones stay with the normal RimWorld folder (Vanilla has its own separate data folder too, and never "
+            "touches either). Turning it off keeps that folder on disk, and deleting the load order deletes it."
+        ),
+    },
+    {
+        "name": "Offline mods",
+        "short": "Gives a load order its own frozen copy of chosen mods, which Steam updates no longer change.",
+        "long": (
+            "With the load order's Own game data on, click Offline mods (right under Rescan) to tick the mods to "
+            "copy into the load order, or right-click a single mod and choose Make Offline; Make live again (or "
+            "Delete on an Offline mod) deletes the copy, and works even with Own game data off. For that load "
+            "order only, VOLT uses the copy instead of the live mod, and an Offline badge marks it; when the live "
+            "mod changes later, the row's tooltip, the details pane and the dialog's Live column say so, and "
+            "Refresh Offline copy (or Refresh changed) copies it afresh. " + OFFLINE_RUN_TEXT
         ),
     },
 ]

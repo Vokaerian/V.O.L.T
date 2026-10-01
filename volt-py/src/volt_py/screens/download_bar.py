@@ -16,6 +16,11 @@ The state it paints is download_state.DownloadState (pure Python, the
 screen's `_dl`); render() maps one to the widgets. Nothing here knows about
 SteamCMD: the screen connects `toggled` to its pause / resume handler.
 
+The same row also shows an Offline-mods copy (RimWorld, 0.6.16: the main
+screen's second instance, `copy_bar`): render(..., copying=True) labels it
+"Copying..." and makes the button a Cancel (a stop square, "Cancel copy"),
+everything else - pill, counter, speed, failure triangle - as for a download.
+
 Fill stripes: CSS's repeating-linear-gradient(90deg, accent 0 3px,
 transparent 3px 6px) is painted literally - one 3px accent rect every 6px
 from the fill's left edge, clipped to the fill's width (a partial stripe at
@@ -62,6 +67,11 @@ _PLAY_SVG = (
     '<path d="M4 2.5v11l10-5.5z"/>'
     "</svg>"
 )
+_STOP_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 16 16" fill="{color}">'
+    '<rect x="3" y="3" width="10" height="10" rx="1.5"/>'
+    "</svg>"
+)
 _WARN_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="none" '
     'stroke="{color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
@@ -86,11 +96,12 @@ def _render_svg(svg: str, size: int, dpr: float) -> QPixmap:
 
 
 @functools.cache
-def _toggle_icon(paused: bool, dpr: float) -> QIcon:
+def _toggle_icon(paused: bool, dpr: float, stop: bool = False) -> QIcon:
     """The button's glyph in --text (currentColor), with the disabled look at
     half opacity (button:disabled { opacity: 0.5 } fades the glyph with the
-    button; the QSS does the same to the button's own colors)."""
-    svg = _PLAY_SVG if paused else _PAUSE_SVG
+    button; the QSS does the same to the button's own colors). `stop`: the
+    copy row's Cancel square instead."""
+    svg = _STOP_SVG if stop else _PLAY_SVG if paused else _PAUSE_SVG
     normal = _render_svg(svg.format(color=theme.TEXT), BUTTON_ICON_SIZE, dpr)
     faded = QPixmap(normal.size())
     faded.setDevicePixelRatio(dpr)
@@ -232,19 +243,20 @@ class DownloadBar(QWidget):
         # Width from its content, never stretched by the footer row.
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
 
-    def render(self, state: DownloadState, titles: dict[str, str]) -> None:
+    def render(self, state: DownloadState, titles: dict[str, str], *, copying: bool = False) -> None:
         """Paint `state` (the screen's _dl; titles = its workshop_titles, for
         the failure tooltip). The first render after a clear() sets the fill
-        outright; later ones ease it."""
+        outright; later ones ease it. `copying`: an Offline-mods copy's row
+        (Copying..., the button a Cancel; `pausing` = the cancel is waiting)."""
         first = self._state is None
         self._state = state
         dpr = self.devicePixelRatioF()
-        self.toggle_button.setIcon(_toggle_icon(state.paused, dpr))
-        tooltip = toggle_tooltip(state)
+        self.toggle_button.setIcon(_toggle_icon(state.paused, dpr, copying))
+        tooltip = "Cancel copy" if copying else toggle_tooltip(state)
         self.toggle_button.setToolTip(tooltip)
         self.toggle_button.setAccessibleName(tooltip)
         self.toggle_button.setEnabled(not state.pausing)
-        self.label.setText(label_text(state))
+        self.label.setText("Copying..." if copying else label_text(state))
         self.track.set_percent(percent_of(state), animate=not first)
         self.count_label.setText(count_text(state))
         self.speed_label.setText(speed_text(state))

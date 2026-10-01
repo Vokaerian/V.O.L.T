@@ -81,7 +81,12 @@ def open_path(path) -> None:
         # ponytail: Windows-first (CLAUDE.md §3); Linux/Mac launch comes with
         # their packaging (xdg-open / `open`).
         raise OSError(f"Launching isn't supported on {sys.platform} yet: {path}")
-    startfile(str(path))
+    try:
+        startfile(str(path))
+    except OSError as err:
+        # One plain message for every caller's dialog: str() of Windows' own error quotes the
+        # filename as a repr ('E:\\x\\y', doubled backslashes - 0.6.18 hardware review).
+        raise OSError(f"{err.strerror or err}: {path}") from err
 
 
 def normalize_game_dir(dir) -> Path | None:

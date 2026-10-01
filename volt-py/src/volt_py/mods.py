@@ -17,6 +17,11 @@ from .ids import NO_PACKAGE_ID_PREFIX
 from .steamcmd_marker import read_marker_mode
 from .xml import get_ci, list_, list_field, parse_xml, text
 
+# An Offline copy's marker (offline_mods.MARKER). A Mods folder carrying it is a load order's Offline copy linked
+# in for a Modded run (rimworld_launch.swap, 0.6.17) - or a stray one - never a live mod: the Mods scan skips it.
+PINNED_MARKER = ".volt-pinned"
+
+
 def _empty_about() -> dict:
     # A function, not a constant: make_mod keeps these lists by reference.
     return {
@@ -92,29 +97,34 @@ def scan_dir(dir, root_source: str) -> list[dict]:
         # A Mods folder VOLT copied in from a SteamCMD download isn't a
         # hand-installed 'local' mod: its marker's mode decides. Only honoured
         # under Mods ('local' root).
+        if root_source == "local" and os.path.isfile(mod_dir / PINNED_MARKER):
+            continue  # an Offline copy linked in for a run (or a stray): the load order's, not a live mod
         source = (root_source == "local" and read_marker_mode(mod_dir)) or root_source
-        about_dir = find_child_ci(mod_dir, "About")
-        about_file = about_dir and find_child_ci(about_dir, "About.xml")
-        if not about_file:
-            # Narrow carve-out: a folder of nothing but .dds textures is listed
-            # as a tagged no-packageId mod instead of a no-about scan issue.
-            if is_dds_only_leftover(mod_dir, exclude_about_folder=False):
-                out.append({"mod": {**make_mod(_empty_about(), mod_dir, e.name, source), "dds_leftover": True}})
-            else:
-                out.append({"problem": {"kind": "no-about", "path": mod_dir, "message": "No About/About.xml - not a mod folder"}})
-            continue
-        try:
-            about = parse_about_xml(read_text(about_file))
-        except (OSError, ValueError, SyntaxError) as err:
-            out.append({"problem": {"kind": "parse-error", "path": mod_dir, "message": f"About.xml could not be parsed: {err}"}})
-            continue
-        mod = make_mod(about, mod_dir, e.name, source)
-        # Only the no-packageId case is checked; About/ is skipped since
-        # About.xml itself is never a .dds.
-        if not about["package_id"] and is_dds_only_leftover(mod_dir, exclude_about_folder=True):
-            mod["dds_leftover"] = True
-        out.append({"mod": mod})
+        out.append(scan_mod_dir(mod_dir, e.name, source))
     return out
+
+
+def scan_mod_dir(mod_dir, folder: str, source: str) -> dict:
+    """One mod folder: {"mod": ...} or {"problem": ...} (scan_dir's per-folder
+    step; offline_mods.overlay parses an Offline copy with it too)."""
+    about_dir = find_child_ci(mod_dir, "About")
+    about_file = about_dir and find_child_ci(about_dir, "About.xml")
+    if not about_file:
+        # Narrow carve-out: a folder of nothing but .dds textures is listed
+        # as a tagged no-packageId mod instead of a no-about scan issue.
+        if is_dds_only_leftover(mod_dir, exclude_about_folder=False):
+            return {"mod": {**make_mod(_empty_about(), mod_dir, folder, source), "dds_leftover": True}}
+        return {"problem": {"kind": "no-about", "path": mod_dir, "message": "No About/About.xml - not a mod folder"}}
+    try:
+        about = parse_about_xml(read_text(about_file))
+    except (OSError, ValueError, SyntaxError) as err:
+        return {"problem": {"kind": "parse-error", "path": mod_dir, "message": f"About.xml could not be parsed: {err}"}}
+    mod = make_mod(about, mod_dir, folder, source)
+    # Only the no-packageId case is checked; About/ is skipped since
+    # About.xml itself is never a .dds.
+    if not about["package_id"] and is_dds_only_leftover(mod_dir, exclude_about_folder=True):
+        mod["dds_leftover"] = True
+    return {"mod": mod}
 
 
 def sort_key_name(name) -> str:
@@ -137,8 +147,13 @@ def natural_key(s: str) -> list:
 
 def workshop_id(mod: dict | None) -> str | None:
     """lists.js workshopId: a Workshop/SteamCMD/GOG-download mod's folder is
-    its numeric Workshop id; None for anything else (or no mod)."""
-    if mod and mod["source"] in ("workshop", "steamcmd", "gog") and re.fullmatch(r"\d+", mod["folder"], re.ASCII):
+    its numeric Workshop id; None for anything else (or no mod). An Offline
+    copy (source 'pinned', offline_mods.overlay) of such a mod keeps its
+    folder name, so it counts by the origin it was copied from."""
+    source = mod and mod["source"]
+    if source == "pinned":
+        source = (mod.get("pinned") or {}).get("origin")
+    if source in ("workshop", "steamcmd", "gog") and re.fullmatch(r"\d+", mod["folder"], re.ASCII):
         return mod["folder"]
     return None
 
@@ -156,6 +171,13 @@ ORIGINS = {
     "pending": ("Pending", "Pending Steam Workshop item (not installed yet)"),
     "missing": ("Not installed", "Not installed"),
 }
+# An Offline copy's origin (offline_mods: the manifest entry's "origin"), worded for the details pane / row tooltip.
+PINNED_FROM = {
+    "mods": "your Mods folder",
+    "steamcmd": "a SteamCMD copy in your Mods folder",
+    "gog": "a GOG copy in your Mods folder",
+    "workshop": "Steam's Workshop folder",
+}
 
 
 def origin(mod: dict | None, pending: bool = False) -> tuple[str, str]:
@@ -165,6 +187,12 @@ def origin(mod: dict | None, pending: bool = False) -> tuple[str, str]:
     'Not installed'."""
     if mod is None:
         return ORIGINS["pending" if pending else "missing"]
+    if mod["source"] == "pinned":  # an Offline copy (offline_mods.overlay): where it was copied from
+        src = PINNED_FROM.get((mod.get("pinned") or {}).get("origin"), "the live mod")
+        text = f"Offline copy (this load order's own frozen copy, from {src}; not updated by Steam)"
+        if mod.get("live_changed"):  # the screen's live-changed check (0.6.18; offline_mods.LIVE_CHANGED_NOTE)
+            text += ". Live copy has changed since this Offline copy was made"
+        return "Offline copy", text
     return ORIGINS.get(mod["source"], ORIGINS["local"])
 
 def workshop_urls(mod: dict | None) -> dict | None:

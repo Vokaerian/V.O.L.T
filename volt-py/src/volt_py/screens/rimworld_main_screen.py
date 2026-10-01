@@ -8,7 +8,11 @@ click-the-selected-row-to-deselect, drag-reorder within Active (a preview
 while dragging, one model move at the drop - screens/mod_list.py), and load
 orders: the picker, New / Copy to new, Save, and Push (save, then write
 ModsConfig.xml), with unsaved-changes tracking (dirty vs a baseline, undo,
-discard/push confirms), Run (launches the game; never saves or pushes), the
+discard/push confirms), Modded / Vanilla (launch the game through
+rimworld_launch.py, never saving or pushing; the screen stays locked while it
+runs - _run / _begin_watch; a load order's opt-in own game data, toggled from
+the picker's right-click menu, makes Modded use <LO>/data as the game's data
+root, RIMWORLD.md PLAN item 10 stage 1), the
 Scan issues window (screens/scan_issues_window.py), per-pane search (the
 query box + eye toggle, pane-title counts; screens/mod_list.py PaneSearch),
 mod colors (row swatches, color filter), the rows' decorations (official
@@ -91,9 +95,25 @@ Top to bottom:
   load-order bar Load order [picker] New.. Copy.. [Unsaved changes undo] | ... Game version
   content row    [details | inactive | active] (1.2 : 1 : 1) + actions column (150px)
   footer         divider; [status text (empty)] ... [download row, while downloading / paused]
+                 [copy row, while Offline mods are being copied]
+
+Offline mods (0.6.16, RIMWORLD.md PLAN item 10 stage 2; offline_mods.py): _scan
+keeps the global scan in _live_mods / _live_problems, and _apply_overlay makes
+_mods / _order / _scan_problems the open load order's view of it (its Offline
+copies replace or supply the live mods), so the panes, validation, Sort, the
+dependency index, the details pane and the issues all read the overlay. Sync to
+Steam and the SteamCMD download report read _live_mods (they act on the real
+folders). Marking runs as an Offline job (_start_offline_job: a worker thread,
+the footer's copy_bar, the manifest's pinning block written per finished item
+on the GUI thread - never the unsaved-changes state), from the actions
+column's "Offline mods..." button (under Rescan; shown only while the open
+load order has its own game data on), the row menu's Make Offline / Make live
+again / Delete (an Offline row's Delete = only its copy), and
+Copy to new (independent copies).
 """
 
 import functools
+import os
 import sys
 import threading
 import time
@@ -131,8 +151,9 @@ from PySide6.QtWidgets import (
 
 from volt_py import (
     community_rules, download_state, icons, load_orders, mod_decorations, mod_list_io, mod_removal, mods, mods_config,
-    painters, paths, sort, steam_client, steam_cmd, steam_ops, steam_web_api, theme, validation,
+    offline_mods, painters, paths, sort, steam_client, steam_cmd, steam_ops, steam_web_api, theme, validation,
 )
+from volt_py import rimworld_launch as rl
 from volt_py.app_root import GAME_SLUG, migrate_legacy_app_root, resolve_app_root
 from volt_py.applog import clip, init_log, log
 from volt_py.electron_import import import_electron_load_orders_if_needed
@@ -144,6 +165,7 @@ from volt_py.screens.details_panel import DetailsPanel
 from volt_py.screens.download_bar import DownloadBar
 from volt_py.screens.help_window import HelpWindow
 from volt_py.screens.mod_list import ModListView, mod_matches
+from volt_py.screens.offline_mods_dialog import OfflineModsDialog, dialog_rows
 from volt_py.screens.rimworld_help_entries import RIMWORLD_HELP_ENTRIES
 from volt_py.screens.rules_window import RulesWindow
 from volt_py.screens.scan_issues_window import ScanIssuesWindow, workshop_title
@@ -254,6 +276,24 @@ def _button(text: str, *, variant: str | None = None) -> QPushButton:
 
 GAMES_ICON_PX = 12  # the mockup's 12px grid glyph (Settings-sized button, 26px tall)
 GAMES_TOOLTIP = "Back to game select (Alt+Left)"
+
+# Modded / Vanilla (0.6.15, RIMWORLD.md PLAN item 10 stage 1; Valheim's pair).
+# Modded's tooltip says whether the open load order has its own game data.
+MODDED_TOOLTIP_OWN = ("Launch RimWorld with this load order's saved mod list. Own game data: On - its own saves, "
+                      "settings and mod config, in {data}.")
+MODDED_TOOLTIP_SHARED = ("Launch RimWorld. Own game data: Off - the game uses its usual data folder and the mod list "
+                         "last pushed there, so Push first to play this load order.")
+# Stage 3 (0.6.17): what Modded does with the load order's Offline mods.
+MODDED_OFFLINE_NOTE = ("Offline mods linked into the game's Mods folder for the run: {n} (those in the saved active "
+                       "list); they're removed again when the game closes.")
+MODDED_OFFLINE_OFF_NOTE = ("This load order's Offline mods aren't linked in: that needs Own game data on (right-click "
+                           "the load order picker).")
+VANILLA_TOOLTIP = ("Launch a clean RimWorld: only Core and your DLCs, no mods, with its own saves and settings in "
+                   "VOLT's vanilla-data folder. Your normal RimWorld data folder isn't touched.")
+PUSH_TOOLTIP = "Save this load order, then write its active list to the game's ModsConfig.xml."
+PUSH_OWN_DATA_NOTE = "Modded Run for this load order doesn't need a Push: it uses its own game data."
+# The actions column's Offline mods... button (0.6.16; shown only with the load order's own game data on).
+OFFLINE_TOOLTIP = "Choose which mods get this load order's own frozen copy, not updated by Steam."
 
 
 def _games_button() -> QPushButton:
@@ -385,6 +425,80 @@ def _fetch_community_rules(app_root: Path, loaded: _CommunityRulesLoaded) -> Non
         log(f"community rules: could not signal the screen ({err!r})")
 
 
+class _LaunchPolled(QObject):
+    """Carries one launch-watch poll (rimworld_launch.running_pids, a tasklist
+    call - off the GUI thread so the window never stutters) back to the GUI
+    thread (a queued connection; the _CommunityRulesLoaded pattern). done's
+    payload: the set of running pids."""
+
+    done = Signal(object)
+
+
+def _launch_why(st: dict) -> str:
+    """The busy reason for a launch watch (_run_block / the Games button): the
+    game starting / running, or VOLT removing the run's Offline-mod links."""
+    if st["phase"] == "cleaning":
+        return "while VOLT removes this run's Offline mods from the game's Mods folder"
+    return f"while RimWorld is {'starting' if st['phase'] == 'starting' else 'running'}"
+
+
+class _LiveChecked(QObject):
+    """Carries one live-changed check (0.6.18: offline_mods.fingerprint of
+    each Offline mod's LIVE source) from its daemon thread to the GUI thread
+    (queued): {"check": the screen's check dict, "fps": {(path, mtime_ns):
+    fingerprint or None}}."""
+
+    done = Signal(object)
+
+
+def _check_live(items: list[tuple], cancel: threading.Event, check: dict, carrier: _LiveChecked) -> None:
+    """Background-thread body: the fingerprint of each (mod id, path, cache
+    key); stops quietly when `cancel` is set (a newer check replaced it)."""
+    fps = {}
+    try:
+        for _pid, path, key in items:
+            fps[key] = offline_mods.fingerprint(path, cancel)
+    except offline_mods.Cancelled:
+        return
+    except Exception as err:  # never expected: the thread must never die silently
+        log(f"offline mods: live check FAILED: {err!r}")
+    try:
+        carrier.done.emit({"check": check, "fps": fps})
+    except RuntimeError:
+        pass
+
+
+class _LaunchCleaned(QObject):
+    """Carries rimworld_launch.cleanup()'s result (or an exception text) from
+    its daemon thread back to the GUI thread (queued; the _LaunchPolled
+    pattern): {"result"} or {"error"}."""
+
+    done = Signal(object)
+
+
+def _cleanup_launch(app_root: Path, carrier: _LaunchCleaned) -> None:
+    """Background-thread body: the end-of-run cleanup (it retries a locked
+    path for a few seconds, so never on the GUI thread)."""
+    try:
+        payload = {"result": rl.cleanup(app_root)}
+    except Exception as err:  # the thread must never die silently
+        log(f"run: cleanup FAILED: {err!r}")
+        payload = {"error": str(err) or repr(err)}
+    try:
+        carrier.done.emit(payload)
+    except RuntimeError as err:
+        log(f"run: cleanup could not signal the screen ({err!r})")
+
+
+def _poll_running(exe_name: str, carrier: _LaunchPolled) -> None:
+    """Background-thread body of one launch-watch poll."""
+    pids = rl.running_pids(exe_name)
+    try:
+        carrier.done.emit(pids)
+    except RuntimeError as err:  # shutting down: the Qt side is already gone
+        log(f"run: could not signal the screen ({err!r})")
+
+
 class _SteamCmdDownloadDone(QObject):
     """Carries one SteamCMD download run's outcome from its background thread
     to the GUI thread (a queued connection; the _CommunityRulesLoaded
@@ -397,6 +511,65 @@ class _SteamCmdDownloadDone(QObject):
 
     done = Signal(object)
     progress = Signal(object)
+
+
+class _OfflineJobEvent(QObject):
+    """Carries an Offline-mods job (_start_offline_job) from its background
+    thread to the GUI thread (queued; the _SteamCmdDownloadDone pattern):
+    progress {"id", "bytes" copied so far of that item, "at" monotonic s} at
+    most every OFFLINE_PROGRESS_S, item {"task", plus "entry" (a copy's new
+    manifest entry) | "skipped" (make live: leftovers) | "error" |
+    "cancelled"} after each task, done {"cancelled"} at the end."""
+
+    progress = Signal(object)
+    item = Signal(object)
+    done = Signal(object)
+
+
+OFFLINE_PROGRESS_S = 0.1
+
+
+def _run_offline_job(tasks: list[dict], cancel: threading.Event, carrier: _OfflineJobEvent) -> None:
+    """Background-thread body: each task in order until `cancel` - "live"
+    (offline_mods.make_live), "copy" (make_offline from the scanned mod) or
+    "clone" (copy_entry: Copy to new). Holds no reference to the screen."""
+    for t in tasks:
+        if cancel.is_set():
+            break
+        out: dict = {"task": t}
+        acc = {"bytes": 0, "at": 0.0}
+
+        def on_bytes(n: int, t=t, acc=acc) -> None:
+            acc["bytes"] += n
+            now = time.monotonic()
+            if now - acc["at"] >= OFFLINE_PROGRESS_S:
+                acc["at"] = now
+                carrier.progress.emit({"id": t["id"], "bytes": acc["bytes"], "at": now})
+
+        try:
+            if t["kind"] == "live":
+                out["skipped"] = offline_mods.make_live(t["lo_dir"], t["folder"])
+            elif t["kind"] == "copy":
+                out["entry"] = offline_mods.make_offline(t["lo_dir"], t["mod"], cancel, on_bytes, t.get("entries"))
+            elif t["kind"] == "refresh":
+                out["entry"] = offline_mods.refresh(t["lo_dir"], t["mod"], t["entry"], cancel, on_bytes)
+            else:
+                out["entry"] = offline_mods.copy_entry(t["src"], t["lo_dir"], t["id"], t["entry"], cancel, on_bytes)
+        except offline_mods.Cancelled:
+            out["cancelled"] = True
+        except Exception as err:  # OfflineError / OSError, or anything unexpected: reported per item, the run goes on
+            out["error"] = str(err) or repr(err)
+            log(f"offline mods: {t['kind']} {t['id']} FAILED - {out['error']}")
+        try:
+            carrier.item.emit(out)
+        except RuntimeError:  # shutting down: the Qt side is already gone
+            return
+        if out.get("cancelled"):
+            break
+    try:
+        carrier.done.emit({"cancelled": cancel.is_set()})
+    except RuntimeError as err:
+        log(f"offline mods: could not signal the screen ({err!r})")
 
 
 def _download_workshop_items(app_root: Path, wids: list[str], mods_dir: Path, mode: str, rows: list[str],
@@ -616,6 +789,37 @@ class RimWorldMainScreen(QWidget):
         self._steam_jobs: dict[_SteamClientDone, threading.Thread] = {}
         self._unsubscribing: set[str] = set()
         self._syncing = False
+        # Modded / Vanilla (_run): the launch being watched - exe_name, what
+        # (status wording), phase "starting" / "running", started (monotonic);
+        # None when idle. While set the screen is locked (_run_block). One
+        # poll at a time: the single-shot timer is re-armed after each result.
+        self._launch: dict | None = None
+        self._launch_polled = _LaunchPolled()  # no parent: owned by self and the poll threads
+        self._launch_polled.done.connect(self._on_launch_poll, Qt.ConnectionType.QueuedConnection)
+        self._launch_cleaned = _LaunchCleaned()  # no parent: owned by self and the cleanup thread (stage 3, 0.6.17)
+        self._launch_cleaned.done.connect(self._on_launch_cleaned, Qt.ConnectionType.QueuedConnection)
+        self._launch_timer = QTimer(self)
+        self._launch_timer.setSingleShot(True)
+        self._launch_timer.timeout.connect(self._poll_launch)
+        # slug -> own_data, from the picker's last reload (+ the toggle): drives
+        # Modded / Push tooltips and the picker menu's own-game-data entry.
+        self._lo_own_data: dict[str, bool] = {}
+        # Offline mods (0.6.16, offline_mods.py): the global scan as read from disk (_scan) and its problems -
+        # _mods / _order / _scan_problems are the open load order's overlay of them (_apply_overlay). The Offline
+        # job in flight (_start_offline_job: its carrier, thread, cancel event, target slug, names, sizes and
+        # results so far) or None; its footer row is copy_bar, painted from _copy_dl.
+        self._live_mods: dict[str, dict] = {}
+        # Live-changed detection (0.6.18): a per-session memo of live-source fingerprints by path (a full metadata
+        # walk each time - cleared whenever a load order opens and on Rescan, so one open never walks twice); the
+        # open load order's offline_mods.live_status per Offline mod; the check in flight (or None).
+        self._fp_cache: dict[tuple, str | None] = {}
+        self._live_status: dict[str, str] = {}
+        self._live_check: dict | None = None
+        self._live_checked = _LiveChecked()  # no parent: owned by self and the check threads
+        self._live_checked.done.connect(self._on_live_checked, Qt.ConnectionType.QueuedConnection)
+        self._live_problems: list[dict] = []
+        self._offline_job: dict | None = None
+        self._copy_dl: download_state.DownloadState | None = None
         # Set once this screen is left for game select (_request_back): each
         # background thread's queued result is dropped from then on (the
         # screen is being deleted; its threads just finish on their own).
@@ -697,6 +901,7 @@ class RimWorldMainScreen(QWidget):
         log(f"Electron load-order import: {'imported ' + ', '.join(migrated) if migrated else 'nothing imported'}")
         self._reload_load_order_picker()
         self._apply_paths()
+        self._recover_launch()  # a launch record left by an earlier VOLT session (stage 3, 0.6.17)
         if self.game_dir:
             if self._scan():
                 self._apply_current_load_order_to_panes()
@@ -900,7 +1105,6 @@ class RimWorldMainScreen(QWidget):
             + " Please locate your RimWorld install folder (the one containing Data and Mods)."
         )
         self.rescan_button.setEnabled(has_game)
-        self.run_button.setEnabled(has_game)  # ActionsColumn.jsx: disabled={busy || noGame}
         self.inactive_list.setEnabled(has_game)
         self.active_list.setEnabled(has_game)
         for search, eye in ((self.inactive_search, self.inactive_eye), (self.active_search, self.active_eye)):
@@ -951,6 +1155,7 @@ class RimWorldMainScreen(QWidget):
         # ActionsColumn.jsx: Sync disabled={disabled || syncing}, reading "Syncing..." meanwhile.
         self.sync_button.setEnabled(has_game and not self._syncing)
         self.sync_button.setText("Syncing..." if self._syncing else "Sync")
+        self._apply_run_buttons()
         self._apply_games_button()
         # ActionsColumn.jsx: Import disabled={busy}, Export disabled={busy || activeCount === 0}.
         # Import also needs a game here: with no scan, an import would have nothing to show.
@@ -971,6 +1176,57 @@ class RimWorldMainScreen(QWidget):
             self.save_button.style().unpolish(self.save_button)
             self.save_button.style().polish(self.save_button)
         self._update_validation()
+
+    def _run_block(self) -> str | None:
+        """Why Modded / Vanilla can't start right now (None = they can): the
+        game already started from here (the watch), or work a launch would
+        race - a Sync to Steam (its own heads-up says not to launch
+        meanwhile), a running SteamCMD download, a Steam-client Subscribe /
+        Unsubscribe. A paused download doesn't block (nothing is writing)."""
+        st = self._launch
+        if st is not None:
+            return _launch_why(st)
+        dl = self._dl
+        return ("while Offline mods are being copied" if self._offline_job is not None
+                else "while a Sync to Steam is running" if self._syncing
+                else "while a SteamCMD download is running" if (dl is not None and not dl.paused) or self._steamcmd_jobs
+                else "while a Steam Unsubscribe is running" if self._steam_jobs and self._unsubscribing
+                else "while a Steam Subscribe is running" if self._steam_jobs else None)
+
+    def _apply_run_buttons(self) -> None:
+        """Modded (run_button) needs the game + an open load order, Vanilla
+        just the game, both blocked while busy (_run_block - the tooltip
+        then says why); Modded's tooltip shows the load order's own-game-data
+        state; the Offline mods... button is shown only with own game data
+        on, busy-gated the same way. Settings is locked while the game runs (changing the game
+        folder mid-run would lose the watch). Push's tooltip adds that an
+        own-data load order's Modded doesn't need it."""
+        has_game = self.game_dir is not None
+        why = self._run_block()
+        own = self._lo_own_data.get(self.current_load_order, False) if self.current_load_order else False
+        self.run_button.setEnabled(has_game and self.current_load_order is not None and why is None)
+        self.vanilla_button.setEnabled(has_game and why is None)
+        if why is not None:
+            self.run_button.setToolTip(f"Can't launch {why}.")
+            self.vanilla_button.setToolTip(f"Can't launch {why}.")
+        else:
+            data = rl.data_dir(self._load_order_dir()) if self.current_load_order else None
+            linked, offline = self._offline_link_counts()
+            tip = MODDED_TOOLTIP_OWN.format(data=data) if own else MODDED_TOOLTIP_SHARED
+            if own and linked:
+                tip += " " + MODDED_OFFLINE_NOTE.format(n=linked)
+            elif not own and offline:
+                tip += " " + MODDED_OFFLINE_OFF_NOTE
+            self.run_button.setToolTip(tip)
+            self.vanilla_button.setToolTip(VANILLA_TOOLTIP)
+        running = self._launch is not None
+        self.settings_button.setEnabled(not running)
+        self.settings_button.setToolTip("Can't open Settings while RimWorld is running." if running else "")
+        self.push_button.setToolTip(PUSH_TOOLTIP + (f" {PUSH_OWN_DATA_NOTE}" if own else ""))
+        # Offline mods...: only for a load order with its own game data (hidden, not just greyed, otherwise)
+        self.offline_button.setVisible(has_game and own)
+        self.offline_button.setEnabled(has_game and own and why is None)
+        self.offline_button.setToolTip(OFFLINE_TOOLTIP if why is None else f"Can't change Offline mods {why}.")
 
     def _update_validation(self) -> None:
         """App.jsx's validation memo (validateActive on every Active change),
@@ -1037,6 +1293,7 @@ class RimWorldMainScreen(QWidget):
             lambda: self.current_load_order and self._open_folder(self._load_order_dir())
         )
         self.rescan_button.clicked.connect(lambda: self.rescan())
+        self.offline_button.clicked.connect(lambda: self._show_offline_mods())
         # Every real Active change (double-click move in/out, drag-drop commit)
         # goes through one of these model signals; the *AboutTo* ones fire
         # before the change, so the list is still the pre-change snapshot.
@@ -1073,9 +1330,11 @@ class RimWorldMainScreen(QWidget):
         self.sync_button.clicked.connect(lambda: self._sync_to_steam())
         self.push_button.clicked.connect(lambda: self._push())
         self.run_button.clicked.connect(lambda: self._run())
+        self.vanilla_button.clicked.connect(lambda: self._run(modded=False))
         self.scan_issues_button.clicked.connect(lambda: self._show_scan_issues())
         self.issues_button.clicked.connect(lambda: self._show_validation())  # unscoped (App.jsx setIssuesOpen({}))
         self.download_bar.toggled.connect(lambda: self._toggle_download_pause())
+        self.copy_bar.toggled.connect(lambda: self._cancel_offline_job())
 
     def _load_order_dir(self) -> Path | None:
         """The open load order's own folder (load-orders/<slug>), else None."""
@@ -1156,7 +1415,16 @@ class RimWorldMainScreen(QWidget):
         log(f"confirm shown: {title}: {message} -> {confirm_label if confirmed else 'Cancel'}{note}")
         return confirmed, ticked
 
-    def _confirm_sync(self) -> bool:
+    def _offline_also(self, mod_id: str | None, wid: str | None = None) -> str:
+        """The removal confirms' extra sentence (0.6.18): the load orders that
+        keep this mod Offline, whose copies the removal never touches; "" when
+        none."""
+        names = load_orders.offline_holders(self.app_root, mod_id, wid)
+        log(f"offline mods: {mod_id or wid} is kept Offline in {names}")
+        return ("\n\nThis mod is also kept Offline in: " + ", ".join(names)
+                + " - their Offline copies are not touched and keep working.") if names else ""
+
+    def _confirm_sync(self, note: str | None = None) -> bool:
         """Sync to Steam's heads-up before a real sync starts (never for a
         refused / nothing-to-sync click): what to expect, a "Don't ask me
         again" checkbox, Cancel (Esc) / Sync (the default). True if Sync
@@ -1175,7 +1443,7 @@ class RimWorldMainScreen(QWidget):
         title = QLabel("Sync to Steam")
         title.setProperty("role", "modal-title")
         layout.addWidget(title)
-        for line in SYNC_CONFIRM_LINES:
+        for line in (*SYNC_CONFIRM_LINES, *((note,) if note else ())):  # note: the Offline summary (0.6.18)
             label = QLabel("\u2022 " + line)
             label.setWordWrap(True)
             layout.addWidget(label)
@@ -1219,11 +1487,15 @@ class RimWorldMainScreen(QWidget):
         Sync to Steam; an unfinished SteamCMD download - running, or paused
         (the footer row + its Resume live on this screen and would be lost;
         user decision 2026-09-30); a Steam-client Subscribe / Unsubscribe
-        (_steam_jobs). Re-applied from _apply_load_order_state (Sync),
+        (_steam_jobs); a game started with Modded / Vanilla, until it exits
+        (_launch). Re-applied from _apply_load_order_state (Sync, the launch),
         _render_download_bar (every _dl change) and wherever _steam_jobs
         changes."""
         dl = self._dl
-        why = ("while a Sync to Steam is running" if self._syncing
+        st = self._launch
+        why = (_launch_why(st) if st is not None
+               else "while Offline mods are being copied" if self._offline_job is not None
+               else "while a Sync to Steam is running" if self._syncing
                else "while a SteamCMD download is paused - Resume it and let it finish first" if dl is not None and dl.paused
                else "while a SteamCMD download is running - let it finish first" if dl is not None or self._steamcmd_jobs
                else "while a Steam Unsubscribe is running" if self._steam_jobs and self._unsubscribing
@@ -1248,7 +1520,9 @@ class RimWorldMainScreen(QWidget):
     # ---- mods: scan, select, move ----
     def rescan(self) -> None:
         """Rescan button: re-reads the mods, keeping the on-screen Active list
-        (App.jsx reloadForPaths) - unsaved edits, baseline and undo survive."""
+        (App.jsx reloadForPaths) - unsaved edits, baseline and undo survive.
+        Also forgets the live fingerprints (0.6.18): Rescan = look again."""
+        self._fp_cache.clear()
         if self._scan():
             self._show_lists(self.active_list.mod_ids())
             self._apply_load_order_state()  # a pending id resolving to its now-installed mod can change dirty
@@ -1270,14 +1544,120 @@ class RimWorldMainScreen(QWidget):
             log(f"rescan problem: {problem.get('kind', '?')} at {problem.get('path')}: {clip(problem.get('message'))}")
         # App.jsx scanFor: ignored paths never reach the window, this scan or later ones.
         ignored = set(self._settings.get()["ignored_scan_issues"] or [])
-        self._scan_problems = [p for p in result["problems"] if str(p["path"]) not in ignored]
-        hidden = len(result["problems"]) - len(self._scan_problems)
+        self._live_problems = [p for p in result["problems"] if str(p["path"]) not in ignored]
+        hidden = len(result["problems"]) - len(self._live_problems)
         if hidden:
             log(f"rescan: {hidden} scan problems hidden (ignored in settings)")
-        self._update_scan_issues_button()
-        self._mods = {m["id"]: m for m in result["mods"]}
-        self._order = {m["id"]: i for i, m in enumerate(result["mods"])}
+        self._live_mods = {m["id"]: m for m in result["mods"]}
+        self._apply_overlay()
         return True
+
+    def _offline_entries(self, slug: str | None) -> dict:
+        """A load order's Offline mods (its manifest's pinning.mods: packageId -> entry), {} if none / unreadable."""
+        return self._offline_entries_read(slug) or {}
+
+    def _offline_entries_read(self, slug: str | None) -> dict | None:
+        """As _offline_entries, but None when the manifest couldn't be read (or no load order) - distinct from a
+        clean read with no entries ({}). Make Offline may only replace a leftover folder after a clean read."""
+        if not slug:
+            return None
+        try:
+            return load_orders.load_load_order(self.app_root, slug)["pinning"]["mods"]
+        except (OSError, ValueError) as err:
+            log(f"offline mods: couldn't read load order {slug}: {err!r}")
+            return None
+
+    def _apply_overlay(self) -> None:
+        """The open load order's view of the scan (offline_mods.overlay): its
+        Offline copies replace / supply the live mods in _mods (a new dict, so
+        the per-scan memos follow), _order re-sorted by name, and a missing or
+        unreadable copy's problem added to the Scan issues list (ignored paths
+        left out, as for the scan's own). After every scan, whenever the open
+        load order changes (_apply_current_load_order_to_panes) and after an
+        Offline job on it. _live_mods / its mods are never modified."""
+        entries = self._offline_entries(self.current_load_order)
+        lo_dir = self._load_order_dir()
+        view, problems = (offline_mods.overlay(self._live_mods, entries, lo_dir) if entries and lo_dir is not None
+                          else (self._live_mods, []))
+        for problem in problems:
+            log(f"offline mods: {problem['message']} ({problem['path']})")
+        # Ignored paths left out again here: one ignored since the scan (Scan issues window) stays hidden.
+        ignored = set(self._settings.get()["ignored_scan_issues"] or [])
+        self._scan_problems = [p for p in self._live_problems + problems if str(p["path"]) not in ignored]
+        self._update_scan_issues_button()
+        self._mods = view
+        order = (list(view) if view is self._live_mods  # the scan's own name order
+                 else sorted(view, key=lambda i: mods.natural_key(mods.sort_key_name(view[i]["name"]))))
+        self._order = {mod_id: n for n, mod_id in enumerate(order)}
+        if entries:
+            log(f"offline mods: {len(entries)} in load order {self.current_load_order}, "
+                f"{len(problems)} missing / unreadable: {clip(sorted(entries))}")
+        self._start_live_check(entries)
+
+    # ---- live-changed detection (0.6.18) ----
+    def _start_live_check(self, entries: dict) -> None:
+        """Each Offline mod's live source (the global scan's, never the
+        overlay) against the fingerprint stored at copy time (the same
+        offline_mods.fingerprint walk): what this session's memo already holds
+        (cleared on load-order open / Rescan) is applied at once, the rest is
+        walked on a daemon thread (_check_live -> _on_live_checked). A newer
+        check cancels the older one."""
+        if self._live_check is not None:
+            self._live_check["cancel"].set()
+            self._live_check = None
+        statuses, items = {}, []
+        for pid, e in entries.items():
+            live = self._live_mods.get(pid)
+            if live is None:
+                statuses[pid] = "not-installed"
+                continue
+            key = str(live["path"])  # the memo key: no mtime shortcut, the walk itself decides (hardware review)
+            if key in self._fp_cache:
+                statuses[pid] = offline_mods.live_status(e, live, self._fp_cache[key])
+            else:
+                items.append((pid, str(live["path"]), key))
+        self._live_status = {}
+        self._apply_live_status(statuses)
+        if not items:
+            return
+        check = {"cancel": threading.Event(), "slug": self.current_load_order, "entries": entries, "items": items}
+        self._live_check = check
+        threading.Thread(target=_check_live, args=(items, check["cancel"], check, self._live_checked),
+                         name="offline-live-check", daemon=True).start()
+        log(f"offline mods: live check started for {len(items)} mods ({len(statuses)} known)")
+
+    @Slot(object)
+    def _on_live_checked(self, payload: dict) -> None:
+        if self._closed:
+            return
+        self._fp_cache.update(payload["fps"])
+        check = payload["check"]
+        if check is not self._live_check:
+            return  # replaced meanwhile (another load order / rescan): only the cache is kept
+        self._live_check = None
+        statuses = {pid: offline_mods.live_status(check["entries"][pid], self._live_mods.get(pid),
+                                                  self._fp_cache.get(key)) for pid, _path, key in check["items"]}
+        log(f"offline mods: live check done: {clip(statuses)}")
+        self._apply_live_status(statuses)
+
+    def _apply_live_status(self, statuses: dict) -> None:
+        """Merges statuses in; an Offline row whose live mod changed gets
+        "live_changed" on its (overlay) mod dict - the row tooltip and the
+        details pane say so - and the panes / details are refreshed."""
+        self._live_status.update(statuses)
+        touched = []
+        for pid, st in statuses.items():
+            mod = self._mods.get(pid)
+            if mod is None or mod.get("source") != "pinned" or bool(mod.get("live_changed")) == (st == "changed"):
+                continue
+            self._mods[pid] = {**mod, "live_changed": st == "changed"}  # the overlay's own dict, never the live scan
+            touched.append(pid)
+        if touched:
+            for pane in (self.inactive_list, self.active_list):
+                pane.mod_model.refresh_decorations()
+            selected = self.active_list.selected_mod_id() or self.inactive_list.selected_mod_id()
+            if selected in touched:
+                self._show_details(selected)
 
     def _mod_display_name(self, mod_id: str) -> str:
         """A pane row's text (ModListModel's display_name). A not-found row:
@@ -1302,6 +1682,11 @@ class RimWorldMainScreen(QWidget):
                 active = load_orders.load_load_order(self.app_root, self.current_load_order)["active"]
             except (OSError, ValueError) as err:
                 self._warn("Couldn't load load order", str(err))
+        if self.current_load_order and self._offline_job is None:
+            offline_mods.sweep(self._load_order_dir())  # stale .tmp- / .del- leftovers (never mid-job)
+        self._fp_cache.clear()  # opening a load order walks its Offline mods' live sources afresh (0.6.18)
+        if self.game_dir is not None:
+            self._apply_overlay()  # this load order's Offline mods over the scan
         self._show_lists(active)
         self._reset_baseline()
 
@@ -1844,6 +2229,7 @@ class RimWorldMainScreen(QWidget):
                 log(f"load-order picker: skipping unreadable load order {e['slug']}: {e['error']}")
         entries = [e for e in all_entries if "error" not in e]
         slugs = [e["slug"] for e in entries]
+        self._lo_own_data = {e["slug"]: bool(e.get("own_data")) for e in entries}
         last = self._settings.get()["last_load_order"]
         if select_slug in slugs:
             slug = select_slug
@@ -1885,16 +2271,60 @@ class RimWorldMainScreen(QWidget):
         self._apply_load_order_state()
 
     def _show_load_order_menu(self, pos: QPoint) -> None:
-        """Picker right-click: Delete the selected (= open) load order. No menu
-        with nothing selected; a disabled picker gets no right-click at all."""
+        """Picker right-click on the selected (= open) load order: "Own game
+        data: Off / On..." (_toggle_own_data) and Delete. No menu with nothing
+        selected; a disabled picker gets no right-click at all. Both are
+        disabled while the game runs (its data folder may be in use), and
+        Delete also while Offline mods are being copied. (Offline mods... is
+        the actions column's button since the 0.6.16 hardware review.)"""
         picker = self.load_order_picker
         slug, name = picker.currentData(), picker.currentText()
         if not slug:
             return
+        idle = self._launch is None
+        own = self._lo_own_data.get(slug, False)
         menu = QMenu(picker)
-        menu.addAction(f'Delete "{name}"...').triggered.connect(lambda: self._delete_load_order(slug, name))
+        menu.setToolTipsVisible(True)
+        toggle = menu.addAction(f"Own game data: {'On' if own else 'Off'}...")
+        toggle.setEnabled(idle)
+        toggle.triggered.connect(lambda: self._toggle_own_data(slug, name, not own))
+        menu.addSeparator()
+        delete = menu.addAction(f'Delete "{name}"...')
+        delete.setEnabled(idle and self._offline_job is None)
+        delete.triggered.connect(lambda: self._delete_load_order(slug, name))
         menu.exec(picker.mapToGlobal(pos))
         menu.deleteLater()
+
+    def _toggle_own_data(self, slug: str, name: str, on: bool) -> None:
+        """Turns a load order's own game data on / off after a confirm. On:
+        Modded runs use <LO>/data as the game's whole data root (saves,
+        settings, mod config), starting fresh. Off: Modded uses the real
+        data folder again; <LO>/data stays on disk, found again if turned
+        back on. Only the manifest flag changes (load_orders.set_own_data)."""
+        data = rl.data_dir(load_orders.load_orders_root(self.app_root) / slug)
+        if on:
+            title, label = "Own game data", "Turn on"
+            text = (f'Give "{name}" its own game data?\n\nModded runs of this load order will use their own saves, '
+                    f"settings and mod config, kept in {data}. They start fresh: default settings and no saves. "
+                    "Your existing saves and settings stay with RimWorld's normal data folder, untouched.")
+        else:
+            title, label = "Own game data", "Turn off"
+            text = (f'Turn off own game data for "{name}"?\n\nModded goes back to using RimWorld\'s normal data '
+                    f"folder, with the mod list last pushed there. This load order's own data in {data} stays on "
+                    "disk (it isn't deleted); turning this back on picks it up again.")
+        if not self._confirm(title, text, confirm_label=label):
+            log(f"own game data {'on' if on else 'off'} for {slug} ({name!r}): cancelled")
+            return
+        try:
+            load_orders.set_own_data(self.app_root, slug, on)
+        except (OSError, ValueError) as err:
+            log(f"own game data {'on' if on else 'off'} for {slug} ({name!r}) failed: {err!r}")
+            self._warn("Couldn't change own game data", str(err))
+            return
+        self._lo_own_data[slug] = on
+        log(f"own game data {'on' if on else 'off'} for {slug} ({name!r}), data folder {data}")
+        self._apply_load_order_state()
+        self.status_text.set_status_text(f'Own game data turned {"on" if on else "off"} for "{name}".')
 
     def _delete_load_order(self, slug: str, name: str) -> None:
         """Confirms, deletes the load order's folder, then reloads the picker.
@@ -1902,9 +2332,17 @@ class RimWorldMainScreen(QWidget):
         first, else none) becomes current and fills the panes - the delete
         confirm already covers losing its unsaved changes. Otherwise the open
         load order and its unsaved edits are left alone."""
+        data = rl.data_dir(load_orders.load_orders_root(self.app_root) / slug)
+        what = (f"Its saved mod list and its own game data (saves and settings, in {data}) are removed from disk."
+                if data.is_dir() else "Its saved mod list is removed from disk.")
+        entries = self._offline_entries(slug)
+        if entries:
+            size = offline_mods.format_size(sum(e.get("size_bytes") or 0 for e in entries.values()))
+            n = len(entries)
+            what += f" So are its {n} Offline mod{'' if n == 1 else 's'} ({size})."
         if not self._confirm(
             "Delete load order",
-            f'Delete "{name}"? Its saved mod list is removed from disk. This can\'t be undone.\n\n'
+            f'Delete "{name}"? {what} This can\'t be undone.\n\n'
             "Your mods themselves aren't touched.",
             confirm_label="Delete",
         ):
@@ -1958,20 +2396,34 @@ class RimWorldMainScreen(QWidget):
         if not self._confirm_discard():
             log("New load order: cancelled at the discard-changes prompt")
             return
-        official = sort.official_ids(self._mods)
-        rest = [i for i in sorted(self._mods, key=self._order.__getitem__) if i not in official]
+        # The live scan, not the open load order's Offline overlay: a new load order starts with none.
+        official = sort.official_ids(self._live_mods)
+        rest = [i for i in self._live_mods if i not in official]  # the scan's name order
         if self._create_load_order(
             "New load order", active=official, inactive=rest, note=f", official ids active: {clip(official)}"
         ):
             self._apply_current_load_order_to_panes()
 
     def _copy_to_new_load_order(self) -> None:
-        # The panes already show exactly what gets saved - no rebuild needed.
-        self._create_load_order(
+        # The panes already show exactly what gets saved - no rebuild needed. Offline mods: the new load order
+        # gets its own, independent copies (user decision 2026-10-01), made by an Offline job once it exists;
+        # one that fails isn't Offline there (the job's summary says which).
+        src_slug, src_dir = self.current_load_order, self._load_order_dir()
+        entries = self._offline_entries(src_slug)
+        if entries and self._offline_job is not None:
+            self._warn("Copy to new load order", "Offline mods are being copied right now. Wait for that to finish "
+                       "(or cancel it), then Copy to new again.")
+            return
+        if not self._create_load_order(
             "Copy to new load order",
             active=self._pane_ids(self.active_list),
             inactive=self._pane_ids(self.inactive_list),
-        )
+            note=f", {len(entries)} Offline mods to copy" if entries else "",
+        ) or not entries or src_dir is None:
+            return
+        tasks = [{"kind": "clone", "id": pid, "entry": e, "src": src_dir} for pid, e in entries.items()]
+        self._start_offline_job(self.current_load_order, tasks, {pid: e.get("size_bytes") for pid, e in entries.items()},
+                                "Copy to new load order")
 
     def _save_load_order(self) -> None:
         active_ids = self._pane_ids(self.active_list)
@@ -2003,10 +2455,12 @@ class RimWorldMainScreen(QWidget):
             f"push: load order {self.current_load_order}, config_dir={self.config_dir}, "
             f"{len(active_ids)} active, {len(inactive_ids)} inactive"
         )
+        own = self._lo_own_data.get(self.current_load_order, False) if self.current_load_order else False
         if self._dirty() and not self._confirm(
             "Save before pushing",
             "This load order has unsaved changes. Push saves them into the load order first, then writes "
-            f"its active list ({len(active_ids)} mods, in this order) to the game's ModsConfig.xml.",
+            f"its active list ({len(active_ids)} mods, in this order) to the game's ModsConfig.xml."
+            + (f" {PUSH_OWN_DATA_NOTE}" if own else ""),
             confirm_label="Save & Push",
         ):
             log("push cancelled at the save-before-pushing prompt")
@@ -2100,40 +2554,209 @@ class RimWorldMainScreen(QWidget):
         ).exec()
         log("validation window closed")
 
-    # ---- Run ----
-    def _run(self) -> None:
-        """Run (App.jsx onRun): launches the game. Never saves or pushes - with
-        unsaved changes it asks first, and the game starts with whatever
-        ModsConfig.xml was last pushed."""
-        if self._dirty() and not self._confirm(
+    # ---- Run: Modded / Vanilla (rimworld_launch.py) ----
+    def _run(self, modded: bool = True) -> None:
+        """Modded (run_button) / Vanilla (modded=False): starts RimWorld
+        through rimworld_launch.start (Steam's -applaunch for a Steam install,
+        the exe for GOG), then locks the screen until it exits (_begin_watch).
+        Never saves or pushes. Modded needs an open load order; with its own
+        game data on it writes <LO>/data/Config/ModsConfig.xml from the SAVED
+        list and passes -savedatafolder, else the game uses the mod list last
+        pushed. Unsaved changes ask first (Modded only)."""
+        why = self._run_block()
+        if why is not None:
+            log(f"run: ignored ({why})")
+            return
+        reason = rl.platform_error()
+        if reason:
+            log(f"run: preflight failed (platform): {reason}")
+            self._warn("Run failed", reason)
+            return
+        slug, name = self.current_load_order, self.load_order_picker.currentText()
+        manifest = None
+        if modded:
+            if slug is None:
+                log("run: preflight failed (load order): none open")
+                self._warn("Run failed", "Open a load order first.")
+                return
+            try:
+                manifest = load_orders.load_load_order(self.app_root, slug)
+            except (OSError, ValueError) as err:
+                log(f"run: preflight failed (load order {slug}): {err!r}")
+                self._warn("Run failed", f"Couldn't read the load order: {err}")
+                return
+        own = bool(manifest and manifest["own_data"])
+        log(f"run: preflight ({'modded' if modded else 'vanilla'}): game_dir={self.game_dir}, load order={slug} "
+            f"({name!r}), own data={'yes' if own else 'no'}, config_dir={self.config_dir}, "
+            f"unsaved changes={'yes' if self._dirty() else 'none'}")
+        if modded and self._dirty() and not self._confirm(
             "Unsaved load order changes",
-            "The active list has unsaved changes. Run doesn't save or push them: "
-            "RimWorld starts with the mod list last pushed to its ModsConfig.xml.",
+            ("The active list has unsaved changes. Run doesn't save them: RimWorld starts with this load order's "
+             "SAVED mod list (in its own game data). Save first to play with your changes.") if own else
+            ("The active list has unsaved changes. Run doesn't save or push them: "
+             "RimWorld starts with the mod list last pushed to its ModsConfig.xml."),
             confirm_label="Run without saving",
         ):
             log("run cancelled at the unsaved-changes prompt (nothing saved or pushed)")
             return
-        self._launch_game()
-
-    def _launch_game(self) -> None:
-        """App.jsx launchNow + main.js game:launch: the first GAME_EXES match
-        directly in the game folder, opened via the OS (os.startfile)."""
-        exe = paths.find_game_exe(self.game_dir)
-        log(
-            f"run: game_dir={self.game_dir}, exe={exe or 'none found'} (looked for {', '.join(paths.GAME_EXES)}), "
-            f"load order {self.current_load_order}, unsaved changes: {'yes' if self._dirty() else 'none'}"
-        )
-        if exe is None:
-            self._warn("Run failed", f"No RimWorld executable found in {self.game_dir or '(game folder not set)'}")
+        entries = manifest["pinning"]["mods"] if manifest and own else {}
+        if (not modded or own) and not self._confirm_savedata_conflict(modded):
+            log("run cancelled at the -savedatafolder conflict warning")
             return
         try:
-            paths.open_path(exe)
-        except OSError as err:
-            log(f"run: the OS refused to open {exe}: {err!r}")
+            res = rl.start(self.game_dir, modded=modded, lo_dir=self._load_order_dir(), own_data=own,
+                           active_ids=manifest["active"] if manifest else [], real_config_dir=self.config_dir,
+                           app_root=self.app_root, offline_entries=entries, load_order=slug or "",
+                           names={i: self._mod_display_name(i) for i in entries},
+                           official_ids=sort.official_ids(self._live_mods))  # Vanilla: Core + DLCs only (0.6.18)
+        except (rl.LaunchError, OSError) as err:
+            log(f"run: failed: {err!r}")
             self._warn("Run failed", str(err))
             return
-        log(f"run: launched {exe}")
-        self.status_text.set_status_text("Launching RimWorld...")
+        n = res.get("linked") or 0
+        offline = f", {n} Offline mod{'' if n == 1 else 's'}" if n else ""
+        what = ((f'"{name}", own game data{offline}' if own else f'"{name}", last pushed mod list') if modded
+                else "vanilla, clean: Core + DLCs only")
+        self._begin_watch(res["exe_name"], what)
+
+    def _confirm_savedata_conflict(self, modded: bool) -> bool:
+        """Before a run that adds VOLT's own -savedatafolder (Modded with own
+        game data, Vanilla): a -savedatafolder in the user's own Steam launch
+        options for RimWorld (any Steam user here) would compete with it -
+        warn, "Launch anyway" / Cancel. Steam installs only (GOG has no Steam
+        launch options); nothing found = True without asking."""
+        if self.game_dir is None or not paths.has_steam_appid(self.game_dir):
+            return True
+        steam = paths.find_steam_exe()
+        found = rl.user_savedata_options(steam.parent if steam else None)
+        if not found:
+            return True
+        ours = rl.data_dir(self._load_order_dir()) if modded else rl.vanilla_data_dir(self.app_root)
+        theirs = "\n".join(f"\u2022 {opts}" for _uid, opts in found)
+        return self._confirm(
+            "Save data folder conflict",
+            f"Your own Steam launch options for RimWorld already set a save data folder:\n{theirs}\n\n"
+            f"This run adds VOLT's own: -savedatafolder={ours}. RimWorld may use either one, so this run might not "
+            f"use {'this load order' + chr(39) + 's own game data' if modded else 'the clean Vanilla data folder'}. "
+            "To avoid this, remove -savedatafolder from RimWorld's launch options in Steam (Properties > General).",
+            confirm_label="Launch anyway")
+
+    def _offline_link_counts(self) -> tuple[int, int]:
+        """(Offline mods a Modded run would link: entries in the SAVED active
+        list; all Offline entries) of the open load order - for the tooltip."""
+        slug = self.current_load_order
+        if not slug:
+            return 0, 0
+        try:
+            m = load_orders.load_load_order(self.app_root, slug)
+        except (OSError, ValueError):
+            return 0, 0
+        entries = m["pinning"]["mods"]
+        return len(rl.link_plan(self._load_order_dir(), entries, m["active"], own_data=True)), len(entries)
+
+    def _recover_launch(self) -> None:
+        """On open: a launch record from an earlier VOLT session means the game
+        is still running (re-attach: the watch resumes, cleanup when it exits)
+        or the last run's Offline links are still in the Mods folder (cleaned
+        now; whatever can't be is listed, and the next start retries)."""
+        try:
+            rec = rl.recover(self.app_root)
+        except OSError as err:
+            log(f"run: recovery failed: {err!r}")
+            self._warn("Couldn't check the last run", str(err))
+            return
+        state = rec["state"]
+        if state == "none":
+            return
+        if state == "running":
+            self._begin_watch(rec["record"].get("exe_name") or "RimWorldWin64.exe",
+                              f'load order "{rec["record"].get("load_order") or "?"}", started by a previous VOLT session')
+            return
+        self._report_cleanup(rec["result"], after="the last run")
+
+    def _report_cleanup(self, result: dict, after: str) -> None:
+        """A cleanup's leftovers as one warning (failed: retried at the next
+        start; left: things VOLT won't touch), else a status line."""
+        failed, left = result.get("failed") or [], result.get("left") or []
+        if failed or left:
+            lines = [f"{p}: {why}" for p, why in failed + left]
+            self._warn("Offline mods", f"After {after}, not everything could be put back in the game's Mods folder"
+                       + (" (VOLT retries at the next start)" if failed else "") + ":\n" + "\n".join(lines))
+            self.status_text.set_status_text(f"Offline mods: {len(failed) + len(left)} item(s) left after {after}.", "warn")
+        elif result.get("unlinked") or result.get("restored"):
+            self.status_text.set_status_text(f"Removed this run's Offline mods from the Mods folder ({after}).")
+
+    def _begin_watch(self, exe_name: str, what: str) -> None:
+        """Locked (_run_block, the Games button, Settings) until the game - by
+        image name - has been seen and is gone, or never came."""
+        self._launch = {"exe_name": exe_name, "what": what, "phase": "starting", "started": time.monotonic()}
+        self.status_text.set_status_text(f"Launching RimWorld ({what})...")
+        self._apply_load_order_state()
+        self._launch_timer.start(rl.POLL_INTERVAL_S * 1000)
+
+    def _poll_launch(self) -> None:
+        """One tick of the watch: tasklist on a daemon thread, then _on_launch_poll."""
+        if self._launch is None or self._closed:
+            return
+        threading.Thread(target=_poll_running, args=(self._launch["exe_name"], self._launch_polled),
+                         name="launch-poll", daemon=True).start()
+
+    @Slot(object)
+    def _on_launch_poll(self, pids) -> None:
+        st = self._launch
+        if st is None or self._closed or st["phase"] == "cleaning":
+            return
+        elapsed = time.monotonic() - st["started"]
+        if st["phase"] == "starting":
+            if pids:
+                st["phase"], st["started"] = "running", time.monotonic()
+                log(f"run: {st['exe_name']} running (pids {sorted(pids)}) after {elapsed:.0f}s")
+                self.status_text.set_status_text(f"RimWorld is running ({st['what']}).")
+                self._apply_load_order_state()
+            elif elapsed >= rl.START_TIMEOUT_S:
+                log(f"run: {st['exe_name']} didn't start within {rl.START_TIMEOUT_S}s")
+                self._end_watch(f"RimWorld didn't start within {rl.START_TIMEOUT_S // 60} minutes.", "warn")
+                return
+        elif not pids:
+            log(f"run: {st['exe_name']} exited after {elapsed:.0f}s")
+            self._end_watch("RimWorld exited.", "info")
+            return
+        self._launch_timer.start(rl.POLL_INTERVAL_S * 1000)
+
+    def _end_watch(self, text: str, kind: str) -> None:
+        """The game is gone (or never came): with a launch record (Offline mods
+        linked in), the watch stays busy in phase "cleaning" while
+        rimworld_launch.cleanup runs on a daemon thread (_on_launch_cleaned
+        unlocks); else unlock and say so."""
+        self._launch_timer.stop()
+        if rl.read_record(self.app_root) is not None:
+            log("run: removing this run's Offline links (cleanup thread)")
+            self._launch = {**(self._launch or {}), "phase": "cleaning", "end_text": (text, kind)}
+            self.status_text.set_status_text(f"{text} Removing its Offline mods from the Mods folder...", kind)
+            self._apply_load_order_state()
+            threading.Thread(target=_cleanup_launch, args=(self.app_root, self._launch_cleaned),
+                             name="launch-cleanup", daemon=True).start()
+            return
+        self._launch = None
+        self.status_text.set_status_text(text, kind)
+        self._apply_load_order_state()
+
+    @Slot(object)
+    def _on_launch_cleaned(self, payload: dict) -> None:
+        """The end-of-run cleanup finished: unlock, then report (a warning
+        listing what's left, if anything)."""
+        if self._closed:
+            return
+        st = self._launch or {}
+        text, kind = st.get("end_text") or ("RimWorld exited.", "info")
+        self._launch = None
+        self.status_text.set_status_text(text, kind)
+        self._apply_load_order_state()
+        if "error" in payload:
+            self._warn("Offline mods", f"Couldn't remove this run's Offline mods from the Mods folder "
+                       f"({payload['error']}). VOLT retries at the next start.")
+            return
+        self._report_cleanup(payload["result"], after="this run")
 
     def _on_selection_changed(self, source: ModListView, other: ModListView) -> None:
         mod_id = source.selected_mod_id()
@@ -2182,7 +2805,8 @@ class RimWorldMainScreen(QWidget):
         passes `conflicts` to both lists - only active mods ever match);
         not_found: no scanned mod (RowLabel's !mod), with pending /
         downloading (RowView: pending = !mod && pendingWid && !downloading)
-        picking the look; neither -> the plain red "(not found)" row."""
+        picking the look; neither -> the plain red "(not found)" row.
+        offline: the row's mod is the load order's Offline copy (the badge)."""
         m = self._mods.get(mod_id)
         issues = self._issues_by_mod.get(mod_id, ())
         downloading = m is None and mod_id in self.downloading
@@ -2200,6 +2824,7 @@ class RimWorldMainScreen(QWidget):
             not_found=m is None,
             dds_leftover=m is not None and bool(m.get("dds_leftover")),
             row_warn=m is not None and bool(m.get("warnings")),
+            offline=m is not None and m.get("source") == "pinned",  # this load order's Offline copy (_apply_overlay)
         )
 
     def _row_tooltip(self, mod_id: str) -> str:
@@ -2557,7 +3182,7 @@ class RimWorldMainScreen(QWidget):
         cancelled by the user with something still missing."""
         self.rescan()  # _scan + _show_lists(on-screen Active) + load-order state; warns itself if the scan fails
         self._refresh_workshop_rows()  # the downloading look is gone even if the scan failed
-        on_disk = {w for w in map(mods.workshop_id, self._mods.values()) if w}
+        on_disk = {w for w in map(mods.workshop_id, self._live_mods.values()) if w}
         missing = [w for w in wids if w not in on_disk]
         results = report["results"] if report else []
         for w in wids:
@@ -2668,6 +3293,18 @@ class RimWorldMainScreen(QWidget):
             self._render_download_bar()
 
     # ---- Unsubscribe (App.jsx onUnsubscribe / unsubscribeNow / removeDownloadNow) ----
+    def _sync_offline_note(self, snapshot: dict) -> str | None:
+        """Sync's heads-up line when some of the SteamCMD copies it replaces
+        are also kept Offline in a load order (one manifest pass)."""
+        index = load_orders.offline_index(self.app_root)
+        held = [m for m in snapshot.values() if m["source"] == "steamcmd" and mods.workshop_id(m)
+                and load_orders.offline_holders(self.app_root, m["id"], mods.workshop_id(m), index=index)]
+        if not held:
+            return None
+        n = len(held)
+        return (f"{n} of these mods {'is' if n == 1 else 'are'} also kept Offline in other load orders; "
+                f"{'that copy is' if n == 1 else 'those copies are'} not touched.")
+
     def _unsubscribe(self, mod_id: str) -> None:
         """Unsubscribe from an installed Workshop mod (the context menu):
         destructive, so it confirms first (_confirm, Electron's wording per
@@ -2693,7 +3330,7 @@ class RimWorldMainScreen(QWidget):
                 f"This mod was downloaded with SteamCMD and isn't subscribed on Steam, so this only deletes its folder "
                 f"from RimWorld's Mods folder ({path}).\n\n"
                 "Removing files is best-effort: a file that's locked or in use is skipped rather than failing the "
-                "whole operation.",
+                "whole operation." + self._offline_also(mod_id, wid),
                 confirm_label="Remove",
             ):
                 return
@@ -2704,7 +3341,7 @@ class RimWorldMainScreen(QWidget):
             f"This unsubscribes you from the mod on Steam, then also removes any files left in its own Workshop "
             f"folder ({path}).\n\n"
             "Removing files is best-effort: a file that's locked or in use is skipped rather than failing the "
-            "whole operation.",
+            "whole operation." + self._offline_also(mod_id, wid),
             confirm_label="Unsubscribe",
         ):
             return
@@ -2939,6 +3576,7 @@ class RimWorldMainScreen(QWidget):
         if lines or plan["library"]:
             message += ("\n\nRemoving files is best-effort: a file that's locked or in use is skipped rather than "
                         "failing the whole operation.")
+        message += self._offline_also(mod_id, plan.get("wid"))
         confirmed, include_library = self._confirm_checked(
             f"Remove {name} completely?", message, confirm_label="Remove completely",
             checkbox="Also delete the SteamCMD library copy" if plan["library"] else None)
@@ -3016,7 +3654,8 @@ class RimWorldMainScreen(QWidget):
         if self.game_dir is None:
             self._warn("Sync to Steam", "RimWorld install folder is not set.")
             return
-        snapshot = {only: self._mods[only]} if only and only in self._mods else ({} if only else dict(self._mods))
+        live = self._live_mods  # the real Mods folder's copies, not the load order's Offline overlay
+        snapshot = {only: live[only]} if only and only in live else ({} if only else dict(live))
         count = sum(1 for m in snapshot.values() if m["source"] == "steamcmd" and mods.workshop_id(m))
         available, reason = self._refresh_steam()
         if not available:
@@ -3037,7 +3676,7 @@ class RimWorldMainScreen(QWidget):
             return
         if self._settings.get()["skip_sync_confirm"]:
             log(f"{what}: confirmation skipped (skip_sync_confirm set)")
-        elif not self._confirm_sync():
+        elif not self._confirm_sync(self._sync_offline_note(snapshot)):
             log(f"{what}: cancelled at the confirmation; {count} SteamCMD mod(s) not synced")
             return
         self._syncing = True
@@ -3378,7 +4017,13 @@ class RimWorldMainScreen(QWidget):
         SteamCMD-then-sync mode Subscribe too - so that row's menu ends
         Download / Remove completely... ('steamcmd'), Subscribe / Remove
         completely... ('steamworks'), Fetch / Remove completely... ('gog').
-        Installed rows keep every entry, greyed where it doesn't apply."""
+        Installed rows keep every entry, greyed where it doesn't apply.
+        **0.6.16**: after Rules..., Make Offline (offline_mods.refusal's reason
+        as the tooltip when greyed) or, for this load order's Offline mod, Make
+        live again - greyed while _run_block says busy. On an Offline row the
+        header reads "Offline copy", Unsubscribe / Delete never apply (its
+        folder is the load order's own) and Subscribe-as-sync is greyed (not a
+        SteamCMD copy); Remove completely still acts on the live copies only."""
         index = pane.indexAt(pos)
         mod_id = pane.mod_model.id_at(index.row()) if index.isValid() else None
         if mod_id is None:
@@ -3432,6 +4077,37 @@ class RimWorldMainScreen(QWidget):
         sub = menu.addMenu("Rules...")
         item(sub, "Create rule", True, lambda: self._create_rule(pkg))
         item(sub, "Show rules", True, lambda: self._show_rules())
+        # Offline mods (0.6.16): this row's mod only - the lists stay single-select; the actions column's Offline
+        # mods... dialog marks many at once. Disabled with the reason as the tooltip; Make Offline needs the load
+        # order's own game data on, Make live again never does (cleanup must always be possible).
+        entries = self._offline_entries(self.current_load_order)
+        busy = self._run_block()
+        if mod_id in entries:
+            label, why = "Make live again", None
+            tip = "Delete this load order's Offline copy and use the live mod again"
+            fn = lambda: self._make_live(mod_id)  # noqa: E731
+        else:
+            label, why = "Make Offline", offline_mods.refusal(mod_id, mod, entries)
+            tip = "Give this load order its own frozen copy of this mod (not updated by Steam)"
+            fn = lambda: self._make_offline(mod_id)  # noqa: E731
+        if self.current_load_order is None:
+            why = "Open or create a load order first."
+        elif mod_id not in entries and not self._lo_own_data.get(self.current_load_order, False):
+            why = "Turn on Own game data for this load order to use Offline mods."  # Make live again: always
+        elif busy is not None:
+            why = f"Can't change Offline mods {busy}."
+        item(menu, label, why is None, fn, tip=why or tip)
+        if mod_id in entries:  # Refresh Offline copy (0.6.18): the live mod copied afresh into this copy
+            st = self._live_status.get(mod_id, "unknown")
+            rwhy = (f"Can't change Offline mods {busy}." if busy is not None
+                    else "The live mod isn't installed, so there's nothing to copy from." if mod_id not in self._live_mods
+                    else None)
+            rtip = ("This load order's Offline copy is missing: copy the live mod into a new one"
+                    if mod is None or mod.get("source") != "pinned" else None) or {
+                    "changed": "The live mod has changed since this copy was made: copy it afresh",
+                    "same": "The live mod hasn't changed since this copy was made (refreshing re-copies it anyway)"
+                    }.get(st, "Copy the live mod afresh into this Offline copy (whether it changed isn't known)")
+            item(menu, "Refresh Offline copy", rwhy is None, lambda: self._refresh_offline([mod_id]), tip=rwhy or rtip)
         menu.addSeparator()
         first, second = steam_ops.menu_pair(via, mod)  # None = left out: a not-found row's never-applicable entries (0.6.14)
         if via == "gog":
@@ -3473,11 +4149,345 @@ class RimWorldMainScreen(QWidget):
                      kind is not None and mod_id not in self._unsubscribing and (kind == "delete" or self._steam_available),
                      lambda: self._unsubscribe(mod_id))
         official = (mod and mod["source"] == "official") or pkg.lower().startswith("ludeon.")
-        item(menu, "Remove completely...",
-             not official and mod_id not in self.downloading and mod_id not in self._unsubscribing,
-             lambda: self._remove_completely(mod_id))
+        if mod_id in entries:
+            # An Offline row (0.6.16 hardware review): Delete removes only this load order's copy - live copies and
+            # Steam untouched (the same effect as Make live again; kept both, user to decide)
+            item(menu, "Delete", busy is None and self.current_load_order is not None,
+                 lambda: self._delete_offline_copy(mod_id),
+                 tip=f"Can't change Offline mods {busy}." if busy else "Delete this load order's Offline copy only")
+        else:
+            item(menu, "Remove completely...",
+                 not official and mod_id not in self.downloading and mod_id not in self._unsubscribing,
+                 lambda: self._remove_completely(mod_id))
         menu.exec(pane.viewport().mapToGlobal(pos))
         menu.deleteLater()
+
+    # ---- Offline mods (0.6.16; offline_mods.py, screens/offline_mods_dialog.py) ----
+    def _lo_name(self, slug: str | None) -> str:
+        picker = self.load_order_picker
+        i = picker.findData(slug)
+        return picker.itemText(i) if i >= 0 else str(slug)
+
+    def _show_offline_mods(self) -> None:
+        """The "Offline mods..." button (own game data on): the dialog over every mod of the open
+        load order (the panes' ids, the overlaid mods, its entries); its Apply
+        confirms (_confirm_offline_changes) and the changes run as one Offline
+        job (_apply_offline_changes)."""
+        slug = self.current_load_order
+        if (not slug or self.game_dir is None or self._run_block() is not None
+                or not self._lo_own_data.get(slug, False)):
+            return
+        entries = self._offline_entries(slug)
+        rows = dialog_rows(self.active_list.mod_ids(), self.inactive_list.mod_ids(), self._mods, entries,
+                           live=self._live_status)
+        log(f"offline mods dialog opened for {slug}: {len(rows)} mods, {len(entries)} Offline, "
+            f"{sum(1 for r in rows if r['refusal'])} not eligible")
+        dialog = OfflineModsDialog(
+            rows, lambda c, l, z: self._confirm_offline_changes(slug, c, l, z, entries), self, lo_name=self._lo_name(slug),
+            confirm_refresh=lambda ids: self._confirm_refresh(slug, ids, entries),
+        )
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        to_copy, to_live = dialog.changes
+        refresh = list(dialog.refresh)
+        sizes = dict(dialog.sizes)
+        dialog.deleteLater()  # a child of the screen: don't keep one per opening
+        if not accepted:
+            log("offline mods dialog closed without changes")
+            return
+        if refresh:  # Refresh changed (already confirmed in the dialog)
+            self._refresh_offline(refresh, confirmed=True)
+            return
+        self._apply_offline_changes(slug, to_copy, to_live, sizes, entries)
+
+    def _confirm_refresh(self, slug: str, ids: list[str], entries: dict) -> bool:
+        """Refresh's confirm: how many copies, roughly how big (their current
+        sizes), and that each old copy stays until its new one is in place."""
+        local = offline_mods.local_mods_dir(load_orders.load_orders_root(self.app_root) / slug)
+        missing = [i for i in ids if not (local / str((entries.get(i) or {}).get("folder"))).is_dir()]
+        there = [i for i in ids if i not in missing]
+        title = "Refresh Offline copy" if len(ids) == 1 else "Refresh Offline copies"
+        if not there:  # every copy is gone: recreate it - no stale "about X MB now" for a copy that doesn't exist
+            if len(missing) == 1:
+                text = (f"This load order's Offline copy of \"{self._mod_display_name(missing[0])}\" is missing. "
+                        "Copy the live mod into a new one? Steam updates won't change it.")
+            else:
+                text = (f"{len(missing)} of this load order's Offline copies are missing. Copy their live mods into "
+                        "new ones? Steam updates won't change them.")
+            return self._confirm(title, text, confirm_label="Refresh")
+        n = len(there)
+        size = offline_mods.format_size(sum((entries.get(i) or {}).get("size_bytes") or 0 for i in there))
+        names = ", ".join(self._mod_display_name(i) for i in there[:5]) + (f" and {n - 5} more" if n > 5 else "")
+        text = (f"Copy the live mod afresh into {n} Offline cop{'y' if n == 1 else 'ies'} of \"{self._lo_name(slug)}\" "
+                f"({names}; about {size} now)? Each old copy is kept until its new one is in place, so a failure "
+                "leaves it as it was. Steam updates won't change the new copies either.")
+        if missing:
+            text += (f" {len(missing)} more Offline cop{'y is' if len(missing) == 1 else 'ies are'} missing and "
+                     "get a new copy from the live mod.")
+        return self._confirm(title, text, confirm_label="Refresh")
+
+    def _refresh_offline(self, ids: list[str], confirmed: bool = False) -> None:
+        """Refresh Offline copy (row menu) / Refresh changed (the dialog): one
+        Offline job re-copying each mod's LIVE source into its existing
+        Offline folder (offline_mods.refresh: new copy first, swap, old copy
+        dropped last). Mods whose live copy isn't installed are skipped."""
+        slug = self.current_load_order
+        entries = self._offline_entries(slug)
+        ids = [i for i in ids if i in entries and i in self._live_mods]
+        if not slug or not ids or self._run_block() is not None:
+            return
+        if not confirmed and not self._confirm_refresh(slug, ids, entries):
+            log(f"refresh offline {clip(ids)} in {slug}: cancelled")
+            return
+        tasks = [{"kind": "refresh", "id": i, "mod": dict(self._live_mods[i]), "entry": dict(entries[i])} for i in ids]
+        self._start_offline_job(slug, tasks, {i: entries[i].get("size_bytes") for i in ids}, "Refresh Offline copy")
+
+    def _confirm_offline_changes(self, slug: str, to_copy: list[str], to_live: list[str], sizes: dict,
+                                 entries: dict) -> bool:
+        """The dialog's Apply gate: what gets copied (count, total size, where)
+        and what is made live again (count, its copies deleted)."""
+        local = offline_mods.local_mods_dir(load_orders.load_orders_root(self.app_root) / slug)
+        parts = []
+        if to_copy:
+            n, size = len(to_copy), offline_mods.format_size(sum(sizes.get(i) or 0 for i in to_copy))
+            parts.append(f"Copies {n} mod{'' if n == 1 else 's'}, {size}, into this load order's own folder ({local}). "
+                         "Steam updates won't change those copies.")
+        if to_live:
+            n = len(to_live)
+            size = offline_mods.format_size(sum(entries[i].get("size_bytes") or 0 for i in to_live if i in entries))
+            parts.append(f"Makes {n} mod{'' if n == 1 else 's'} live again: {'its' if n == 1 else 'their'} Offline "
+                         f"cop{'y' if n == 1 else 'ies'} ({size}) {'is' if n == 1 else 'are'} deleted and this load order "
+                         "uses the live mod again.")
+        return self._confirm(f'Offline mods - "{self._lo_name(slug)}"', "\n\n".join(parts), confirm_label="Apply")
+
+    def _apply_offline_changes(self, slug: str, to_copy: list[str], to_live: list[str], sizes: dict,
+                               entries: dict) -> None:
+        tasks = [{"kind": "live", "id": i, "folder": entries[i]["folder"]} for i in to_live if i in entries]
+        clean = self._offline_entries_read(slug)  # None = unreadable: a leftover folder is then refused, never replaced
+        rest = None if clean is None else {k: v for k, v in clean.items() if k not in to_live}
+        tasks += [{"kind": "copy", "id": i, "mod": dict(self._mods[i]), "entries": rest} for i in to_copy if i in self._mods]
+        if tasks:
+            self._start_offline_job(slug, tasks, sizes, "Offline mods")
+
+    def _make_offline(self, mod_id: str) -> None:
+        """Row menu Make Offline: re-checks the refusal, confirms with the size, runs a one-mod Offline job."""
+        slug = self.current_load_order
+        mod = self._mods.get(mod_id)
+        entries = self._offline_entries(slug)
+        why = offline_mods.refusal(mod_id, mod, entries) if slug else "Open or create a load order first."
+        if why:
+            self._warn("Make Offline", why)
+            return
+        # ponytail: one folder measured on the GUI thread for this confirm (a short walk for a normal mod); move it
+        # to a worker like the dialog's sizes if a huge mod makes the menu stutter.
+        size = offline_mods.size_of(mod["path"])
+        local = offline_mods.local_mods_dir(self._load_order_dir())
+        if not self._confirm(
+            "Make Offline",
+            f'Make "{mod["name"]}" Offline in "{self._lo_name(slug)}"? Its folder ({offline_mods.format_size(size)}) '
+            f"is copied into this load order's own folder ({local}), and Steam updates won't change that copy.\n\n"
+            f"{offline_mods.OFFLINE_RUN_TEXT}",
+            confirm_label="Make Offline",
+        ):
+            log(f"make offline {mod_id} in {slug}: cancelled")
+            return
+        self._start_offline_job(slug, [{"kind": "copy", "id": mod_id, "mod": dict(mod),
+                                        "entries": self._offline_entries_read(slug)}], {mod_id: size}, "Make Offline")
+
+    def _make_live(self, mod_id: str) -> None:
+        """Row menu Make live again: confirms (the copy is deleted), runs a one-mod Offline job."""
+        slug = self.current_load_order
+        entry = self._offline_entries(slug).get(mod_id)
+        if entry is None:
+            return
+        name = self._mod_display_name(mod_id)
+        installed = mod_id in self._live_mods
+        if not self._confirm(
+            "Make live again",
+            f'Make "{name}" live again in "{self._lo_name(slug)}"? Its Offline copy '
+            f"({offline_mods.format_size(entry.get('size_bytes') or 0)}) is deleted and this load order uses the live "
+            "mod again" + ("." if installed else " - which isn't installed, so it will show as not found."),
+            confirm_label="Make live again",
+        ):
+            log(f"make live {mod_id} in {slug}: cancelled")
+            return
+        self._start_offline_job(slug, [{"kind": "live", "id": mod_id, "folder": entry["folder"]}], {}, "Make live again")
+
+    def _delete_offline_copy(self, mod_id: str) -> None:
+        """Row menu Delete on an Offline row: confirms, then deletes only this load order's copy (make_live's
+        path-contained delete) and drops the entry - no Steam check, live copies untouched."""
+        slug = self.current_load_order
+        entry = self._offline_entries(slug).get(mod_id)
+        if entry is None:
+            return
+        name = self._mod_display_name(mod_id)
+        copy_dir = offline_mods.local_mods_dir(self._load_order_dir()) / entry["folder"]
+        if not self._confirm(
+            "Delete Offline copy",
+            f'Delete this load order\'s Offline copy of "{name}" '
+            f"({offline_mods.format_size(entry.get('size_bytes') or 0)}, in {copy_dir})? Only that copy is deleted: "
+            "your installed mod and any Steam subscription stay as they are, and this load order uses the live mod "
+            "again" + ("." if mod_id in self._live_mods else " - which isn't installed, so it will show as not found."),
+            confirm_label="Delete",
+        ):
+            log(f"delete offline copy {mod_id} in {slug}: cancelled")
+            return
+        self._start_offline_job(slug, [{"kind": "live", "id": mod_id, "folder": entry["folder"]}], {}, "Delete Offline copy")
+
+    def _start_offline_job(self, slug: str, tasks: list[dict], sizes: dict, what: str) -> None:
+        """Runs `tasks` (_run_offline_job's) for load order `slug` on a daemon
+        thread. Leftover temp folders are swept first. The footer's copy row
+        shows the copies (progress, Cancel); each finished task updates the
+        manifest at once (_on_offline_item); _on_offline_done refreshes the
+        view and reports. One job at a time (_run_block blocks the entry
+        points, Modded / Vanilla and the Games button meanwhile)."""
+        if self._offline_job is not None:
+            self._warn(what, "Offline mods are already being copied - wait for that to finish.")
+            return
+        lo_dir = load_orders.load_orders_root(self.app_root) / slug
+        offline_mods.sweep(lo_dir)
+        for t in tasks:
+            t["lo_dir"] = lo_dir
+        cancel = threading.Event()
+        carrier = _OfflineJobEvent()  # no parent: owned by _offline_job and the thread
+        carrier.progress.connect(self._on_offline_progress, Qt.ConnectionType.QueuedConnection)
+        carrier.item.connect(self._on_offline_item, Qt.ConnectionType.QueuedConnection)
+        carrier.done.connect(self._on_offline_done, Qt.ConnectionType.QueuedConnection)
+        thread = threading.Thread(target=_run_offline_job, args=(tasks, cancel, carrier), name=f"offline-{slug}",
+                                  daemon=True)
+        copies = [t["id"] for t in tasks if t["kind"] != "live"]
+        self._offline_job = {
+            "carrier": carrier, "thread": thread, "cancel": cancel, "slug": slug, "what": what,
+            "names": {t["id"]: self._mod_display_name(t["id"]) for t in tasks}, "sizes": sizes,
+            "copied": [], "live": [], "refreshed": [], "failed": {}, "last": None,
+        }
+        self._copy_dl = download_state.start_download(None, copies, copies) if copies else None
+        self._render_copy_bar()
+        self._apply_load_order_state()  # Modded / Vanilla follow _run_block
+        thread.start()
+        log(f"offline mods: {what} for {slug} started (thread {thread.name}): "
+            f"{len(copies)} to copy {clip(copies)}, {len(tasks) - len(copies)} to make live")
+
+    @Slot(object)
+    def _on_offline_progress(self, ev: dict) -> None:
+        """Bytes copied of the current item: the copy row's pill and speed."""
+        job, dl = self._offline_job, self._copy_dl
+        if self._closed or job is None or dl is None:
+            return
+        total = job["sizes"].get(ev["id"]) or 0
+        last = job["last"]
+        speed = None
+        if last is not None and last[0] == ev["id"] and ev["at"] > last[2]:
+            speed = (ev["bytes"] - last[1]) / (ev["at"] - last[2])
+        job["last"] = (ev["id"], ev["bytes"], ev["at"])
+        percent = min(100.0, ev["bytes"] * 100 / total) if total else 0.0
+        self._copy_dl = replace(dl, cur=download_state.Current(ev["id"], percent, speed))
+        self._render_copy_bar()
+
+    @Slot(object)
+    def _on_offline_item(self, out: dict) -> None:
+        """One task finished: its manifest change written right away (on the
+        GUI thread; set_pinning touches nothing else), so what succeeded stays
+        recorded whatever happens to the rest. A copy that can't be recorded
+        is deleted again (nothing half-done is left)."""
+        job = self._offline_job
+        if self._closed or job is None:
+            return
+        t, slug = out["task"], job["slug"]
+        pid = t["id"]
+        ok = False
+        if out.get("cancelled"):
+            log(f"offline mods: {t['kind']} {pid} cancelled, nothing left behind")
+        elif "error" in out:
+            job["failed"][pid] = out["error"]
+        else:
+            try:
+                pinning = load_orders.load_load_order(self.app_root, slug)["pinning"]
+                entries = dict(pinning["mods"])
+                if t["kind"] == "live":
+                    entries.pop(pid, None)
+                else:
+                    entries[pid] = out["entry"]
+                load_orders.set_pinning(self.app_root, slug, {**pinning, "mods": entries})
+                ok = True
+            except (OSError, ValueError) as err:
+                job["failed"][pid] = f"couldn't update the load order ({err})"
+                if t["kind"] in ("copy", "clone"):  # a refreshed copy stays (its old one is already gone)
+                    try:
+                        offline_mods.make_live(t["lo_dir"], out["entry"]["folder"])
+                    except (OSError, offline_mods.OfflineError) as err2:
+                        log(f"offline mods: unrecorded copy of {pid} couldn't be removed: {err2!r}")
+            if ok:
+                job["live" if t["kind"] == "live" else "refreshed" if t["kind"] == "refresh" else "copied"].append(pid)
+                if out.get("skipped"):
+                    log(f"offline mods: {pid} made live; {len(out['skipped'])} leftover file(s) in an aside folder, "
+                        "swept next time")
+            log(f"offline mods: {t['kind']} {pid} in {slug}: {'done' if ok else 'FAILED - ' + job['failed'][pid]}")
+        if t["kind"] != "live" and self._copy_dl is not None and not out.get("cancelled"):
+            self._copy_dl = download_state.apply_download_event(
+                self._copy_dl, {"type": "item-done", "id": pid, "ok": ok, "message": job["failed"].get(pid)})
+            self._render_copy_bar()
+
+    @Slot(object)
+    def _on_offline_done(self, result: dict) -> None:
+        """The job ended: the copy row goes, the open load order's view is
+        re-overlaid when it was the job's (the on-screen Active list kept -
+        never an edit), and the outcome is reported: a notice, or a warning
+        naming each mod that failed (what succeeded stays)."""
+        job = self._offline_job
+        if self._closed or job is None:
+            return
+        self._offline_job = None
+        self._copy_dl = None
+        self._render_copy_bar()
+        slug, what, names = job["slug"], job["what"], job["names"]
+        if slug == self.current_load_order and self.game_dir is not None:
+            self._apply_overlay()
+            self._show_lists(self.active_list.mod_ids())
+        self._apply_load_order_state()
+        copied, live, failed, refreshed = job["copied"], job["live"], job["failed"], job["refreshed"]
+        log(f"offline mods: {what} for {slug} finished{' (cancelled)' if result.get('cancelled') else ''}: "
+            f"{len(copied)} copied, {len(live)} made live, {len(failed)} failed")
+        done = []
+        if copied:
+            done.append(f"{len(copied)} mod{'' if len(copied) == 1 else 's'} made Offline")
+        if live:
+            done.append("Offline copy deleted" if what == "Delete Offline copy" else f"{len(live)} made live again")
+        if refreshed:
+            done.append(f"{len(refreshed)} Offline cop{'y' if len(refreshed) == 1 else 'ies'} refreshed")
+        summary = (", ".join(done) + ".") if done else "Nothing changed."
+        if failed:
+            lines = "\n".join(f"{names.get(pid, pid)}: {why}" for pid, why in failed.items())
+            lead = ('The load order was created, but these mods couldn\'t be copied and aren\'t Offline in it:'
+                    if what == "Copy to new load order" else "These couldn't be changed:")
+            self._warn(what, f"{summary}\n\n{lead}\n{lines}")
+        elif result.get("cancelled"):
+            self._notice(what, "Cancelled: " + (", ".join(done) + "; the rest is unchanged." if done else "nothing changed."))
+        else:
+            self._notice(what, summary)
+
+    def _cancel_offline_job(self) -> None:
+        """The copy row's Cancel: the copy in progress stops at its next file
+        and is removed; what finished before stays (its button waits, disabled)."""
+        job = self._offline_job
+        if job is None or job["cancel"].is_set():
+            return
+        log(f"offline mods: cancel requested ({job['what']} for {job['slug']})")
+        job["cancel"].set()
+        if self._copy_dl is not None:
+            self._copy_dl = replace(self._copy_dl, pausing=True)
+            self._render_copy_bar()
+
+    def _render_copy_bar(self) -> None:
+        """The footer's copy row follows _copy_dl (hidden when None); the
+        Games button follows the job (_apply_games_button)."""
+        self._apply_games_button()
+        if self._copy_dl is None:
+            self.copy_bar.setVisible(False)
+            self.copy_bar.clear()
+            return
+        names = self._offline_job["names"] if self._offline_job else {}
+        self.copy_bar.render(self._copy_dl, names, copying=True)
+        self.copy_bar.setVisible(True)
 
     # ---- user Sort rules (screens/rules_window.py) ----
     def _create_rule(self, pkg: str) -> None:
@@ -3680,7 +4690,12 @@ class RimWorldMainScreen(QWidget):
         layout.addLayout(self._group(self.import_button, self.export_button))
 
         self.rescan_button = _button("Rescan")
-        layout.addLayout(self._group(self.rescan_button))
+        # Offline mods (0.6.16 hardware review): right under Rescan, shown only while the open load order has its
+        # own game data on (_apply_run_buttons), busy-gated like Modded (_run_block).
+        self.offline_button = _button("Offline mods...")
+        self.offline_button.setToolTip(OFFLINE_TOOLTIP)
+        self.offline_button.setVisible(False)
+        layout.addLayout(self._group(self.rescan_button, self.offline_button))
 
         self.sort_button = _button("Sort")
         self.save_button = _button("Save")
@@ -3701,8 +4716,19 @@ class RimWorldMainScreen(QWidget):
         layout.addLayout(self._group(self.scan_issues_button, self.issues_button))
 
         self.push_button = _button("Push", variant="accent-outline")
-        self.run_button = _button("Run", variant="primary")
-        layout.addLayout(self._group(self.push_button, self.run_button))
+        self.push_button.setToolTip(PUSH_TOOLTIP)
+        # Valheim's pair (0.6.15): Vanilla right above Modded (was "Run"; the
+        # attribute stays run_button), both with the play triangle.
+        self.vanilla_button = _button("Vanilla", variant="vanilla")
+        self.run_button = _button("Modded", variant="primary")
+        for button in (self.vanilla_button, self.run_button):
+            # the triangle in the button's label color (dark ink on the primary Modded)
+            button.setIcon(icons.play_icon(theme.INK, theme.DISABLED_FILL_TEXT) if button is self.run_button
+                           else icons.play_icon())
+            button.setIconSize(QSize(icons.PLAY_ICON_PX, icons.PLAY_ICON_PX))
+        self.vanilla_button.setToolTip(VANILLA_TOOLTIP)
+        self.run_button.setToolTip(MODDED_TOOLTIP_SHARED)
+        layout.addLayout(self._group(self.push_button, self.vanilla_button, self.run_button))
         return column
 
     @staticmethod
@@ -3765,5 +4791,10 @@ class RimWorldMainScreen(QWidget):
         self.download_bar = DownloadBar()
         self.download_bar.setVisible(False)
         row.addWidget(self.download_bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        # The Offline-mods copy row (0.6.16): the same row, "Copying..." with a Cancel (_render_copy_bar).
+        self.copy_bar = DownloadBar()
+        self.copy_bar.track.setAccessibleName("Offline copy progress")
+        self.copy_bar.setVisible(False)
+        row.addWidget(self.copy_bar, 0, Qt.AlignmentFlag.AlignVCenter)
         column.addWidget(footer)
         return box

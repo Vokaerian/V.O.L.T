@@ -117,6 +117,14 @@ name is elided to leave room for both (the same _layout_badge, via
 trailing_after); plain text on the name's baseline, not a bordered badge.
 Its title (the warnings, one per line) is folded into the row tooltip. The
 drag pill shows it the same way.
+
+Offline mods (RowDecor.offline, 0.6.16: the row's mod is the load order's
+Offline copy): a muted "Offline" badge (OFFLINE_BADGE_TEXT) in the .dds
+badge's place, box and colors - one .row gap after the name, the "!" after
+it - through the same _layout_badge / paint path (_badge_text picks the
+text; a row is never both, a .dds leftover has no packageId). Its title is
+folded into the row tooltip (mod_decorations.row_tooltip). The drag pill
+shows it the same way.
 """
 
 import math
@@ -574,6 +582,7 @@ MATCH_BAR_WIDTH = 3
 # line, 3px side padding, 1px border, 2px radius, min-width 14px.
 BADGE_TEXT = "L"  # the Official badge's width reference: the old "L" + padding; the glyph is a drawn check
 DDS_BADGE_TEXT = ".dds"  # .row-badge.dds-leftover: same box, --muted border + text
+OFFLINE_BADGE_TEXT = "Offline"  # an Offline mod (RowDecor.offline): the .dds badge's box and colors, this text
 ROW_WARN_TEXT = "!"  # .row-warn: plain text, bold, --warn, the row's font size
 BADGE_FONT_PX = 10
 BADGE_HEIGHT = 15  # line-height 13 + the 1px border top and bottom
@@ -695,6 +704,8 @@ class ModRowDelegate(QStyledItemDelegate):
         # paint, initStyleOption leaves the trailing badge's rect in _badge_at.
         self._badge_after = False
         self._badge_at: QRectF | None = None
+        # The trailing badge's text while _badge_after is set: ".dds", or "Offline" for an Offline mod.
+        self._badge_text = DDS_BADGE_TEXT
         # And for a row with mod warnings: _warn_after set around its base
         # paint, initStyleOption leaves the "!" mark's (x, baseline y) in _warn_at.
         self._warn_after = False
@@ -808,7 +819,7 @@ class ModRowDelegate(QStyledItemDelegate):
             right = text_rect.right() + 1 - margin
         widths = []
         if self._badge_after:
-            badge_w = badge_width(badge_font(view), DDS_BADGE_TEXT)
+            badge_w = badge_width(badge_font(view), self._badge_text)
             widths.append(badge_w)
         if self._warn_after:
             widths.append(issue_glyph_width(view, ROW_WARN_TEXT))
@@ -965,7 +976,8 @@ class ModRowDelegate(QStyledItemDelegate):
         subscribe = view.subscribe_rect(decor, opt.rect)
         suffix = name_suffix(decor)
         if (clip is None and opacity is None and not bar and not tinted and not icons and not decor.conflict
-                and suffix is None and subscribe is None and not decor.dds_leftover and not decor.row_warn):
+                and suffix is None and subscribe is None and not decor.dds_leftover and not decor.offline
+                and not decor.row_warn):
             super().paint(painter, opt, index)
             return
         painter.save()
@@ -979,13 +991,15 @@ class ModRowDelegate(QStyledItemDelegate):
         if controls_left is not None:
             self._text_right = controls_left - ROW_GAP  # .row gap between the name and .row-issues / the button
         self._suffix = suffix
-        self._badge_after = decor.dds_leftover
+        self._badge_after = decor.dds_leftover or decor.offline
+        badge_text = self._badge_text = DDS_BADGE_TEXT if decor.dds_leftover else OFFLINE_BADGE_TEXT
         self._warn_after = decor.row_warn
         try:
             super().paint(painter, opt, index)
         finally:
             self._text_right = self._suffix = None
             self._badge_after = self._warn_after = False
+            self._badge_text = DDS_BADGE_TEXT
             suffix_at, self._suffix_at = self._suffix_at, None
             badge_at, self._badge_at = self._badge_at, None
             warn_at, self._warn_at = self._warn_at, None
@@ -997,7 +1011,7 @@ class ModRowDelegate(QStyledItemDelegate):
         if suffix_at is not None:
             paint_row_suffix(painter, suffix_at, view)
         if badge_at is not None:
-            paint_row_badge(painter, badge_at, badge_font(view), DDS_BADGE_TEXT, theme.MUTED)
+            paint_row_badge(painter, badge_at, badge_font(view), badge_text, theme.MUTED)
         if warn_at is not None:
             paint_row_warn(painter, warn_at, view)
         if icons:
@@ -1591,12 +1605,12 @@ class ModListView(QListView):
         name (mod_decorations.name_is_red: an outdated or conflicting mod,
         RowLabel's outdated || conflict; a not-found row unless pending) and
         a not-found row's muted suffix (pending / downloading / not found),
-        and the trailing .dds badge and "!" warning mark flags."""
+        and the trailing .dds badge, "!" warning mark and Offline badge flags."""
         model = self.mod_model
         decor = model.decor_at(row)
         text = model.data(model.index(row, 0)) or model.id_at(row) or ""
         return RowLabel(text, decor.official, name_is_red(decor), name_suffix(decor), decor.dds_leftover,
-                        decor.row_warn)
+                        decor.row_warn, decor.offline)
 
     # ---- issue icons (ModList.jsx RowIssues) ----
     def issue_icons(self, decor: RowDecor, rect) -> list:
@@ -2242,8 +2256,9 @@ class RowLabel(NamedTuple):
     row's text, whether it shows the official badge, whether the name is
     red (`outdated`: mod_decorations.name_is_red), and a not-found row's
     muted suffix ("(pending)" / "⟳ downloading…"; None: none), whether
-    the .dds badge follows the name (RowDecor.dds_leftover) and whether the
-    "!" warning mark follows that (RowDecor.row_warn).
+    the .dds badge follows the name (RowDecor.dds_leftover), whether the
+    "!" warning mark follows that (RowDecor.row_warn) and whether the badge
+    is the Offline one instead (RowDecor.offline).
     ModListView.row_label."""
 
     text: str
@@ -2252,6 +2267,7 @@ class RowLabel(NamedTuple):
     suffix: str | None = None
     dds_leftover: bool = False
     row_warn: bool = False
+    offline: bool = False
 
 
 class DragOverlay(QWidget):
@@ -2326,21 +2342,22 @@ def drag_pill_pixmap(widget: QWidget, label: RowLabel, size: QSize) -> QPixmap:
     metrics = widget.fontMetrics()
     available = max(0, int(text_rect.width()))
     name_room = available
-    if label.dds_leftover or label.row_warn:
+    badge = DDS_BADGE_TEXT if label.dds_leftover else OFFLINE_BADGE_TEXT if label.offline else None
+    if badge or label.row_warn:
         # As the row's own (ModRowDelegate._layout_badge): the name's box
         # shrinks to leave ROW_GAP + the badge and / or the "!", which follow it.
         widths = []
-        if label.dds_leftover:
+        if badge:
             font = badge_font(widget)
-            dds_w = badge_width(font, DDS_BADGE_TEXT)
+            dds_w = badge_width(font, badge)
             widths.append(dds_w)
         if label.row_warn:
             widths.append(issue_glyph_width(widget, ROW_WARN_TEXT))
         name_room, xs = trailing_after(metrics.horizontalAdvance(label.text), widths, available)
-        if label.dds_leftover:
+        if badge:
             badge_top = math.floor(pill.center().y() - BADGE_HEIGHT / 2 + 0.5)
             rect = QRectF(text_rect.left() + xs[0], badge_top, dds_w, BADGE_HEIGHT)
-            paint_row_badge(painter, rect, font, DDS_BADGE_TEXT, theme.MUTED)
+            paint_row_badge(painter, rect, font, badge, theme.MUTED)
     elided = metrics.elidedText(label.text, Qt.TextElideMode.ElideRight, name_room)
     painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
     if label.row_warn:

@@ -73,6 +73,30 @@ def _err_code(err: BaseException) -> str:
 _is_junction = getattr(os.path, "isjunction", lambda p: False)  # 3.12+; a junction is a link, never walked
 
 
+def is_link(p) -> bool:
+    """A symlink or (Windows) junction: removed as a link, never walked into."""
+    return os.path.islink(p) or _is_junction(p)
+
+
+def rmtree_force(dir) -> None:
+    """shutil.rmtree that also removes Windows read-only files (a Workshop
+    mod's files can carry the attribute; a plain rmtree stops at the first
+    one): one chmod-and-retry per refused entry. Raises like rmtree otherwise.
+    rmtree itself never follows a symlink / junction inside the tree."""
+    import shutil
+    import stat
+    import sys
+
+    def retry(func, path, _exc) -> None:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(dir, onexc=retry)
+    else:  # the device-shell harnesses run 3.10
+        shutil.rmtree(dir, onerror=retry)
+
+
 def remove_tree_best_effort(dir) -> dict:
     """Best-effort recursive delete (fsutil.js removeTreeBestEffort:
     Unsubscribe's Workshop-folder cleanup, a SteamCMD copy's removal):

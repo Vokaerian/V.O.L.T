@@ -141,7 +141,6 @@ rows' controls) and shows in the status text. The check pass is read-only
 and may overlap a job.
 """
 
-import functools
 import re
 import threading
 import time
@@ -149,8 +148,8 @@ from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QPolygonF, QShortcut
+from PySide6.QtCore import QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -253,7 +252,7 @@ BROWSE_TOOLTIP = "Browse Thunderstore's {game} mods and install them into the op
 # The two launch buttons' tooltips ({game} = the game module's NAME).
 MODDED_TOOLTIP = "Launch {game} with this load order's mods (BepInEx)."
 VANILLA_TOOLTIP = "Launch {game} without mods or BepInEx."
-PLAY_ICON_PX = 12  # the play triangle's logical size on the Modded / Vanilla buttons
+PLAY_ICON_PX = icons.PLAY_ICON_PX
 ADD_MOD_PROMPT = (
     "Thunderstore package to install, with its dependencies, into the open load order.\n"
     "A package name (Team-Package, e.g. ValheimModding-Jotunn) or its thunderstore.io page URL:"
@@ -262,38 +261,9 @@ ADD_MOD_PROMPT = (
 _PACKAGE_URL = re.compile(r"thunderstore\.io/(?:c/[^/]+/p|package)/([A-Za-z0-9_]+)/([A-Za-z0-9_]+)/?", re.IGNORECASE)
 
 
-def _play_polygon(size: float) -> QPolygonF:
-    """A solid right-pointing triangle filling a size x size box: 80% tall,
-    centered, its width the equilateral 0.87 x height."""
-    top, bottom = size * 0.1, size * 0.9
-    left = size * 0.15
-    return QPolygonF([QPointF(left, top), QPointF(left, bottom), QPointF(left + (bottom - top) * 0.87, size / 2)])
-
-
-@functools.cache
-def _play_icon(color: str = theme.TEXT, disabled: str = theme.MUTED) -> QIcon:
-    """The play triangle on the Modded / Vanilla buttons, drawn by Qt itself
-    (no asset), in the button's own label colors so it matches the text:
-    `color` for QIcon.Mode.Normal, `disabled` for QIcon.Mode.Disabled (Qt
-    picks that pixmap itself whenever the button is disabled). The defaults
-    are the plain / vanilla button's (theme.py: --text, --muted when
-    disabled); Modded, a primary, passes theme.INK / theme.DISABLED_FILL_TEXT.
-    Rendered at 2x (as _eye_icon), shown at PLAY_ICON_PX. Cached per color
-    pair."""
-    icon = QIcon()
-    size = PLAY_ICON_PX * 2
-    for mode, value in ((QIcon.Mode.Normal, color), (QIcon.Mode.Disabled, disabled)):
-        color_ = QColor(value)
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color_)
-        painter.drawPolygon(_play_polygon(size))
-        painter.end()
-        icon.addPixmap(pixmap, mode)
-    return icon
+# The play triangle moved to icons.py (0.6.15) so RimWorld's Modded / Vanilla
+# share it; these names stay for this screen and its harness.
+_play_icon = icons.play_icon
 
 
 def _now() -> str:

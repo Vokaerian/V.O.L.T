@@ -13,6 +13,9 @@ screen computes it from the scanned mods (ids are lowercased packageIds;
 import re
 from typing import NamedTuple
 
+from .mods import PINNED_FROM
+from .offline_mods import LIVE_CHANGED_NOTE, OFFLINE_NOTE
+
 
 class RowDecor(NamedTuple):
     """What a pane row shows beyond its name and color swatch (ModList.jsx
@@ -54,7 +57,13 @@ class RowDecor(NamedTuple):
                   when both apply (.row-warn): the scanned mod's `warnings`
                   (mods.py: no packageId, a duplicate copy ignored) is
                   non-empty. Scanned mods only, so never with a name suffix;
-                  every dds_leftover mod has one (no packageId)."""
+                  every dds_leftover mod has one (no packageId).
+      offline     the muted "Offline" badge right after the name, in the
+                  .dds badge's place and style (never both: a .dds leftover
+                  has no packageId, so it can't be made Offline): the row's
+                  mod is this load order's Offline copy (source 'pinned',
+                  offline_mods.overlay). The "!" mark follows it, as it
+                  follows the .dds badge."""
 
     official: bool = False
     outdated: bool = False
@@ -68,6 +77,7 @@ class RowDecor(NamedTuple):
     not_found: bool = False
     dds_leftover: bool = False
     row_warn: bool = False
+    offline: bool = False
 
 
 NO_DECOR = RowDecor()
@@ -187,6 +197,15 @@ def row_tooltip(
         lines.append(OFFICIAL_NOTE)
     if decor.dds_leftover:
         lines.append(DDS_LEFTOVER_NOTE)
+    if decor.offline and mod is not None:
+        lines.append(OFFLINE_NOTE)  # the Offline badge's own title, folded in like the .dds one
+        entry = mod.get("pinned") or {}
+        src = PINNED_FROM.get(entry.get("origin"))
+        when = str(entry.get("copied_at") or "")[:10]
+        if src or when:
+            lines.append("Copied" + (f" from {src}" if src else "") + (f" on {when}" if when else ""))
+        if mod.get("live_changed"):  # the screen's live-changed check (0.6.18)
+            lines.append(LIVE_CHANGED_NOTE)
     if decor.row_warn and mod is not None:
         lines.extend(mod.get("warnings") or ())  # .row-warn's title: warnings.join('\n')
     if decor.outdated and mod is not None:

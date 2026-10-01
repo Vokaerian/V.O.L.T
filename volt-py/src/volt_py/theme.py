@@ -1656,6 +1656,41 @@ QLabel[role="collection-title"] {{
     font-weight: 600;
 }}
 
+/* ---- Offline mods dialog (screens/offline_mods_dialog.py, 0.6.16): the checklist as
+   the scan rail's card (--panel-2, --border), rows hover --hover and
+   select --selected; header cells in --muted. Pairs: --text on --panel-2 12.0,
+   --hover 10.0, --selected 10.1; --muted (header, disabled rows) on --panel-2 5.7,
+   --hover 4.7, --selected 4.75. ---- */
+QDialog#offlineMods {{
+    background: {PANEL};
+}}
+QTreeWidget#offlineModsList {{
+    background: {PANEL_2};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+    outline: 0;
+}}
+QTreeWidget#offlineModsList::item {{
+    padding: 2px 4px;
+}}
+QTreeWidget#offlineModsList::item:hover {{
+    background: {HOVER};
+}}
+QTreeWidget#offlineModsList::item:selected {{
+    background: {SELECTED};
+    color: {TEXT};
+}}
+QTreeWidget#offlineModsList::item:disabled {{
+    color: {MUTED};
+}}
+QTreeWidget#offlineModsList QHeaderView::section {{
+    background: {PANEL_2};
+    color: {MUTED};
+    border: 0;
+    border-bottom: 1px solid {BORDER};
+    padding: 3px 6px;
+}}
+
 /* ---- Sync to Steam heads-up (RimWorldMainScreen._confirm_sync; .modal) ---- */
 QDialog#syncConfirm {{
     background: {PANEL};

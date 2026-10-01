@@ -1,6 +1,8 @@
 """The game's real ModsConfig.xml (port of Electron's
 src/electron/lib/modsConfig.js). Reading is harmless; writing happens ONLY via
-push_mods_config (the "Push" action, SCOPE.md §2a). Push replaces just the
+push_mods_config: the "Push" action (SCOPE.md §2a) into the real Config
+folder, and a Modded run of an own-game-data load order into that load
+order's own copy (rimworld_launch.prepare_data - never the real file). Push replaces just the
 <activeMods> block and leaves everything else in the file byte-for-byte
 (version, knownExpansions, BOM, line endings), after copying the current file
 to ModsConfig.xml.volt-backup (a single rolling backup, overwritten each push).
@@ -64,15 +66,26 @@ def apply_active_mods(xml_text: str, ids: list[str]) -> str:
     return xml_text[: close.start()] + indent + render_active_mods(ids, indent, eol) + eol + xml_text[close.start() :]
 
 
-def fresh_mods_config(ids: list[str], game_version: str | None, eol: str) -> str:
+def fresh_mods_config(ids: list[str], game_version: str | None, eol: str, known_expansions=()) -> str:
+    """A new file: <version> (when known), <activeMods>, then <knownExpansions>
+    when given (rimworld_launch seeds a load order's own copy with the real
+    file's list, so the game doesn't greet every DLC as new)."""
     lines = ['<?xml version="1.0" encoding="utf-8"?>', "<ModsConfigData>"]
     if game_version:
         lines.append(f"  <version>{escape_xml(game_version)}</version>")
-    lines += ["  " + render_active_mods(ids, "  ", eol), "</ModsConfigData>", ""]
+    lines.append("  " + render_active_mods(ids, "  ", eol))
+    if known_expansions:
+        lines += ["  <knownExpansions>", *(f"    <li>{escape_xml(i)}</li>" for i in known_expansions), "  </knownExpansions>"]
+    lines += ["</ModsConfigData>", ""]
     return eol.join(lines)
 
 
-def push_mods_config(config_dir, active_ids: list[str], game_version: str | None = None) -> dict:
+def push_mods_config(config_dir, active_ids: list[str], game_version: str | None = None, known_expansions=()) -> dict:
+    """Writes `active_ids` (minus ids RimWorld can't take) into
+    <config_dir>/ModsConfig.xml: only <activeMods> replaced in an existing
+    file (rolling .volt-backup first), else a fresh file with game_version /
+    known_expansions. Used by Push (the real Config folder) and by
+    rimworld_launch.prepare_data (a load order's own <LO>/data/Config)."""
     if not is_dir(config_dir):
         raise ValueError(f"Config folder not found: {config_dir}. Launch RimWorld once, or set the folder manually.")
     all_ids = clean_ids(active_ids)
@@ -86,6 +99,6 @@ def push_mods_config(config_dir, active_ids: list[str], game_version: str | None
         backup_path = file.with_name(file.name + BACKUP_SUFFIX)
         shutil.copyfile(file, backup_path)
     else:
-        out = fresh_mods_config(ids, game_version, "\r\n" if sys.platform == "win32" else "\n")
+        out = fresh_mods_config(ids, game_version, "\r\n" if sys.platform == "win32" else "\n", known_expansions)
     write_text_atomic(file, out)
     return {"path": file, "backup_path": backup_path, "count": len(ids), "skipped": len(all_ids) - len(ids)}

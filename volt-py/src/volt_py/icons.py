@@ -26,7 +26,7 @@ import math
 import sys
 
 from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QObject, QPoint, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QIconEngine, QPainter, QPainterPath, QPen, QPixmap, QTransform
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QIconEngine, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import QInputDialog, QLabel, QProxyStyle, QPushButton, QStyle, QWidget
 
 from volt_py import painters, theme
@@ -312,6 +312,44 @@ class _Engine(QIconEngine):
         return False
 
 
+PLAY_ICON_PX = 12  # the play triangle's logical size on the Modded / Vanilla buttons
+
+
+def _play_polygon(size: float) -> QPolygonF:
+    """A solid right-pointing triangle filling a size x size box: 80% tall,
+    centered, its width the equilateral 0.87 x height."""
+    top, bottom = size * 0.1, size * 0.9
+    left = size * 0.15
+    return QPolygonF([QPointF(left, top), QPointF(left, bottom), QPointF(left + (bottom - top) * 0.87, size / 2)])
+
+
+@functools.cache
+def play_icon(color: str = theme.TEXT, disabled: str = theme.MUTED) -> QIcon:
+    """The play triangle on the Modded / Vanilla buttons, drawn by Qt itself
+    (no asset), in the button's own label colors so it matches the text:
+    `color` for QIcon.Mode.Normal, `disabled` for QIcon.Mode.Disabled (Qt
+    picks that pixmap itself whenever the button is disabled). The defaults
+    are the plain / vanilla button's (theme.py: --text, --muted when
+    disabled); Modded, a primary, passes theme.INK / theme.DISABLED_FILL_TEXT.
+    Rendered at 2x, shown at PLAY_ICON_PX. Cached per color
+    pair. Moved here from bepinex_main_screen.py (0.6.15) for RimWorld's
+    Modded / Vanilla too."""
+    icon = QIcon()
+    size = PLAY_ICON_PX * 2
+    for mode, value in ((QIcon.Mode.Normal, color), (QIcon.Mode.Disabled, disabled)):
+        color_ = QColor(value)
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color_)
+        painter.drawPolygon(_play_polygon(size))
+        painter.end()
+        icon.addPixmap(pixmap, mode)
+    return icon
+
+
 @functools.lru_cache(maxsize=128)
 def icon(name: str, color: str = theme.TEXT, disabled: str = theme.MUTED) -> QIcon:
     """A QIcon of drawn icon `name`: `color` normally, `disabled` when the
@@ -367,6 +405,8 @@ _DIALOG_ICONS = {
 _INDICATORS = {
     QStyle.PrimitiveElement.PE_IndicatorRadioButton: ("radio", "radio-on"),
     QStyle.PrimitiveElement.PE_IndicatorCheckBox: ("box", "box-checked"),
+    # an item view's checkbox (the Offline mods dialog's checklist, 0.6.16): the same drawn box
+    QStyle.PrimitiveElement.PE_IndicatorItemViewItemCheck: ("box", "box-checked"),
 }
 
 
