@@ -1927,10 +1927,12 @@ class RimWorldMainScreen(QWidget):
     def _pane_ids(self, pane: ModListView) -> list[str]:
         return pane.mod_ids()
 
-    def _create_load_order(self, title: str, active=None, inactive=None, message: str | None = None) -> bool:
+    def _create_load_order(
+        self, title: str, active=None, inactive=None, message: str | None = None, note: str = ""
+    ) -> bool:
         """Prompts for a name (under `message`, when given - NameDialog.jsx's
         text above the input), creates the load order and makes it current.
-        False if cancelled/failed."""
+        `note` is appended to the created/failed log line. False if cancelled/failed."""
         name, ok = QInputDialog.getText(self, title, f"{message}\n\nName:" if message else "Name:")
         if not ok or not name.strip():
             log(f"{title}: {'cancelled' if not ok else 'empty name entered'}, nothing created")
@@ -1939,22 +1941,27 @@ class RimWorldMainScreen(QWidget):
         try:
             manifest = load_orders.create_load_order(self.app_root, name, active=active, inactive=inactive)
         except (OSError, ValueError) as err:
-            log(f"{title}: create {name!r} ({counts}) failed")
+            log(f"{title}: create {name!r} ({counts}){note} failed")
             self._warn("Couldn't create load order", str(err))
             return False
-        log(f"{title}: created {name!r} as slug {manifest['slug']} ({counts})")
+        log(f"{title}: created {name!r} as slug {manifest['slug']} ({counts}){note}")
         self._settings.update({"last_load_order": manifest["slug"]})
         self._reload_load_order_picker(select_slug=manifest["slug"])
         self._reset_baseline()  # Copy/Push: the panes now match what was just saved
         return True
 
     def _new_load_order(self) -> None:
-        # Blank: every scanned mod lands in Inactive. (Electron pre-fills Core +
-        # DLC in release order; that needs the unported Sort logic.)
+        # Core + every installed DLC active in release order (sort.official_ids),
+        # every other scanned mod inactive - the same lists a Save right after
+        # would write. Nothing scanned (no game folder) -> both empty.
         if not self._confirm_discard():
             log("New load order: cancelled at the discard-changes prompt")
             return
-        if self._create_load_order("New load order"):
+        official = sort.official_ids(self._mods)
+        rest = [i for i in sorted(self._mods, key=self._order.__getitem__) if i not in official]
+        if self._create_load_order(
+            "New load order", active=official, inactive=rest, note=f", official ids active: {clip(official)}"
+        ):
             self._apply_current_load_order_to_panes()
 
     def _copy_to_new_load_order(self) -> None:

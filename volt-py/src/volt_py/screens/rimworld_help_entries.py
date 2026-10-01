@@ -69,9 +69,10 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
     },
     {
         "name": "New load order",
-        "short": "Starts a new, empty load order under a name you choose.",
+        "short": "Starts a new load order under a name you choose, with Core and your DLC active.",
         "long": (
-            "Every installed mod starts out in the Inactive list, so you can build the Active list from scratch. "
+            "Core and every installed DLC start out in the Active list, in release order; every other installed "
+            "mod starts in the Inactive list, so you can build the rest of the Active list from there. "
             "If the current load order has unsaved changes, VOLT asks before discarding them. The new load order "
             "becomes the one that's open."
         ),
