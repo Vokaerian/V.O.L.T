@@ -1,23 +1,50 @@
-"""Valheim's entries for the Help window (screens/help_window.py): one per
-button/control on the Valheim manager screen (screens/bepinex_main_screen.py),
-the row right-click menu grouped into one entry, as RimWorld's
-(rimworld_help_entries.py; the list THUNDERSTORE.md §6 scoped, written
-against what the screen actually does today).
+"""The Help window's entries (screens/help_window.py) for every Thunderstore/
+BepInEx game's manager screen (screens/bepinex_main_screen.py): one per
+button/control, the row right-click menu grouped into one entry, as
+RimWorld's (rimworld_help_entries.py; the list THUNDERSTORE.md §6 scoped,
+written against what the screen actually does today).
 
 Plain data, no Qt. The window sorts by name itself; kept roughly in
 on-screen order (header, load-order bar, panes, rows, actions column).
-Update an entry whenever the control it describes changes. The next
-BepInEx game copies this file and swaps the game name.
+Update an entry whenever the control it describes changes.
+
+Shared by every game in bepinex_games.GAMES: "{game}" becomes the game
+module's NAME and "{example_package}" its EXAMPLE_PACKAGE (a well-known
+Team-Package of that community); Steam is literal - every Thunderstore game
+here is Steam-only (paths.find_steam_app, bepinex_launch). A game whose
+screen truly differs sets, in its own module, HELP_OVERRIDES (entry name ->
+the fields to replace, same placeholders) and/or HELP_EXTRA (whole entries
+appended at the end). Valheim needs neither: help_entries(valheim) is,
+string for string, the old VALHEIM_HELP_ENTRIES
+(tools/checks/volt_py_bepinex_games.py).
 """
 
-VALHEIM_HELP_ENTRIES: list[dict] = [
+
+def _fill(text: str, values: dict) -> str:
+    # Plain replace, not str.format: an entry's text may hold literal braces.
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", value)
+    return text
+
+
+def help_entries(game) -> list[dict]:
+    """`game`'s Help entries: BEPINEX_HELP_ENTRIES with its HELP_OVERRIDES
+    merged in by name, then its HELP_EXTRA, every string filled from it."""
+    values = {"game": game.NAME, "example_package": game.EXAMPLE_PACKAGE}
+    overrides = getattr(game, "HELP_OVERRIDES", {})
+    entries = [{**e, **overrides.get(e["name"], {})} for e in BEPINEX_HELP_ENTRIES]
+    entries += list(getattr(game, "HELP_EXTRA", ()))
+    return [{k: _fill(v, values) for k, v in e.items()} for e in entries]
+
+
+BEPINEX_HELP_ENTRIES: list[dict] = [
     # ---- header ----
     {
         "name": "Settings",
-        "short": "Opens the Settings window, where you tell VOLT where Valheim is installed.",
+        "short": "Opens the Settings window, where you tell VOLT where {game} is installed.",
         "long": (
             "General shows the game folder with a Browse button, plus Autodetect to find your Steam install for "
-            "you. It's the only path Valheim needs: every load order keeps its mods and their BepInEx config in "
+            "you. It's the only path {game} needs: every load order keeps its mods and their BepInEx config in "
             "its own folder under VOLT's data folder, never inside the game. Troubleshooting opens VOLT's log "
             "file (or the one from the previous run), which is handy when reporting a problem. Its Clean cache "
             "button deletes downloaded mod files that no load order uses any more, to free up space - a "
@@ -26,7 +53,7 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
     },
     {
         "name": "Paths: Game folder",
-        "short": "Opens Valheim's install folder in your file explorer.",
+        "short": "Opens {game}'s install folder in your file explorer.",
         "long": (
             "This is the \"Game\" link next to \"Paths:\" at the top of the window. It's greyed out until a game "
             "folder is set. Hover it to see the full path. The line under the links spells out the game folder "
@@ -70,7 +97,7 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
         "name": "New load order",
         "short": "Creates an empty load order with BepInEx set up in it.",
         "long": (
-            "Asks for a name, then downloads BepInExPack for Valheim from Thunderstore (or takes it from VOLT's "
+            "Asks for a name, then downloads BepInExPack for {game} from Thunderstore (or takes it from VOLT's "
             "cache if another load order already fetched it) and installs it into the new load order's folder, "
             "so it's ready to run right away. That framework package is pinned at the top of the Active list."
         ),
@@ -197,7 +224,7 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
         "name": "Framework row (BepInExPack)",
         "short": "The pinned first row of the Active list: BepInEx itself.",
         "long": (
-            "Every load order is built on Thunderstore's BepInExPack for Valheim, installed when the load order "
+            "Every load order is built on Thunderstore's BepInExPack for {game}, installed when the load order "
             "is created. It's pinned at the top of Active, can't be dragged, switched off, moved to Inactive or "
             "uninstalled, and gets the yellow update button like any mod when a newer pack is out."
         ),
@@ -243,7 +270,7 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
         "name": "Add mod",
         "short": "Installs a Thunderstore package into the open load order.",
         "long": (
-            "Asks for a package: its Team-Package name (as on Thunderstore, e.g. ValheimModding-Jotunn) or the "
+            "Asks for a package: its Team-Package name (as on Thunderstore, e.g. {example_package}) or the "
             "address of its thunderstore.io page. VOLT downloads its latest version (or takes it from the "
             "cache), installs any of its dependencies that aren't in the load order yet, and appends it to the "
             "Active list switched on. Downloads are shared: a package fetched once is reused by every load "
@@ -253,7 +280,7 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
     },
     {
         "name": "Browse Mods",
-        "short": "Opens the in-app Thunderstore browser to find Valheim mods and install them into the open load order.",
+        "short": "Opens the in-app Thunderstore browser to find {game} mods and install them into the open load order.",
         "long": (
             "Search by name, narrow by category, and sort by most downloaded (the starting order), last updated, "
             "top rated or newest - each page comes straight from Thunderstore as you ask for it, so nothing is "
@@ -307,17 +334,17 @@ VALHEIM_HELP_ENTRIES: list[dict] = [
     },
     {
         "name": "Modded and Vanilla",
-        "short": "The two play buttons: Modded starts Valheim with the open load order, Vanilla without mods or BepInEx.",
+        "short": "The two play buttons: Modded starts {game} with the open load order, Vanilla without mods or BepInEx.",
         "long": (
             "Modded copies the load order's two BepInEx loader files (winhttp.dll and doorstop_config.ini) into the "
-            "Valheim folder - anything already there under those names is set aside - and starts the game through "
+            "{game} folder - anything already there under those names is set aside - and starts the game through "
             "Steam with launch arguments that point BepInEx at the load order's own folder, so the game install "
             "itself stays as it is; when the game exits, the copied files are removed and anything set aside is put "
-            "back. Vanilla starts Valheim through Steam as it is, with nothing copied and no BepInEx - it needs "
+            "back. Vanilla starts {game} through Steam as it is, with nothing copied and no BepInEx - it needs "
             "no load order open. Either way "
-            "the screen stays locked while Valheim runs, and a game left running when VOLT closes is picked up "
+            "the screen stays locked while {game} runs, and a game left running when VOLT closes is picked up "
             "again the next time this screen opens. Neither button saves: with unsaved changes Modded asks first "
-            "and Valheim gets the load order as it was last saved, and it also asks before starting with mods "
+            "and {game} gets the load order as it was last saved, and it also asks before starting with mods "
             "whose dependencies aren't installed."
         ),
     },

@@ -1,8 +1,11 @@
 """Valheim's own constants and path detection (VALHEIM.md SCOPE): the
 per-game instance of the Thunderstore/BepInEx pattern. Everything generic
 lives in thunderstore.py / bepinex_install.py / bepinex_load_orders.py; this
-module holds only what differs per game, so the next BepInEx game
-(Lethal Company, R.E.P.O.) is a copy of this file with new values.
+module holds only what differs per game. Every other BepInEx game (lethal.py;
+R.E.P.O. next) is a module of this shape with its own values, one row in
+bepinex_games.GAMES, and - only where its manager screen truly differs -
+HELP_OVERRIDES / HELP_EXTRA for screens/bepinex_help_entries.py. The required
+attributes are pinned by tools/checks/volt_py_bepinex_games.py.
 
 Steam only - no GOG release, no Steam Workshop; Thunderstore is the sole mod
 source, so paths.py's Workshop/Mods-folder/config-dir helpers don't apply
@@ -23,6 +26,7 @@ STEAM_INSTALLDIR = "Valheim"  # appmanifest installdir fallback when the .acf is
 DATA_DIR = "valheim_Data"  # Unity data folder beside the exe (holds Managed/ - confirmed on the real install)
 GAME_EXES = ["valheim.exe", "valheim.x86_64"]  # Windows / Linux; no macOS build
 FRAMEWORK_PACKAGE = "denikson-BepInExPack_Valheim"  # Thunderstore's pinned BepInEx pack for this community
+EXAMPLE_PACKAGE = "ValheimModding-Jotunn"  # the Team-Package the Help window's Add mod entry quotes
 # Settings > Launch's examples, (arguments, what they do): Valheim's own
 # -console plus Unity player options (docs.unity3d.com "Unity Standalone
 # Player command line arguments"). A game without this list gets the window's

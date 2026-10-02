@@ -2,10 +2,11 @@
 for Valheim (VALHEIM.md PLAN item 3, stage 3b) against the signed-off design
 https://claude.ai/artifact/KeNe4nnwPVmCgfxrpbXBCZ - and game-agnostic: the
 screen takes the game's own module (valheim.py's shape: NAME, SLUG, GAME,
-autodetect, is_game_root, find_game_exe) plus that game's Help entries, so
-the next BepInEx game (Lethal Company, R.E.P.O.) is screens/<game>_main_screen.py
-wrapping this class with its module, exactly as screens/valheim_main_screen.py
-does. Same shell as RimWorld's screen (screens/rimworld_main_screen.py, whose
+autodetect, is_game_root, find_game_exe) plus that game's Help entries
+(screens/bepinex_help_entries.help_entries(module)). main_window builds it
+for every row of bepinex_games.GAMES, so the next BepInEx game (Lethal
+Company, R.E.P.O.) is a module plus a registry row - no screen subclass.
+Same shell as RimWorld's screen (screens/rimworld_main_screen.py, whose
 small shared pieces - the notice, the status text, the eye icon, the button
 helpers - are imported from it rather than copied); the data layer is
 bepinex_load_orders.py (a load order IS a BepInEx tree; its manifest says
@@ -255,8 +256,8 @@ VANILLA_TOOLTIP = "Launch {game} without mods or BepInEx."
 PLAY_ICON_PX = icons.PLAY_ICON_PX
 ADD_MOD_PROMPT = (
     "Thunderstore package to install, with its dependencies, into the open load order.\n"
-    "A package name (Team-Package, e.g. ValheimModding-Jotunn) or its thunderstore.io page URL:"
-)
+    "A package name (Team-Package, e.g. {example}) or its thunderstore.io page URL:"
+)  # {example} = the game module's EXAMPLE_PACKAGE
 # thunderstore.io/c/<community>/p/<Team>/<Package>/ (the site) or /package/<Team>/<Package>/ (older links).
 _PACKAGE_URL = re.compile(r"thunderstore\.io/(?:c/[^/]+/p|package)/([A-Za-z0-9_]+)/([A-Za-z0-9_]+)/?", re.IGNORECASE)
 
@@ -485,8 +486,8 @@ class _PathLine(QLabel):
 
 class BepInExMainScreen(QWidget):
     """The manager screen for one Thunderstore/BepInEx game (module docstring).
-    `game`: that game's module (valheim.py's shape); `help_entries`: its
-    Help window entries."""
+    `game`: that game's module (valheim.py's shape, a bepinex_games.GAMES
+    row); `help_entries`: its Help window entries (help_entries(game))."""
 
     back_requested = Signal()  # the "Games" button / Alt+Left: back to the game select screen
 
@@ -1976,7 +1977,7 @@ class BepInExMainScreen(QWidget):
     def _add_mod(self) -> None:
         if self.current_load_order is None or self._busy is not None:
             return
-        text, ok = QInputDialog.getText(self, "Add mod", ADD_MOD_PROMPT)
+        text, ok = QInputDialog.getText(self, "Add mod", ADD_MOD_PROMPT.format(example=self.game.EXAMPLE_PACKAGE))
         if not ok or not text.strip():
             log("add mod: cancelled")
             return

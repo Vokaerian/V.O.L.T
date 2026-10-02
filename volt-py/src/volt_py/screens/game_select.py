@@ -3,7 +3,8 @@
 emits GameSelectScreen.gameSelected(slug), which MainWindow answers by
 swapping in that game's screen. The pick isn't persisted (TODO.md #30); each
 manager's "Games" button / Alt+Left comes back to a fresh GameSelectScreen
-(0.6.8). RimWorld's and Valheim's tiles are enabled so far.
+(0.6.8). RimWorld's tile is enabled, plus every Thunderstore game with a row
+in bepinex_games.GAMES (Valheim, Lethal Company): Game.enabled reads it.
 
 Layout (top to bottom, centered, in a QScrollArea - CSS overflow-y: auto):
 the brand header (0.6.9, DESIGN.md §35: a fixed 459x176 mark + wordmark
@@ -69,7 +70,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import painters, theme
+from volt_py import bepinex_games, painters, theme
 from volt_py.screens.flow_layout import FlowLayout
 
 # volt_py/assets/covers/<slug>.jpg (this module is volt_py/screens/game_select.py).
@@ -84,18 +85,24 @@ HEADER_FRAMES = ((1.0, "1x"), (1.25, "1.25x"), (1.5, "1.5x"), (2.0, "2x"))
 class Game(NamedTuple):
     key: str
     name: str
-    enabled: bool
+
+    @property
+    def enabled(self) -> bool:
+        # RimWorld has its own screen; a Thunderstore game is enabled by its
+        # registry row (whose module's SLUG is this key) - main_window opens
+        # exactly these.
+        return self.key == "rimworld" or self.key in bepinex_games.BY_SLUG
 
 
 # GameSelect.jsx's GAMES, same order.
 GAMES: tuple[Game, ...] = (
-    Game("rimworld", "RimWorld", True),
-    Game("zomboid", "Project Zomboid", False),
-    Game("lethal", "Lethal Company", False),
-    Game("valheim", "Valheim", True),
-    Game("sts2", "Slay the Spire 2", False),
-    Game("repo", "R.E.P.O.", False),
-    Game("palworld", "Palworld", False),
+    Game("rimworld", "RimWorld"),
+    Game("zomboid", "Project Zomboid"),
+    Game("lethal", "Lethal Company"),
+    Game("valheim", "Valheim"),
+    Game("sts2", "Slay the Spire 2"),
+    Game("repo", "R.E.P.O."),
+    Game("palworld", "Palworld"),
 )
 
 # ---- .game-tile geometry ----

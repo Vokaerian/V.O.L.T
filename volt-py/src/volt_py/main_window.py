@@ -7,12 +7,13 @@ from PySide6.QtCore import QRectF, QSettings, QTimer
 from PySide6.QtGui import QPainter, QResizeEvent
 from PySide6.QtWidgets import QMainWindow
 
-from volt_py import theme
+from volt_py import bepinex_games, theme
 from volt_py.app_root import resolve_base_root
 from volt_py.painters import crossfade, paint_dots
+from volt_py.screens.bepinex_help_entries import help_entries
+from volt_py.screens.bepinex_main_screen import BepInExMainScreen
 from volt_py.screens.game_select import GameSelectScreen
 from volt_py.screens.rimworld_main_screen import RimWorldMainScreen
-from volt_py.screens.valheim_main_screen import ValheimMainScreen
 
 DEFAULT_SIZE = (1600, 900)
 MIN_SIZE = (1000, 600)
@@ -78,7 +79,9 @@ class MainWindow(QMainWindow):
         # gameActivate IPC): RimWorldMainScreen resolves its own APP-ROOT and
         # starts its log. setCentralWidget hides the game-select screen and
         # deleteLater()s it, so this is safe to run from the tile's own
-        # click/key handler. RimWorld's and Valheim's tiles are enabled today.
+        # click/key handler. RimWorld has its own screen; every Thunderstore
+        # game in bepinex_games.GAMES gets the shared BepInEx manager bound to
+        # its module and Help entries (only those tiles are enabled).
         # The screen is built first (its synchronous scan, and its Settings >
         # Animations mode applied), then swapped in under a MOTION_SCREEN
         # crossfade of the game-select snapshot (painters.crossfade: phase 4
@@ -88,8 +91,9 @@ class MainWindow(QMainWindow):
         # on the old, deleted screen).
         if slug == "rimworld":
             screen = RimWorldMainScreen()
-        elif slug == "valheim":
-            screen = ValheimMainScreen()
+        elif slug in bepinex_games.BY_SLUG:
+            game = bepinex_games.BY_SLUG[slug]
+            screen = BepInExMainScreen(game, help_entries(game))
         else:
             return
         screen.back_requested.connect(self._on_back_requested)
