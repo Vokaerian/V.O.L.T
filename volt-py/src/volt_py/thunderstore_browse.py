@@ -158,7 +158,7 @@ def _get(url: str, app_version, what: str, *, max_bytes: int | None = None) -> b
     ThunderstoreErrors with user-facing text (`what` names the thing)."""
     log(f"[browse] GET {url}")
     try:
-        with ts.env.urlopen(ts._request(url, app_version), timeout=ts.TIMEOUT_S) as res:
+        with ts.open_url(ts._request(url, app_version), ts.TIMEOUT_S) as res:  # HTTP 429 retried there
             status = getattr(res, "status", 200)
             body = res.read(max_bytes + 1) if max_bytes else res.read()
     except urllib.error.HTTPError as err:

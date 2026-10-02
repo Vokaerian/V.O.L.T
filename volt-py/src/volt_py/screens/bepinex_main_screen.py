@@ -41,7 +41,11 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
   - Update checking (THUNDERSTORE.md §3, TODO #3): a check pass
     (check_updates, off the GUI thread) runs on opening the manager, on
     switching to a load order with unchecked packages, after a mod is
-    added / removed / updated and on Rescan; the load-order bar's "Update
+    added / removed / updated and on Rescan. Only Rescan asks Thunderstore
+    about every package; the others ask only for packages whose check
+    failed or isn't from this session (after a change: from the last
+    RECHECK_AFTER_S), which keeps a big load order clear of HTTP 429
+    rate-limiting. The load-order bar's "Update
     all" button carries the live count (warn-outline while > 0; "Up to
     date" / "Checking for updates..." / "Update check failed · Retry"
     otherwise). What it learns per package (latest version, date_updated,
@@ -145,7 +149,7 @@ and may overlap a job.
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import version
 from pathlib import Path
 
@@ -282,6 +286,11 @@ def _duration(seconds: float) -> str:
 # switch back to a load order doesn't re-ask Thunderstore for them (ISO
 # timestamps compare as text).
 _SESSION_START = _now()
+# The update check after an install / uninstall / update re-asks Thunderstore
+# only for packages not successfully checked within this many seconds (new,
+# stale or failed ones), not the whole load order: a full pass after every
+# install is what pushed a 30+ package load order into HTTP 429.
+RECHECK_AFTER_S = 300
 
 
 def _parse_iso(value) -> datetime | None:
@@ -773,8 +782,7 @@ class BepInExMainScreen(QWidget):
             text, enabled, variant = f"{count} update{'s' if count != 1 else ''} · Update all", self._busy is None, "warn-outline"
             tip = "Download and install the latest version of every mod in this load order that has one."
         elif self._check_errors and self.current_load_order is not None:
-            first = next(iter(self._check_errors.values()))
-            text, enabled, variant, tip = "Update check failed · Retry", self._busy is None, "", first
+            text, enabled, variant, tip = "Update check failed · Retry", self._busy is None, "", self._check_error()
         elif self._entries and all(n in self._meta for n in self._entries if self._entries[n].get("online_source", True)):
             text, enabled, variant, tip = "Up to date", False, "", "Every mod in this load order is at its latest version."
         else:
@@ -789,6 +797,12 @@ class BepInExMainScreen(QWidget):
             button.setProperty("variant", variant)
             button.style().unpolish(button)
             button.style().polish(button)
+
+    def _check_error(self) -> str:
+        """The update check's error to show: Thunderstore's rate-limit message
+        when any package hit it (it names the cure), else the first."""
+        errs = list(self._check_errors.values())
+        return ts.RATE_LIMITED_MSG if ts.RATE_LIMITED_MSG in errs else errs[0]
 
     def _snapshot(self) -> tuple[list[str], dict[str, bool]]:
         ids = self._active_ids()
@@ -1825,34 +1839,42 @@ class BepInExMainScreen(QWidget):
                     + (f" {len(res['failed'])} failed." if res["failed"] else ""),
                     "warn" if res["failed"] else "info",
                 )
-                self._start_update_check(force=True)
+                self._start_update_check(max_age_s=RECHECK_AFTER_S)
             if on_done is not None:
                 on_done(payload)
 
         self._run_job("install-missing", job, finished, progress=lambda text: self.status_text.set_status_text(text))
 
     # ---- update checking (THUNDERSTORE.md §3) ----
-    def _start_update_check(self, force: bool = False) -> None:
+    def _start_update_check(self, force: bool = False, max_age_s: float | None = None) -> None:
         """Runs check_updates over the open load order off the GUI thread.
-        Without `force`, skipped when every package was already checked
-        this session (a switch to an already-known load order)."""
+        `force` (Rescan): every package. Otherwise only the packages whose
+        last check failed or is older than `max_age_s` seconds (the check
+        after a change: RECHECK_AFTER_S) - or, without it, wasn't this
+        session (opening the manager / a load order); skipped when that's
+        none."""
         m = self._manifest
         if m is None or self._checking:
             return
         names = [n for n, e in self._entries.items() if e.get("online_source", True)]
         if not names:
             return
-        if not force and all(n in self._meta and self._meta[n].get("checked_at", "") >= _SESSION_START for n in names):
-            log("update check: every package already checked this session, skipped")
-            return
+        if not force and "*" not in self._check_errors:  # "*": the last pass failed as a whole - redo it all
+            cutoff = _SESSION_START if max_age_s is None else (
+                datetime.now(timezone.utc) - timedelta(seconds=max_age_s)).isoformat(timespec="seconds").replace("+00:00", "Z")
+            stale = [n for n in names if n in self._check_errors or self._meta.get(n, {}).get("checked_at", "") < cutoff]
+            if not stale:
+                log(f"update check: every package checked since {cutoff}, skipped")
+                return
+            names = stale
         self._checking = True
         self._check_errors = {}
-        log(f"update check: started for {len(names)} packages")
+        log(f"update check: started for {len(names)} packages{' (all)' if force else ''}")
         self._apply_load_order_state()
-        manifest, app_version = m, self.app_version
+        manifest, app_version, only = m, self.app_version, set(names)
 
         def job(report):
-            return lo.check_updates(manifest, app_version)
+            return lo.check_updates(manifest, app_version, only=only)
 
         self._run_job("update-check", job, self._on_check_done)
 
@@ -1879,9 +1901,9 @@ class BepInExMainScreen(QWidget):
                 self.status_text.set_status_text(
                     f"{count} mod{'s have' if count != 1 else ' has'} an update available.", "warn")
             elif self._check_errors:
+                sep = ". " if self._check_error() == ts.RATE_LIMITED_MSG else ": "
                 self.status_text.set_status_text(
-                    f"Couldn't check {len(self._check_errors)} package(s) for updates: "
-                    f"{next(iter(self._check_errors.values()))}", "warn")
+                    f"Couldn't check {len(self._check_errors)} package(s) for updates{sep}{self._check_error()}", "warn")
             else:
                 self.status_text.set_status_text("All mods are up to date.")
         self._apply_load_order_state()
@@ -1922,7 +1944,7 @@ class BepInExMainScreen(QWidget):
                 self.status_text.set_status_text(f"Updated {name} to {res['entry']['version']}.")
             else:
                 self.status_text.set_status_text(f"{name} is already at its latest version.")
-            self._start_update_check(force=True)
+            self._start_update_check(max_age_s=RECHECK_AFTER_S)
 
         self._run_job(f"update-{mod_id}", job, done)
 
@@ -1930,7 +1952,7 @@ class BepInExMainScreen(QWidget):
         if self._checking or self._busy is not None:
             return
         if not self._updatable():
-            self._start_update_check(force=True)  # the "Retry" state
+            self._start_update_check(max_age_s=RECHECK_AFTER_S)  # the "Retry" state: the failed (and stale) packages
             return
         self._update_all()
 
@@ -1969,7 +1991,7 @@ class BepInExMainScreen(QWidget):
                 f"Updated {len(res['done'])} of {len(names)} mods." if res["failed"] else f"Updated {len(res['done'])} mods.",
                 "warn" if res["failed"] else "info",
             )
-            self._start_update_check(force=True)
+            self._start_update_check(max_age_s=RECHECK_AFTER_S)
 
         self._run_job("update-all", job, finished, progress=lambda text: self.status_text.set_status_text(text))
 
@@ -2039,7 +2061,7 @@ class BepInExMainScreen(QWidget):
                     self.status_text.set_status_text(f"{name} is now {res['entry']['version']}.")
                 else:
                     self.status_text.set_status_text(f"{name} already is {res['entry']['version']}.")
-                self._start_update_check(force=True)
+                self._start_update_check(max_age_s=RECHECK_AFTER_S)
             if on_done is not None:
                 on_done(payload)
 
@@ -2091,7 +2113,7 @@ class BepInExMainScreen(QWidget):
                 self.status_text.set_status_text(
                     f"Installed {ref.full_name}{source}"
                     + (f" and {extra} dependenc{'ies' if extra != 1 else 'y'}" if extra > 0 else "") + ".")
-            self._start_update_check(force=True)
+            self._start_update_check(max_age_s=RECHECK_AFTER_S)
             if on_done is not None:
                 on_done(payload)
 
@@ -2134,7 +2156,7 @@ class BepInExMainScreen(QWidget):
         self._history = [([n for n in i if n != mod_id], {k: v for k, v in t.items() if k != mod_id}) for i, t in self._history]
         self._apply_load_order_state()
         self.status_text.set_status_text(f"Uninstalled {name}.")
-        self._start_update_check(force=True)
+        self._start_update_check(max_age_s=RECHECK_AFTER_S)
 
     # ---- Run: the BepInEx launch through Steam (THUNDERSTORE.md §2; bepinex_launch.py) ----
     def _run(self, modded: bool = True) -> None:

@@ -640,19 +640,33 @@ def set_mod_enabled(app_root, slug, full_name: str, enabled: bool) -> dict:
     return save_load_order(app_root, slug, active, [e["full_name"] for e in manifest["inactive"]])
 
 
-def check_updates(manifest: dict, app_version=None) -> dict[str, dict]:
+# Pause between check_updates' sequential metadata fetches, so a long load
+# order doesn't burst Thunderstore into rate-limiting (HTTP 429, ~9 req/s did).
+CHECK_REQUEST_GAP_S = 0.25
+
+
+def check_updates(manifest: dict, app_version=None, only=None) -> dict[str, dict]:
     """One Thunderstore metadata fetch per installed package with
-    online_source (framework included): full_name -> {"latest_version",
+    online_source (framework included), or only those full_names in `only`
+    when given, CHECK_REQUEST_GAP_S apart: full_name -> {"latest_version",
     "date_updated", "update": bool, "deprecated": bool (the same reply's
     is_deprecated)} or {"error": str} (that package's
-    fetch failed - the rest still get checked). Pure network + compare,
-    nothing written; the caller keeps/caches the result."""
+    fetch failed - the rest still get checked; once Thunderstore is
+    rate-limiting past fetch_package's retries, the rest aren't asked and
+    get that same error). Pure network + compare, nothing written; the
+    caller keeps/caches the result."""
     out = {}
-    for full_name, entry in installed(manifest).items():
-        if not entry.get("online_source", True):
-            continue
+    todo = [(n, e) for n, e in installed(manifest).items()
+            if e.get("online_source", True) and (only is None or n in only)]
+    for i, (full_name, entry) in enumerate(todo):
+        if i:
+            ts.env.sleep(CHECK_REQUEST_GAP_S)
         try:
             meta = ts.fetch_package(entry["namespace"], entry["name"], app_version)
+        except ts.RateLimitedError as err:
+            log(f"[loadorders] update check: rate-limited, not asking for the other {len(todo) - i - 1} packages")
+            out.update({n: {"error": str(err)} for n, _ in todo[i:]})
+            break
         except ts.ThunderstoreError as err:
             out[full_name] = {"error": str(err)}
             continue

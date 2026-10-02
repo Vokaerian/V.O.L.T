@@ -28,7 +28,10 @@ pattern) so tools/checks/volt_py_thunderstore.py can fake the replies. Same
 known limitation as every other direct fetch in the app: no system/PAC proxy.
 A failed request is a ThunderstoreError with a user-facing message; a bad
 argument (not a package name) is a ValueError. Every request and its outcome
-lands in volt.log (CLAUDE.md §10).
+lands in volt.log (CLAUDE.md §10). HTTP 429 (Thunderstore rate-limiting) is
+retried a few times (open_url: Retry-After, capped, else a short backoff);
+still 429 after that is a RateLimitedError (a ThunderstoreError) carrying
+RATE_LIMITED_MSG.
 """
 
 import http.client
@@ -36,6 +39,7 @@ import json
 import os
 import re
 import shutil
+import time
 import types
 import urllib.error
 import urllib.request
@@ -52,16 +56,26 @@ CACHE_DIR = "cache"  # <APP-ROOT>/cache/ (packages/ + the metadata cache; the br
 PACKAGES_DIR = "packages"  # <APP-ROOT>/cache/packages/<Team-Package-Version>.zip
 META_FILE = "package-meta.json"  # <APP-ROOT>/cache/package-meta.json (read_meta_cache)
 _CHUNK = 1 << 16
+# HTTP 429: retries before giving up, the longest Retry-After honoured (a
+# longer one is cut to this), and the backoff when there's none (1 s, 2 s, 4 s).
+RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_MAX_WAIT_S = 10.0
+RATE_LIMIT_BACKOFF_S = 1.0
+RATE_LIMITED_MSG = "Thunderstore is rate-limiting requests; wait a minute and try again."
 
 _NAME = re.compile(r"[A-Za-z0-9_]+", re.ASCII)
 _VERSION = re.compile(r"\d+\.\d+\.\d+", re.ASCII)
 
-# Check-harness seam (no network in the sandbox).
-env = types.SimpleNamespace(urlopen=net.urlopen)
+# Check-harness seam (no network in the sandbox; sleep so harnesses skip the waits).
+env = types.SimpleNamespace(urlopen=net.urlopen, sleep=time.sleep)
 
 
 class ThunderstoreError(RuntimeError):
     """A request to thunderstore.io failed; str() is a user-facing message."""
+
+
+class RateLimitedError(ThunderstoreError):
+    """Still HTTP 429 after open_url's retries; str() is RATE_LIMITED_MSG."""
 
 
 @dataclass(frozen=True)
@@ -143,14 +157,45 @@ def _reason(err: BaseException) -> str:
     return str(getattr(err, "reason", None) or str(err) or repr(err))
 
 
+def _retry_after(err: urllib.error.HTTPError) -> float | None:
+    """A 429's Retry-After in seconds (the delta-seconds form only; an
+    HTTP-date or garbage is None -> the backoff)."""
+    try:
+        return max(0.0, float((err.headers or {}).get("Retry-After", "")))
+    except (TypeError, ValueError):
+        return None
+
+
+def open_url(req: urllib.request.Request, timeout: float):
+    """env.urlopen(req) with HTTP 429 retried: up to RATE_LIMIT_RETRIES more
+    tries, waiting Retry-After (capped at RATE_LIMIT_MAX_WAIT_S) or 1 s, 2 s,
+    4 s. Still 429 -> RateLimitedError. Every other error (another HTTP code,
+    network) is raised as-is for the caller's own handling."""
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        try:
+            return env.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as err:
+            if err.code != 429:
+                raise
+            if attempt == RATE_LIMIT_RETRIES:
+                log(f"[thunderstore] HTTP 429 for {req.full_url}: still rate-limited after {RATE_LIMIT_RETRIES} retries, giving up")
+                raise RateLimitedError(RATE_LIMITED_MSG) from err
+            after = _retry_after(err)
+            wait = min(RATE_LIMIT_MAX_WAIT_S, RATE_LIMIT_BACKOFF_S * 2 ** attempt if after is None else after)
+            log(f"[thunderstore] HTTP 429 for {req.full_url} (Retry-After {err.headers.get('Retry-After') if err.headers else None}): "
+                f"retry {attempt + 1} of {RATE_LIMIT_RETRIES} in {wait:g}s")
+            env.sleep(wait)
+
+
 def fetch_package(namespace: str, name: str, app_version=None) -> dict:
     """Package metadata (the experimental per-package endpoint). Raises
-    ThunderstoreError on HTTP/network/shape failure."""
+    ThunderstoreError on HTTP/network/shape failure (RateLimitedError once
+    open_url's 429 retries run out)."""
     ref = PackageRef(namespace, name)  # validates
     url = package_url(ref.namespace, ref.name)
     log(f"[thunderstore] GET {url} (timeout {TIMEOUT_S:g}s)")
     try:
-        with env.urlopen(_request(url, app_version), timeout=TIMEOUT_S) as res:
+        with open_url(_request(url, app_version), TIMEOUT_S) as res:
             status, body = getattr(res, "status", 200), res.read()
     except urllib.error.HTTPError as err:
         log(f"[thunderstore] {ref.full_name}: HTTP {err.code}")
@@ -194,7 +239,7 @@ def download(url: str, dest, app_version=None) -> Path:
     tmp = dest.with_name(f"{dest.name}.{os.getpid()}.part")
     log(f"[thunderstore] download {url} -> {dest}")
     try:
-        with env.urlopen(_request(url, app_version), timeout=DOWNLOAD_TIMEOUT_S) as res, open(tmp, "wb") as f:
+        with open_url(_request(url, app_version), DOWNLOAD_TIMEOUT_S) as res, open(tmp, "wb") as f:
             status = getattr(res, "status", 200)
             if not 200 <= status < 300:
                 raise ThunderstoreError(f"Thunderstore returned HTTP {status} for {url}.")
