@@ -171,7 +171,8 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
             "You can import from the clipboard, a RimPy .xml file, a rentry.co page, a save file's mod list, or "
             "the Steam Workshop. A Workshop link or ID adds that mod to your list; a Workshop collection asks "
             "whether to add to your list, replace it, or start a new load order. If an import would replace "
-            "your list and you have unsaved changes, VOLT asks before discarding them."
+            "your list and you have unsaved changes, VOLT asks before discarding them. Import needs an open load "
+            "order, so it stays greyed out until you create one."
         ),
     },
     {

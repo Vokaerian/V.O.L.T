@@ -763,6 +763,7 @@ class RimWorldMainScreen(QWidget):
         layout.addLayout(self._build_content_row(), 1)
         layout.addWidget(self._build_footer())
         self._card_shown = False  # the first-run card as last shown (0.6.23, _apply_first_run)
+        self._import_tip = self.import_button.toolTip()  # Import...'s own tooltip (0.6.23: swapped while no load order)
 
         self.game_dir: Path | None = None
         self.config_dir: Path | None = None
@@ -1162,7 +1163,9 @@ class RimWorldMainScreen(QWidget):
         self._apply_games_button()
         # ActionsColumn.jsx: Import disabled={busy}, Export disabled={busy || activeCount === 0}.
         # Import also needs a game here: with no scan, an import would have nothing to show.
-        self.import_button.setEnabled(has_game)
+        # 0.6.23 follow-up (user): Import also needs an open load order - with none, an import filled
+        # Active as an unsaved edit that Save couldn't keep and New load order would discard.
+        self.import_button.setEnabled(has_game and self.current_load_order is not None)
         self.export_button.setEnabled(has_game and self.active_list.mod_model.rowCount() > 0)
         # Unsaved changes: label + undo only exist while dirty; Save turns warn-outline.
         dirty = self._dirty()
@@ -1183,7 +1186,8 @@ class RimWorldMainScreen(QWidget):
 
     def _apply_first_run(self) -> None:
         """First-run guidance (PLAN.md §10 (c)/(d), 0.6.23; RimWorld has no
-        prompt and no checklist): Save and the picker say "Create a load
+        checklist): Save, the picker and Import... (and the card's Import
+        button, kept in place but disabled) say "Create a load
         order first." while that is the only reason they're disabled
         (Modded and the Paths link set theirs where they're computed); the
         empty-state card sits on the Active list's empty dot grid while the
@@ -1194,10 +1198,12 @@ class RimWorldMainScreen(QWidget):
         no_lo = fr.needs_profile_tip(game_found=has_game, busy=False, open_slug=self.current_load_order)
         for widget in (self.save_button, self.load_order_picker):
             widget.setToolTip(fr.NO_LOAD_ORDER_TIP if no_lo else "")
+        self.import_button.setToolTip(fr.NO_LOAD_ORDER_TIP if no_lo else self._import_tip)
         self._apply_load_order_link()  # its tooltip also follows the game folder
         card = self.first_run_card
         card.create_button.setEnabled(self.new_button.isEnabled())
-        card.import_button.setEnabled(self.import_button.isEnabled())
+        card.import_button.setEnabled(self.import_button.isEnabled())  # = disabled whenever the card shows
+        card.import_button.setToolTip(fr.NO_LOAD_ORDER_TIP if no_lo else "")
         show = fr.show_card(game_found=has_game, open_slug=self.current_load_order,
                             active_rows=self.active_list.mod_model.rowCount())
         if show != self._card_shown:

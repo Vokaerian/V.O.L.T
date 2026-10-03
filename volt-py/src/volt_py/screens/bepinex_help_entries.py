@@ -88,7 +88,7 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         "short": "A short list of the first four steps, shown under the profile bar until you've done them.",
         "long": (
             "The steps are: tell VOLT where {game} is installed, create a profile, add some mods, and press "
-            "Modded to play. Each one ticks itself off when it's done, and the next one is outlined in blue. "
+            "[Modded] to play. Each one ticks itself off when it's done, and the next one is outlined in blue. "
             "Click a step to go straight to it: Settings, New profile or Browse Mods. Hide puts the list away "
             "for good, and it also goes away by itself once all four steps are done."
         ),
@@ -111,8 +111,7 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
             "cache if another profile already fetched it) and installs it into the new profile's folder, "
             "so it's ready to run right away. That framework package is pinned at the top of the Active list. "
             "While no profile exists, the empty Active list shows a short card with the same Create a profile "
-            "button (and one to import a profile someone shared), and VOLT offers to make one called Default "
-            "when you open {game}."
+            "button, and one to import a profile someone shared."
         ),
     },
     {

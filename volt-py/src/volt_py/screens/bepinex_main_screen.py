@@ -143,9 +143,7 @@ widgets in screens/first_run_widgets.py): while the game is found and no
 profile is open, a card on the Active list's empty dot grid ("Let's set up
 your first profile." + Create a profile / Import one someone shared = the
 existing New profile / Import... actions); every control disabled only for
-want of a profile says "Create a profile first."; opening the screen with
-zero profiles asks "Create your first profile?" once (New profile's flow,
-name "Default", Create / Not now); and a get-started checklist band under
+want of a profile says "Create a profile first."; and a get-started checklist band under
 the profile bar ticks off game folder / profile / mods / first modded
 launch (settings has_launched), until all four are done or Hide
 (settings checklist_dismissed). _apply_first_run keeps all of it in step.
@@ -605,11 +603,6 @@ class BepInExMainScreen(QWidget):
             self._start_update_check()
         else:
             log("no game folder: not opening a load order")
-        # "Create your first profile?" (PLAN.md §10 (e)): once per opening of
-        # this screen, after the screen crossfade has finished
-        if fr.first_profile_prompt(game_found=self.game_dir is not None, busy=self._busy is not None,
-                                   profiles=self.load_order_picker.count()):
-            QTimer.singleShot(theme.MOTION_SCREEN + 50, self, self._first_profile_prompt)
 
     # ---- paths: saved settings, else autodetect ----
     def _resolve_paths(self) -> None:
@@ -916,20 +909,6 @@ class BepInExMainScreen(QWidget):
         log("first run: checklist hidden by the user")
         self._remember({"checklist_dismissed": True})
         self._apply_first_run()
-
-    def _first_profile_prompt(self) -> None:
-        """"Create your first profile?" (PLAN.md §10 (e)): queued by __init__
-        when the game had no profile; re-checked here, as the screen may
-        have been left or a job started meanwhile. Create = New profile's
-        own flow named "Default"; Not now / Esc = nothing (the card stays,
-        no re-prompt until the screen is opened again)."""
-        if self._closed or not fr.first_profile_prompt(game_found=self.game_dir is not None,
-                                                       busy=self._busy is not None,
-                                                       profiles=self.load_order_picker.count()):
-            log("first run: first-profile prompt skipped (state changed since the screen opened)")
-            return
-        log("first run: no profiles yet - asking to create the first one")
-        self._new_load_order(first_run=True)
 
     def _snapshot(self) -> tuple[list[str], dict[str, bool]]:
         ids = self._active_ids()
@@ -1281,45 +1260,26 @@ class BepInExMainScreen(QWidget):
         self._apply_current_load_order_to_panes()
         self._start_update_check()
 
-    def _ask_name(self, title: str, message: str | None = None, default: str = "", *,
-                  ok_label: str | None = None, cancel_label: str | None = None) -> str | None:
-        label = f"{message}\n\nName:" if message else "Name:"
-        if ok_label is None:
-            name, ok = QInputDialog.getText(self, title, label, QLineEdit.EchoMode.Normal, default)
-        else:  # own button labels (the first-open prompt's Create / Not now): QInputDialog's instance API
-            dialog = QInputDialog(self)
-            dialog.setWindowTitle(title)
-            dialog.setLabelText(label)
-            dialog.setTextValue(default)
-            dialog.setOkButtonText(ok_label)
-            dialog.setCancelButtonText(cancel_label or "Cancel")
-            ok = dialog.exec() == QDialog.DialogCode.Accepted  # Enter = OK (the default), Esc = Cancel
-            name = dialog.textValue()
+    def _ask_name(self, title: str, message: str | None = None, default: str = "") -> str | None:
+        name, ok = QInputDialog.getText(self, title, f"{message}\n\nName:" if message else "Name:",
+                                        QLineEdit.EchoMode.Normal, default)
         if not ok or not name.strip():
             log(f"{title}: {'cancelled' if not ok else 'empty name entered'}, nothing created")
             return None
         return name.strip()
 
-    def _new_load_order(self, first_run: bool = False) -> None:
+    def _new_load_order(self) -> None:
         """New load order: a folder + manifest, then the framework package
         downloaded (or taken from the cache) and installed - so the
-        download runs as a job, the screen busy meanwhile. `first_run`: the
-        first-open prompt's wording (PLAN.md §10 (e)) - name prefilled
-        "Default", Create / Not now; the rest is the same flow."""
+        download runs as a job, the screen busy meanwhile."""
         if not self._confirm_discard():
             log("New load order: cancelled at the discard-changes prompt")
             return
-        if first_run:
-            name = self._ask_name(
-                fr.FIRST_PROFILE_TITLE, fr.FIRST_PROFILE_TEXT.replace("{game}", self.game_name),
-                fr.FIRST_PROFILE_NAME, ok_label=fr.FIRST_PROFILE_OK, cancel_label=fr.FIRST_PROFILE_CANCEL,
-            )
-        else:
-            name = self._ask_name(
-                "New profile",
-                f"A new profile gets its own BepInEx install: {self.ts_game.framework_package} is downloaded "
-                "from Thunderstore (or taken from VOLT's cache) and set up for it right away.",
-            )
+        name = self._ask_name(
+            "New profile",
+            f"A new profile gets its own BepInEx install: {self.ts_game.framework_package} is downloaded "
+            "from Thunderstore (or taken from VOLT's cache) and set up for it right away.",
+        )
         if name is None:
             return
         self._set_busy(f"Creating profile \"{name}\" - installing {self.ts_game.framework_package}...")

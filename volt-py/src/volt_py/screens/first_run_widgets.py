@@ -25,7 +25,8 @@ from volt_py import first_run as fr, icons, painters, theme
 
 CARD_MAX_WIDTH = 320  # logical px; a narrower Active pane narrows the card (_FitWidth)
 CARD_INSET = 12  # logical px kept clear between the card and each side of the list
-WELCOME_WIDTH = 600  # logical px (game select's content is >= ~830 at the 1000 px minimum window)
+WELCOME_WIDTH = 600  # logical px, the panel's maximum (game select's content is >= ~830 at the 1000 px minimum window)
+WELCOME_MIN_WIDTH = 320  # logical px: below its maximum it narrows and its text wraps onto more lines
 CHECK_ICON_PX = 12  # a done step's drawn check
 
 
@@ -148,7 +149,10 @@ class WelcomePanel(QFrame):
     def __init__(self, on_dismiss, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setProperty("panel", True)
-        self.setFixedWidth(WELCOME_WIDTH)
+        # width from the row (<= WELCOME_WIDTH), height from the wrapped text
+        # at that width (heightForWidth via the layout) - never a fixed height
+        self.setMinimumWidth(WELCOME_MIN_WIDTH)
+        self.setMaximumWidth(WELCOME_WIDTH)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(8)

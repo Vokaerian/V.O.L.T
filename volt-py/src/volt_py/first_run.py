@@ -1,8 +1,9 @@
 """First-run guidance (PLAN.md §10 (c)-(g), v0.6.23): the plain words and
 the Qt-free state behind it - the empty-state card in the Active pane, the
-"needs a profile" tooltips, the first-open "Create your first profile?"
-prompt and the get-started checklist (Thunderstore games), and the
-game-select welcome panel. The widgets are screens/first_run_widgets.py;
+"needs a profile" tooltips, the get-started checklist (Thunderstore games)
+and the game-select welcome panel. (A first-open "Create your first
+profile?" prompt shipped in 0.6.23 and was removed the same session by the
+user: the card does that job.) The widgets are screens/first_run_widgets.py;
 each screen decides when to show them from the functions below, so
 tools/checks/volt_py_first_run.py tests every rule without Qt.
 
@@ -36,31 +37,22 @@ LOAD_ORDER_CARD = {
 NO_PROFILE_TIP = "Create a profile first."
 NO_LOAD_ORDER_TIP = "Create a load order first."
 
-# ---- the first-open prompt (Thunderstore games, zero profiles) ----
-FIRST_PROFILE_TITLE = "Create your first profile?"
-FIRST_PROFILE_TEXT = (
-    "VOLT will set up a fresh profile for {game}. This downloads the mod loader (a small download) "
-    "and takes a minute."
-)
-FIRST_PROFILE_NAME = "Default"
-FIRST_PROFILE_OK = "Create"
-FIRST_PROFILE_CANCEL = "Not now"
-
 # ---- the get-started checklist (Thunderstore games) ----
 CHECKLIST_TITLE = "Get started"
-# The fourth step names the button as it reads on screen ("Modded"; the
-# brief said "Press Run" - there is no Run button on these screens).
+# The fourth step names the button as it reads on screen, in brackets so it
+# reads as a button label (user, 0.6.23 hardware review; there is no Run
+# button on these screens).
 STEPS = (
     "Tell VOLT where {game} is installed",
     "Create a profile",
     "Add some mods",
-    "Press Modded to play",
+    "Press [Modded] to play",
 )
 STEP_TIPS = (
     "Open Settings and choose the folder {game} is installed in.",
     "Make a new profile (the same as the New profile... button).",
     "Open Browse Mods to find mods for {game} and add them to this profile.",
-    "Press Modded, at the bottom right, to start {game} with your mods. "
+    "Press [Modded], at the bottom right, to start {game} with your mods. "
     "This step ticks itself off after the first time.",
 )
 STEP_DONE_TIP = "Done."
@@ -93,12 +85,6 @@ def needs_profile_tip(*, game_found: bool, busy: bool, open_slug) -> bool:
     the game is found, nothing else is running, nothing is open. Any other
     reason (no game, busy) keeps the control's own tooltip."""
     return bool(game_found) and not busy and open_slug is None
-
-
-def first_profile_prompt(*, game_found: bool, busy: bool, profiles: int) -> bool:
-    """Ask "Create your first profile?" when the manager opens: game found,
-    idle, and not one profile yet."""
-    return bool(game_found) and not busy and profiles == 0
 
 
 def checklist(*, game_found: bool, profiles: int, mods: int, launched: bool, dismissed: bool) -> dict:

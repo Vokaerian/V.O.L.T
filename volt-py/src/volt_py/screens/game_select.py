@@ -64,6 +64,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
+    QHBoxLayout,
     QLabel,
     QScrollArea,
     QVBoxLayout,
@@ -563,11 +564,20 @@ class GameSelectScreen(QWidget):
         self.welcome: QWidget | None = None
         self.welcome_panel: WelcomePanel | None = None
         if welcome:
+            # Centred by stretches, NOT an alignment flag: an aligned item's
+            # height-for-width is asked at the row's full width, so the row
+            # came out a wrapped line too short and clipped the body (0.6.23
+            # hardware review). Here the box layout hands the panel its real
+            # width (<= WELCOME_WIDTH) and sizes the row by the panel's
+            # heightForWidth at that width - every line shows, at any scaling.
             self.welcome = QWidget()
-            welcome_row = QVBoxLayout(self.welcome)
+            welcome_row = QHBoxLayout(self.welcome)
             welcome_row.setContentsMargins(0, WELCOME_GAP, 0, 0)
+            welcome_row.setSpacing(0)
             self.welcome_panel = WelcomePanel(self._dismiss_welcome)
-            welcome_row.addWidget(self.welcome_panel, 0, Qt.AlignmentFlag.AlignHCenter)
+            welcome_row.addStretch(1)
+            welcome_row.addWidget(self.welcome_panel, 100)  # grows to its maximum width first
+            welcome_row.addStretch(1)
             column.addWidget(self.welcome)
 
         column.addSpacing(44)
