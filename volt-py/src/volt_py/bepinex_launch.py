@@ -391,8 +391,8 @@ def start(app_root, game_dir, tree_root, manifest, *, appid: str, exe_name: str,
         missing = framework_missing(tree_root, manifest)
         if missing:
             raise LaunchError(
-                f"The load order's BepInEx install is incomplete (missing {', '.join(missing)}). "
-                "Rescan, or delete and recreate the load order."
+                f"The profile's BepInEx install is incomplete (missing {', '.join(missing)}). "
+                "Rescan, or delete and recreate the profile."
             )
         argv = steam_argv(steam_exe, appid, [*doorstop_args(tree_root), *extra_args])
         record = inject(app_root, game_dir, tree_root, manifest, load_order=load_order, load_order_name=load_order_name,
@@ -438,7 +438,7 @@ def reset_refusal(game_dir, game_source, is_game_root, app_root) -> str | None:
     if not is_game_root(d):
         return f"{d} doesn't look like the game's install folder. Nothing was deleted."
     if real == Path(app_root).resolve() or real in Path(app_root).resolve().parents:
-        return f"VOLT's own data folder ({app_root}) is inside {real}, so emptying it would delete your load orders."
+        return f"VOLT's own data folder ({app_root}) is inside {real}, so emptying it would delete your profiles."
     return None
 
 

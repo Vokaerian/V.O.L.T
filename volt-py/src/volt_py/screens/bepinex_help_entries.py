@@ -44,10 +44,10 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         "short": "Opens the Settings window, where you tell VOLT where {game} is installed.",
         "long": (
             "General shows the game folder with a Browse button, plus Autodetect to find your Steam install for "
-            "you. It's the only path {game} needs: every load order keeps its mods and their BepInEx config in "
+            "you. It's the only path {game} needs: every profile keeps its mods and their BepInEx config in "
             "its own folder under VOLT's data folder, never inside the game. Troubleshooting opens VOLT's log "
             "file (or the one from the previous run), which is handy when reporting a problem. Its Clean cache "
-            "button deletes downloaded mod files that no load order uses any more, to free up space - a "
+            "button deletes downloaded mod files that no profile uses any more, to free up space - a "
             "Thunderstore mod just downloads again if you install it later."
         ),
     },
@@ -57,25 +57,25 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         "long": (
             "This is the \"Game\" link next to \"Paths:\" at the top of the window. It's greyed out until a game "
             "folder is set. Hover it to see the full path. The line under the links spells out the game folder "
-            "and the open load order's BepInEx folder."
+            "and the open profile's BepInEx folder."
         ),
     },
     {
-        "name": "Paths: Load order folder",
-        "short": "Opens the currently open load order's own folder.",
+        "name": "Paths: Profile folder",
+        "short": "Opens the currently open profile's own folder.",
         "long": (
-            "This is the \"Load order\" link next to \"Paths:\". Each load order is a complete, separate BepInEx "
+            "This is the \"Profile\" link next to \"Paths:\". Each profile is a complete, separate BepInEx "
             "install under VOLT's data folder: its loadorder.json (what's installed and switched on) sits beside "
-            "its BepInEx folder. Greyed out while no load order is open; it follows the picker."
+            "its BepInEx folder. Greyed out while no profile is open; it follows the picker."
         ),
     },
     {
         "name": "Paths: BepInEx folder",
-        "short": "Opens the open load order's BepInEx folder (plugins, config, patchers...).",
+        "short": "Opens the open profile's BepInEx folder (plugins, config, patchers...).",
         "long": (
             "This is the \"BepInEx\" link next to \"Paths:\". Inside are core (BepInEx itself), plugins (one "
             "subfolder per mod), config (every mod's settings files, kept across updates) and patchers. Greyed "
-            "out while no load order is open."
+            "out while no profile is open."
         ),
     },
     {
@@ -85,28 +85,28 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
     },
     # ---- load-order bar ----
     {
-        "name": "Load order picker",
-        "short": "Switches between your saved load orders.",
+        "name": "Profile picker",
+        "short": "Switches between your saved profiles.",
         "long": (
-            "The drop-down in the second row. Each load order is its own BepInEx install with its own mods, so "
-            "switching costs nothing - nothing is copied around. If the open load order has unsaved changes, "
-            "VOLT asks before switching. Right-click the picker to delete the open load order."
+            "The drop-down in the second row. Each profile is its own BepInEx install with its own mods, so "
+            "switching costs nothing - nothing is copied around. If the open profile has unsaved changes, "
+            "VOLT asks before switching. Right-click the picker to delete the open profile."
         ),
     },
     {
-        "name": "New load order",
-        "short": "Creates an empty load order with BepInEx set up in it.",
+        "name": "New profile",
+        "short": "Creates an empty profile with BepInEx set up in it.",
         "long": (
             "Asks for a name, then downloads BepInExPack for {game} from Thunderstore (or takes it from VOLT's "
-            "cache if another load order already fetched it) and installs it into the new load order's folder, "
+            "cache if another profile already fetched it) and installs it into the new profile's folder, "
             "so it's ready to run right away. That framework package is pinned at the top of the Active list."
         ),
     },
     {
         "name": "Copy to new",
-        "short": "Duplicates the open load order, mods and settings included, under a new name.",
+        "short": "Duplicates the open profile, mods and settings included, under a new name.",
         "long": (
-            "Copies the whole load order folder - BepInEx, every installed mod, their config files and which "
+            "Copies the whole profile folder - BepInEx, every installed mod, their config files and which "
             "ones are switched on - and opens the copy. Unsaved changes on screen are applied to the copy."
         ),
     },
@@ -125,7 +125,7 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         "short": "Downloads and installs the newest version of every mod that has one.",
         "long": (
             "The button at the right end of the second row. VOLT checks Thunderstore for updates when the "
-            "manager opens, when you switch to a load order it hasn't checked yet, after a mod is added, "
+            "manager opens, when you switch to a profile it hasn't checked yet, after a mod is added, "
             "removed or updated, and on Rescan. While updates are waiting the button turns yellow and shows how "
             "many; click it to update them all. \"Up to date\" means none are waiting; \"Update check failed · "
             "Retry\" means Thunderstore couldn't be reached - click to try again. Updating never changes which "
@@ -135,27 +135,27 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         ),
     },
     {
-        "name": "Delete load order",
-        "short": "Removes a load order and everything in it from disk.",
+        "name": "Delete profile",
+        "short": "Removes a profile and everything in it from disk.",
         "long": (
-            "Right-click the load order picker and choose Delete. The load order's whole folder goes - its "
+            "Right-click the profile picker and choose Delete. The profile's whole folder goes - its "
             "BepInEx install and every mod in it - after a confirmation. Downloaded packages stay in VOLT's "
             "cache, and the game itself is never touched."
         ),
     },
     {
         "name": "Edit config",
-        "short": "View, edit or delete the config files the load order's mods have written.",
+        "short": "View, edit or delete the config files the profile's mods have written.",
         "long": (
-            "Click Config in the actions column (under Rescan), or right-click the load order picker (or any mod "
-            "row) and choose Edit config..., to open the load "
-            "order's BepInEx/config folder: every file in it, listed flat on the left with a search box, a sort "
+            "Click Config in the actions column (under Rescan), or right-click the profile picker (or any mod "
+            "row) and choose Edit config..., to open the "
+            "profile's BepInEx/config folder: every file in it, listed flat on the left with a search box, a sort "
             "and a \"Show all files\" switch for the non-text data some mods keep there. Click a file to load it "
             "on the right: a BepInEx .cfg becomes a settings form - each setting with its description, type, "
             "default and the right control (a drop-down, check boxes, a number, a color swatch, a text box) - and "
             "any other file (.json, .yml, .txt) is shown as raw text. Save writes your changes, Revert drops them, "
             "Delete removes the file (a mod writes a fresh default one on the next run) and Open externally opens "
-            "it in your usual editor. Until the load order has been run once only BepInEx's own "
+            "it in your usual editor. Until the profile has been run once only BepInEx's own "
             "BepInEx.cfg is there, since BepInEx creates each mod's config file on first launch."
         ),
     },
@@ -193,7 +193,7 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         "short": "Double-click a row to move it to the other list.",
         "long": (
             "Double-clicking an Inactive mod appends it to the Active list, switched on; double-clicking an "
-            "Active mod moves it to Inactive. An inactive mod stays installed in the load order, just switched "
+            "Active mod moves it to Inactive. An inactive mod stays installed in the profile, just switched "
             "off on disk when you Save, so moving it back never downloads anything. The framework row can't "
             "be moved."
         ),
@@ -205,8 +205,8 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
             "The pill at the right end of every Active row except the framework's. Off keeps the mod in the "
             "list, at its position, but its files are disabled when you Save - a quick, reversible way to "
             "leave one mod out for a test. Blue means on. A switched-off row shows a yellow Disabled pill before "
-            "its name, and the name turns grey and struck through. The framework row has no toggle: a load "
-            "order can't start without it. Enable all / Disable all (under Export...) set every Active toggle at "
+            "its name, and the name turns grey and struck through. The framework row has no toggle: a "
+            "profile can't start without it. Enable all / Disable all (under Export...) set every Active toggle at "
             "once - still unsaved until Save, one Undo puts them back, and the framework always stays on."
         ),
     },
@@ -224,7 +224,7 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         "name": "Framework row (BepInExPack)",
         "short": "The pinned first row of the Active list: BepInEx itself.",
         "long": (
-            "Every load order is built on Thunderstore's BepInExPack for {game}, installed when the load order "
+            "Every profile is built on Thunderstore's BepInExPack for {game}, installed when the profile "
             "is created. It's pinned at the top of Active, can't be dragged, switched off, moved to Inactive or "
             "uninstalled, and gets the yellow update button like any mod when a newer pack is out."
         ),
@@ -235,12 +235,12 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         "long": (
             "Right-click a row in either list. Open folder opens the mod's own subfolder under BepInEx/plugins, "
             "Open on Thunderstore its Thunderstore page and Open website its own site, when it has one. Copy "
-            "package name copies the Team-Package name Thunderstore uses, and Edit config... opens the load order's "
+            "package name copies the Team-Package name Thunderstore uses, and Edit config... opens the profile's "
             "config files with the search pre-filled with this mod's name. Install missing dependencies (N) "
             "appears only on a mod whose dependencies aren't installed and fetches them - each at its latest "
             "version, with whatever they need themselves - into the Active list; Update is available while a "
-            "newer version is out; Uninstall... removes the mod's files from this load order (its config files "
-            "are kept; other load orders aren't affected) after a confirmation."
+            "newer version is out; Uninstall... removes the mod's files from this profile (its config files "
+            "are kept; other profiles aren't affected) after a confirmation."
         ),
     },
     {
@@ -248,7 +248,7 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
         "short": "The \"⚠ N · ✕ M\" button: mods whose dependencies aren't there, with a fix for the missing ones.",
         "long": (
             "Appears above Save while an Active, switched-on mod declares a dependency that isn't installed in "
-            "this load order (an error, marked ✕ on the row) or is installed but inactive or switched off (a "
+            "this profile (an error, marked ✕ on the row) or is installed but inactive or switched off (a "
             "warning). Click it for the window: one entry per problem, grouped by mod, with what it means and "
             "what fixes it. A missing dependency has an Install button right there (its latest version, with "
             "whatever it needs itself, added to the Active list), and Install all missing at the top does them "
@@ -260,34 +260,34 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
     # ---- actions column ----
     {
         "name": "Rescan",
-        "short": "Re-reads the open load order from disk and checks for updates again.",
+        "short": "Re-reads the open profile from disk and checks for updates again.",
         "long": (
-            "Reloads what's installed and switched on from the load order's own folder, dropping any unsaved "
+            "Reloads what's installed and switched on from the profile's own folder, dropping any unsaved "
             "changes on screen (it asks first), then runs the update check again."
         ),
     },
     {
         "name": "Add mod",
-        "short": "Installs a Thunderstore package into the open load order.",
+        "short": "Installs a Thunderstore package into the open profile.",
         "long": (
             "Asks for a package: its Team-Package name (as on Thunderstore, e.g. {example_package}) or the "
             "address of its thunderstore.io page. VOLT downloads its latest version (or takes it from the "
-            "cache), installs any of its dependencies that aren't in the load order yet, and appends it to the "
-            "Active list switched on. Downloads are shared: a package fetched once is reused by every load "
-            "order. It's the shortcut for when you already know the package; Browse Mods is the same install "
+            "cache), installs any of its dependencies that aren't in the profile yet, and appends it to the "
+            "Active list switched on. Downloads are shared: a package fetched once is reused by every "
+            "profile. It's the shortcut for when you already know the package; Browse Mods is the same install "
             "with searching built in."
         ),
     },
     {
         "name": "Browse Mods",
-        "short": "Opens the in-app Thunderstore browser to find {game} mods and install them into the open load order.",
+        "short": "Opens the in-app Thunderstore browser to find {game} mods and install them into the open profile.",
         "long": (
             "Search by name, narrow by category, and sort by most downloaded (the starting order), last updated, "
             "top rated or newest - each page comes straight from Thunderstore as you ask for it, so nothing is "
             "downloaded until you press Install. A card's Install button adds that mod (and any dependencies it "
             "needs) to the Active list, exactly like Add mod, and the browser stays open so you can keep going. "
             "Click a card itself for the mod's page: Details (its README, with the dependency check underneath), "
-            "Required (each dependency and whether it's already in the load order - click one to open its own page), Versions (every release, each "
+            "Required (each dependency and whether it's already in the profile - click one to open its own page), Versions (every release, each "
             "with its own Install) and Changelog, plus the latest version's facts and categories on the right - the "
             "version selector in the header decides what the big Install button installs, and it says how many "
             "extra packages come along. Back to results, Esc or Backspace go one step back - to the mod you came "
@@ -300,10 +300,16 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
     },
     {
         "name": "Import",
-        "short": "Creates a new load order from a .r2z profile file - VOLT's or r2modman / Thunderstore Mod Manager's.",
+        "short": (
+            "Creates a new profile from a .r2z profile file - VOLT's or r2modman / Thunderstore Mod Manager's - or "
+            "replaces the open profile with it."
+        ),
         "long": (
-            "Pick \"Import from file...\" and choose the file; VOLT asks for a name (the file's own profile name is "
-            "offered) and always makes a new load order - an existing one is never changed. It sets up BepInEx at the "
+            "Pick \"Import from file...\" and choose the file; with a profile open VOLT asks whether to add it as a new "
+            "profile (the default: it asks for a name, the file's own profile name offered, and no existing profile is "
+            "changed) or to replace the open profile (the result takes the file's profile name, the open profile's mods "
+            "that aren't in the file drop out, and it's only replaced once the import completes - if anything fails it's "
+            "left exactly as it was), and with none open it simply makes a new one. It sets up BepInEx at the "
             "file's version, downloads every listed mod at exactly the version in the file (if Thunderstore no longer "
             "has that version, the latest is installed and the summary says so; a mod that can't be fetched at all is "
             "listed as failed and the rest still install), puts the file's config files in place, and switches off "
@@ -311,17 +317,17 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
             "the file itself, so an import needs an internet connection. \"Import from code...\" takes a profile code "
             "instead - VOLT's, r2modman's or Thunderstore Mod Manager's - downloads that profile from Thunderstore and "
             "then imports it exactly the same way. \"Local mod (.zip)...\" is different: it installs one mod from "
-            "a Thunderstore package zip on your computer into the open load order (added to Active, its missing "
+            "a Thunderstore package zip on your computer into the open profile (added to Active, its missing "
             "dependencies downloaded), marked as a local package that's never checked for updates."
         ),
     },
     {
         "name": "Export",
-        "short": "Saves the open load order as a .r2z profile file that VOLT and r2modman / Thunderstore Mod Manager can read.",
+        "short": "Saves the open profile as a .r2z profile file that VOLT and r2modman / Thunderstore Mod Manager can read.",
         "long": (
-            "Pick \"Export to file...\" and choose where to save it (the load order's name is the default file name). "
+            "Pick \"Export to file...\" and choose where to save it (the profile's name is the default file name). "
             "The file holds the mod list as shown on screen right now - unsaved changes included, like Copy to new - "
-            "with each mod's version and on/off state, plus every file in the load order's BepInEx config folder, "
+            "with each mod's version and on/off state, plus every file in the profile's BepInEx config folder, "
             "so a friend's import gets your settings too. Inactive mods are written as switched off (that's what "
             "another mod manager understands); VOLT itself restores them to Inactive. Mod files aren't included - "
             "they're downloaded again on import. \"Export as code...\" uploads the same profile to Thunderstore's public "
@@ -334,25 +340,25 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
     },
     {
         "name": "Modded and Vanilla",
-        "short": "The two play buttons: Modded starts {game} with the open load order, Vanilla without mods or BepInEx.",
+        "short": "The two play buttons: Modded starts {game} with the open profile, Vanilla without mods or BepInEx.",
         "long": (
-            "Modded copies the load order's two BepInEx loader files (winhttp.dll and doorstop_config.ini) into the "
+            "Modded copies the profile's two BepInEx loader files (winhttp.dll and doorstop_config.ini) into the "
             "{game} folder - anything already there under those names is set aside - and starts the game through "
-            "Steam with launch arguments that point BepInEx at the load order's own folder, so the game install "
+            "Steam with launch arguments that point BepInEx at the profile's own folder, so the game install "
             "itself stays as it is; when the game exits, the copied files are removed and anything set aside is put "
             "back. Vanilla starts {game} through Steam as it is, with nothing copied and no BepInEx - it needs "
-            "no load order open. Either way "
+            "no profile open. Either way "
             "the screen stays locked while {game} runs, and a game left running when VOLT closes is picked up "
             "again the next time this screen opens. Neither button saves: with unsaved changes Modded asks first "
-            "and {game} gets the load order as it was last saved, and it also asks before starting with mods "
+            "and {game} gets the profile as it was last saved, and it also asks before starting with mods "
             "whose dependencies aren't installed."
         ),
     },
     {
         "name": "Save",
-        "short": "Writes the Active list and every toggle into the load order for real.",
+        "short": "Writes the Active list and every toggle into the profile for real.",
         "long": (
-            "The one save there is: every Active, switched-on mod gets its files enabled in the load order's "
+            "The one save there is: every Active, switched-on mod gets its files enabled in the profile's "
             "BepInEx folder, everything else (Inactive mods, toggled-off mods) gets them disabled, and the "
             "order is remembered. Nothing is downloaded and the game install is never touched. Turns yellow "
             "while there are unsaved changes."

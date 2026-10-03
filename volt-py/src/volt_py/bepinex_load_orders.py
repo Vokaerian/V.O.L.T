@@ -318,7 +318,7 @@ def _allocate(app_root, name) -> tuple[str, str]:
     the folder created (non-recursive mkdir, so a race can't reuse one)."""
     display = ("" if name is None else str(name)).strip()
     if not display:
-        raise ValueError("Load order name is empty")
+        raise ValueError("Profile name is empty")
     root = load_orders_root(app_root)
     root.mkdir(parents=True, exist_ok=True)
     base = slugify(display)
@@ -329,7 +329,7 @@ def _allocate(app_root, name) -> tuple[str, str]:
         except FileExistsError:
             continue
         return display, slug
-    raise ValueError(f'Too many load orders named like "{display}"')
+    raise ValueError(f'Too many profiles named like "{display}"')
 
 
 def _make_entry(ref: ts.PackageRef, result: dict) -> dict:
@@ -577,7 +577,7 @@ def remove_mod(app_root, slug, full_name: str) -> dict:
         raise ValueError(f"{full_name} is the framework package and can't be removed")
     entry = installed(manifest).get(full_name)
     if entry is None:
-        raise ValueError(f"{full_name} is not installed in this load order")
+        raise ValueError(f"{full_name} is not installed in this profile")
     res = bx.remove_files(tree_root(app_root, slug), entry["files"])
     log(f"[loadorders] {slug}: removed {full_name}: {res}")
     manifest["active"] = [e for e in manifest["active"] if e["full_name"] != full_name]
@@ -605,7 +605,7 @@ def save_load_order(app_root, slug, active, inactive) -> dict:
         if name == fw:
             raise ValueError(f"{name} is the framework package: pinned, not part of the lists")
         if name not in have:
-            raise ValueError(f"{name!r} is not installed in this load order")
+            raise ValueError(f"{name!r} is not installed in this profile")
         if name in seen:
             raise ValueError(f"{name} is listed twice")
         seen.add(name)
@@ -696,7 +696,7 @@ def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_versi
     manifest = load_load_order(app_root, slug)
     entry = installed(manifest).get(full_name)
     if entry is None:
-        raise ValueError(f"{full_name} is not installed in this load order")
+        raise ValueError(f"{full_name} is not installed in this profile")
     fw = manifest.get("framework")
     is_framework = bool(fw) and fw["full_name"] == full_name
     if version is None:
@@ -746,6 +746,31 @@ def copy_load_order(app_root, slug, new_name: str) -> dict:
     manifest = {**{k: v for k, v in src.items() if k != "slug"}, "name": display, "created_at": now}
     log(f"[loadorders] copied {slug!r} -> {new_slug!r} ({display!r})")
     return _write(app_root, new_slug, manifest)
+
+
+def reclaim_slug(app_root, slug) -> str:
+    """After a replace (bepinex_share.replace_profile): move the load order's
+    folder to the slug its name would get now, i.e. _allocate's first free
+    candidate, so a same-name replace doesn't leave <slug>-2 behind. Only a
+    plain rename - nothing records the folder path (manifests don't store the
+    slug, launch paths are computed per run). A failed rename (a file held
+    open on Windows) keeps the working folder and is only logged. Returns the
+    slug in use."""
+    base = slugify(load_load_order(app_root, slug)["name"])
+    root = load_orders_root(app_root)
+    for n in range(1, 1000):
+        cand = base if n == 1 else f"{base}-{n}"
+        if cand == slug:
+            return slug
+        if not (root / cand).exists():
+            try:
+                os.rename(root / slug, root / cand)
+            except OSError as err:
+                log(f"[loadorders] rename {slug!r} -> {cand!r} failed ({err!r}); keeping {slug!r}")
+                return slug
+            log(f"[loadorders] renamed {slug!r} -> {cand!r}")
+            return cand
+    return slug
 
 
 def delete_load_order(app_root, slug) -> dict:

@@ -30,7 +30,7 @@ from volt_py.screens.collection_dialog import WIDTH, CollectionDialog, _button, 
 TITLE = "Import local mod"
 INTRO = (
     "Install a mod from a Thunderstore package zip on this computer (manifest.json at its root) into the open "
-    "load order. It joins the Active list like a download, and any dependency it lists that isn't installed "
+    "profile. It joins the Active list like a download, and any dependency it lists that isn't installed "
     "comes from Thunderstore. VOLT never checks a local package for updates."
 )
 PLACEHOLDER = "No file chosen"

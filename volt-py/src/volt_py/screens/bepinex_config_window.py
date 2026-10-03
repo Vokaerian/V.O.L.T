@@ -116,7 +116,7 @@ SCROLL_LEAD = 4  # px above the target the scroll lands at (the mockup's offsetT
 
 NO_FILES = "No config files."
 NEVER_RUN = ("Only BepInEx's own config exists so far.\n\nBepInEx writes each mod's default config file "
-             "the first time the game runs with the mod installed - run this load order once to generate "
+             "the first time the game runs with the mod installed - run this profile once to generate "
              "them. BepInEx.cfg is listed on the left if you want to edit it.")
 NO_TEXT_FILES = "Only non-text files here. \"Show all files\" lists them."
 NO_MATCHES = "No matches"
@@ -1360,7 +1360,7 @@ class BepInExConfigWindow(QDialog):
             return
         box = QMessageBox(QMessageBox.Icon.Question, "Delete config file",
                           f"Delete {f.rel}?\n\nThe file is removed from disk; this can't be undone. A mod that "
-                          "needs it writes a fresh default one the next time the load order runs.",
+                          "needs it writes a fresh default one the next time the profile runs.",
                           QMessageBox.StandardButton.Cancel, self)
         delete = box.addButton("Delete", QMessageBox.ButtonRole.AcceptRole)
         box.setDefaultButton(delete)  # Enter confirms (user decision 2026-09-29)

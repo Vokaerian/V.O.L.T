@@ -62,7 +62,7 @@ def detail_text(issue: dict, name: str, dep_name: str) -> str:
     kind = issue["kind"]
     if kind == "missing":
         return (
-            f"{name} requires {dep_name}, which isn't installed in this load order. BepInEx will skip {name} "
+            f"{name} requires {dep_name}, which isn't installed in this profile. BepInEx will skip {name} "
             f"(or it will fail while loading). Install {dep_name} below - VOLT downloads its latest version, "
             "with anything it needs itself, and adds it to the Active list."
         )
@@ -118,7 +118,7 @@ class BepInExIssuesWindow(QDialog):
         screen's job; `is_busy()`: its lock."""
         super().__init__(parent)
         self.setObjectName("validation")  # the Warnings and errors window's frame (theme.py)
-        self.setWindowTitle("Load order warnings and errors")
+        self.setWindowTitle("Profile warnings and errors")
         self.setModal(True)
         self._issues_source = issues
         self._display_name = display_name
@@ -157,7 +157,7 @@ class BepInExIssuesWindow(QDialog):
         body.addWidget(self._build_rail())
         body.addWidget(self._build_detail(), 1)
         layout.addWidget(self._body, 1)
-        self._empty = QLabel("No warnings or errors in the current load order.")
+        self._empty = QLabel("No warnings or errors in the current profile.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._empty, 1)
 
@@ -272,7 +272,7 @@ class BepInExIssuesWindow(QDialog):
             else f"Install all missing ({len(missing)})" if missing else "Install all missing")
         self._body.setVisible(sel is not None)
         self._empty.setVisible(sel is None)
-        self._empty.setText("No warnings or errors in the current load order."
+        self._empty.setText("No warnings or errors in the current profile."
                             + (f"\n\n{self._result}" if self._result and sel is None else ""))
         for issue, entry in self._entries:
             selected = issue is sel

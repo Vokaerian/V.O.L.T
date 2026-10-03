@@ -31,7 +31,7 @@ also tells a VOLT export made for another game apart.
 
 Export writes the lists it's given (the screen's on-screen lists, unsaved
 edits included - Copy to new's rule) or the saved manifest's. Import
-ALWAYS creates a new load order, never merges: the framework at the
+builds a new load order, never merges: the framework at the
 file's version, every listed package at the file's exact version - a
 version Thunderstore no longer has falls back to the latest and is
 reported as such, a package that can't be fetched at all is reported and
@@ -40,6 +40,10 @@ latest (bepinex_load_orders' policy) - then the archive's files are
 restored into the tree (over the packages' default configs), then the
 enabled flags and the volt inactive list are materialized with
 save_load_order. The list order is the file's (cosmetic for BepInEx).
+replace_profile (0.6.22, the screen's "Replace current profile") is that
+same import under the file's profile name, then the replaced load order is
+deleted - only when the import completed (nothing failed); otherwise the
+new one is removed again and the old one is left as it was.
 
 Share as code (the menus' "Export as code..." / "Import from code...")
 is the same .r2z through Thunderstore's own profile-code service, the one
@@ -132,7 +136,7 @@ def export_file_name(load_order_name: str) -> str:
     """The save dialog's default: the load order's name with the characters
     Windows forbids in a file name stripped, plus .r2z."""
     name = " ".join(_BAD_FILENAME.sub(" ", load_order_name or "").split()).strip(". ")
-    return f"{name or 'load-order'}{EXTENSION}"
+    return f"{name or 'profile'}{EXTENSION}"
 
 
 # ---- zip entries -> where they go ----
@@ -155,7 +159,7 @@ def classify_entry(name: str) -> tuple[str | None, str]:
     if parts is None:
         return None, "folder"
     if ".." in parts or name.startswith(("/", "\\")) or _DRIVE.match(parts[0]):
-        return None, "would land outside the load order folder"
+        return None, "would land outside the profile folder"
     lower = [p.lower() for p in parts]
     ext = os.path.splitext(lower[-1])[1]
     if lower == [MANIFEST_NAME.lower()]:
@@ -181,7 +185,7 @@ def _dest_path(tree_root: Path, rel: str) -> Path:
     dest = tree_root.joinpath(*rel.split("/"))
     root_abs, dest_abs = os.path.abspath(tree_root), os.path.abspath(dest)
     if os.path.commonpath([root_abs, dest_abs]) != root_abs:  # classify_entry already refuses these; belt and braces
-        raise ProfileError(f"Refusing to write outside the load order folder: {rel!r}")
+        raise ProfileError(f"Refusing to write outside the profile folder: {rel!r}")
     return dest
 
 
@@ -424,11 +428,11 @@ def build_manifest(manifest: dict, game: lo.ThunderstoreGame, *, active=None, in
             if name == fw_name:
                 raise ValueError(f"{name} is the framework package: pinned, not part of the lists")
             if name not in have:
-                raise ValueError(f"{name!r} is not installed in this load order")
+                raise ValueError(f"{name!r} is not installed in this profile")
             act.append((name, bool(enabled)))
         for name in inactive or []:
             if name == fw_name or name not in have:
-                raise ValueError(f"{name!r} is not installed in this load order")
+                raise ValueError(f"{name!r} is not installed in this profile")
             ina.append(name)
     mods = []
     if fw:
@@ -549,7 +553,7 @@ def upload_code(zip_bytes: bytes, app_version=None) -> str:
     """POSTs a .r2z to Thunderstore's profile service; returns the code.
     ProfileError (too big, rate limited, HTTP / network failure)."""
     if len(zip_bytes) > CODE_LIMIT:
-        raise ProfileError(f"This load order's profile is {len(zip_bytes) >> 20} MB - more than a shareable code can carry "
+        raise ProfileError(f"This profile is {len(zip_bytes) >> 20} MB - more than a shareable code can carry "
                            f"({CODE_LIMIT >> 20} MB). Export to a file instead.")
     url = f"{CODE_API}/create/"
     payload = encode_code_payload(zip_bytes)
@@ -762,6 +766,72 @@ def import_profile(app_root, path, name: str, game: lo.ThunderstoreGame, app_ver
     return summary
 
 
+def replace_profile(app_root, path, old_slug, game: lo.ThunderstoreGame, app_version=None, *,
+                    progress=None, game_name: str | None = None, source: str | None = None) -> dict:
+    """Replace the load order `old_slug` with the profile at `path`: a full
+    import_profile into a NEW load order named as the file says (its
+    profileName, else the file stem; _allocate gives a clashing name a
+    fresh folder - the old one's included, it still exists then). A
+    framework failure or unexpected error removes whatever was created and
+    propagates, `old_slug` untouched. A complete import is finished at once
+    (finish_replace(keep_new=True)). An incomplete one (failed mods /
+    errors) comes back with "partial": True and BOTH load orders still on
+    disk: the caller asks (GUI thread) and calls finish_replace."""
+    old = lo.load_load_order(app_root, old_slug)  # validates the slug; unreadable = refused before anything is built
+    profile = read_profile(path)
+    name = profile["name"] or Path(path).stem
+    before = {o["slug"] for o in lo.list_load_orders(app_root)}
+    try:
+        summary = import_profile(app_root, path, name, game, app_version, progress=progress, game_name=game_name, source=source)
+    except Exception as err:
+        log(f"[share] replace {old_slug}: import failed ({err!r}); new load order removed, {old_slug} kept")
+        for o in lo.list_load_orders(app_root):  # whatever this import created (one job at a time: the screen is busy)
+            if o["slug"] not in before:
+                lo.delete_load_order(app_root, o["slug"])
+        raise
+    summary["old_slug"], summary["old_name"] = old_slug, old["name"]
+    if summary["failed"] or summary["errors"]:
+        summary["partial"] = True
+        log(f"[share] replace {old_slug}: import incomplete ({len(summary['failed'])} failed, {len(summary['errors'])} errors); "
+            f"{summary['slug']} built, {old_slug} kept until decided")
+        return summary
+    return finish_replace(app_root, summary, keep_new=True)
+
+
+def finish_replace(app_root, summary: dict, *, keep_new: bool) -> dict:
+    """keep_new: delete the old load order, then reclaim_slug the new one
+    (a same-name replace ends in the clean folder); the summary gains
+    "replaced" + "replace_skipped" and the final "slug" / "manifest".
+    Not keep_new: the new load order is deleted, the old one untouched, and
+    ProfileError (replace_kept_text) is raised."""
+    old_slug, old_name, new_slug = summary["old_slug"], summary["old_name"], summary["slug"]
+    summary["partial"] = False
+    if not keep_new:
+        lo.delete_load_order(app_root, new_slug)
+        log(f"[share] replace {old_slug}: kept; {new_slug} removed")
+        raise ProfileError(replace_kept_text(summary))
+    res = lo.delete_load_order(app_root, old_slug)
+    summary["replaced"], summary["replace_skipped"] = old_name, res.get("skipped", [])
+    summary["slug"] = lo.reclaim_slug(app_root, new_slug)
+    summary["manifest"] = lo.load_load_order(app_root, summary["slug"])
+    log(f"[share] replaced {old_slug} ({old_name!r}) with {summary['slug']} ({summary['name']!r}"
+        f"{', built as ' + new_slug if new_slug != summary['slug'] else ''}); {len(summary['failed'])} failed, "
+        f"{len(summary['replace_skipped'])} files of the old one left behind")
+    return summary
+
+
+def failed_lines(summary: dict, cap: int = 8) -> list[str]:
+    """One line per failed mod / error, the first `cap`, then "and N more"."""
+    items = [f"  - {f['package']}: {f['message']}" for f in summary["failed"]] + [f"  - {e}" for e in summary["errors"]]
+    return items[:cap] + ([f"  ... and {len(items) - cap} more"] if len(items) > cap else [])
+
+
+def replace_kept_text(summary: dict) -> str:
+    old = summary["old_name"]
+    return "\n".join([f'"{old}" wasn\'t replaced: the import didn\'t complete, so it was undone and "{old}" is unchanged.',
+                      ""] + failed_lines(summary) + ["", 'To keep what did install, import again and choose "Add as a new profile".'])
+
+
 def _plural(n: int, one: str, many: str | None = None) -> str:
     return f"{n} {one if n == 1 else (many or one + 's')}"
 
@@ -771,6 +841,11 @@ def describe_import(summary: dict) -> str:
     latest, what failed, what was restored / skipped."""
     total = summary["listed"]
     lines = [f'Imported "{summary["name"]}" from {summary.get("source") or Path(summary["path"]).name}.', ""]
+    if summary.get("replaced"):
+        lines[1:1] = [f'It replaced the profile "{summary["replaced"]}".']
+        if summary.get("replace_skipped"):
+            lines[2:2] = [f'{_plural(len(summary["replace_skipped"]), "file")} of "{summary["replaced"]}" couldn\'t be '
+                          "removed (in use?) and were left in its folder."]
     fw = summary["framework"]
     fw_line = f"Framework: {fw['installed']}"
     if fw["fell_back"]:

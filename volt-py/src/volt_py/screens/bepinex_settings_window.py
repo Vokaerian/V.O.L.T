@@ -101,11 +101,11 @@ from volt_py.screens.settings_window import (
 from volt_py.settings import SettingsStore
 from volt_py.thunderstore_browse import format_size
 
-CLEAN_CACHE_TOOLTIP = "Removes cached mods that aren't in any load order to free up storage space"
+CLEAN_CACHE_TOOLTIP = "Removes cached mods that aren't in any profile to free up storage space"
 CLEAN_CACHE_BUSY_TOOLTIP = "Unavailable while VOLT is installing, updating or running the game"
 LOG_COPY_BYTES = 200 * 1024  # Copy log to clipboard: the log's tail, so a long session doesn't flood the clipboard
 COPY_LOG_TOOLTIP = "Copies the log file as plain text (the last 200 KB when it's longer)"
-COPY_INFO_TOOLTIP = "Copies versions, paths, the load order and the log's last 50 lines as plain text, for a bug report"
+COPY_INFO_TOOLTIP = "Copies versions, paths, the profile and the log's last 50 lines as plain text, for a bug report"
 LAUNCH_ARGS_NOTE = "Extra command-line arguments appended when starting the game, for both Modded and Vanilla."
 # Launch's examples when the game module has no LAUNCH_ARG_EXAMPLES: Unity
 # player options (docs.unity3d.com "Unity Standalone Player command line
@@ -115,8 +115,8 @@ UNITY_LAUNCH_ARG_EXAMPLES = (
     ("-window-mode borderless", "borderless fullscreen"),
     ("-screen-width 1920 -screen-height 1080", "sets the resolution"),
 )
-DATA_FOLDER_NOTE = "VOLT's own files for this game: load orders, mod cache and settings."
-SUPPORT_NOTE = "Versions, paths and the load order (plus the log's last lines), ready to paste into a bug report."
+DATA_FOLDER_NOTE = "VOLT's own files for this game: profiles, mod cache and settings."
+SUPPORT_NOTE = "Versions, paths and the profile (plus the log's last lines), ready to paste into a bug report."
 
 
 def _plural(n: int, word: str) -> str:
@@ -131,19 +131,19 @@ def clean_result_text(res: dict) -> tuple[str, str, bool]:
         first = res["unreadable"][0]["error"]
         return (
             "Couldn't clean cache",
-            f"Nothing was deleted: VOLT couldn't read the load order{'s' if len(res['unreadable']) > 1 else ''} "
-            f"{names} ({first}). Clean cache only runs when every load order can be read, so it never removes a "
+            f"Nothing was deleted: VOLT couldn't read the profile{'s' if len(res['unreadable']) > 1 else ''} "
+            f"{names} ({first}). Clean cache only runs when every profile can be read, so it never removes a "
             f"mod one of them uses.",
             True,
         )
     kept = len(res["kept"])
     if res["removed"]:
-        text = (f"Removed {_plural(len(res['removed']), 'cached mod')} that no load order uses, "
+        text = (f"Removed {_plural(len(res['removed']), 'cached mod')} that no profile uses, "
                 f"freeing {format_size(res['freed'])}.")
         if kept:
             text += f" {_plural(kept, 'cached mod')} in use {'was' if kept == 1 else 'were'} kept."
     else:
-        text = ("Nothing to clean: every cached mod is used by a load order." if kept
+        text = ("Nothing to clean: every cached mod is used by a profile." if kept
                 else "Nothing to clean: the mod cache is empty.")
     if res["failed"]:
         names = ", ".join(name for name, _ in res["failed"])
@@ -248,7 +248,7 @@ class BepInExSettingsWindow(QDialog):
         row.addWidget(self.game_browse)
         layout.addLayout(row)
         note = _muted(
-            f"Mods and their BepInEx config live inside each load order's own folder under VOLT's data folder, "
+            f"Mods and their BepInEx config live inside each profile's own folder under VOLT's data folder, "
             f"never in the {self._game_name} install - so this is the only path to set."
         )
         note.setWordWrap(True)
@@ -343,7 +343,7 @@ class BepInExSettingsWindow(QDialog):
         _group(
             layout, "Reset installation",
             f"Fixes problems from corrupted or leftover modding files. Deletes everything in the {self._game_name} "
-            "folder, then asks Steam to verify and re-download the game files. Your load orders and mods in VOLT's "
+            "folder, then asks Steam to verify and re-download the game files. Your profiles and mods in VOLT's "
             "data folder are untouched.",
             self.reset_button,
         )
@@ -509,7 +509,7 @@ class BepInExSettingsWindow(QDialog):
             "Reset installation",
             f"Delete EVERYTHING inside {game_dir}? This removes the whole {self._game_name} install (and anything "
             f"else you put in that folder) and can't be undone. Steam then re-downloads the game when it verifies "
-            f"the files. Your load orders and mods in VOLT's data folder are kept.",
+            f"the files. Your profiles and mods in VOLT's data folder are kept.",
             confirm_label="Delete and verify",
             parent=self,
         ):
