@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
 )
 
 from volt_py import bepinex_games, painters, theme
+from volt_py.screens.first_run_widgets import WelcomePanel
 from volt_py.screens.flow_layout import FlowLayout
 
 # volt_py/assets/covers/<slug>.jpg (this module is volt_py/screens/game_select.py).
@@ -128,6 +129,7 @@ PAD_V = 56
 PAD_H = 80
 CAPTION_TO_GRID = 26
 CAPTION_WIDTH = 420  # the SELECT A GAME caption with its rules (step 3.4)
+WELCOME_GAP = 28  # the one-time welcome panel's distance under the header (0.6.23); the caption keeps its 44 under it
 
 # ---- brand header (DESIGN.md §35) ----
 HEADER_SIZE = QSize(459, 176)  # the pixmap, logical px
@@ -536,8 +538,11 @@ class GameSelectScreen(QWidget):
     activated (GameSelect.jsx's onSelect)."""
 
     gameSelected = Signal(str)
+    welcomeDismissed = Signal()  # the welcome panel's "Got it" (MainWindow records it, 0.6.23)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, welcome: bool = False) -> None:
+        """welcome: show the one-time welcome panel (PLAN.md §10 (g); MainWindow
+        passes it until the app-wide welcome_seen is set)."""
         super().__init__(parent)
         slack_top = RING_PX + LIFT_PX  # tile slot space above its resting card
 
@@ -550,6 +555,20 @@ class GameSelectScreen(QWidget):
 
         # .game-select-header: the brand header (mark + wordmark + tagline)
         column.addWidget(_brand_header(), 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # The one-time welcome (0.6.23): a new row between the header and the
+        # caption, WELCOME_GAP under the header; the caption keeps its 44px
+        # under it and nothing else moves. Hidden for good after "Got it" (or
+        # once any game has opened - MainWindow stops passing welcome).
+        self.welcome: QWidget | None = None
+        self.welcome_panel: WelcomePanel | None = None
+        if welcome:
+            self.welcome = QWidget()
+            welcome_row = QVBoxLayout(self.welcome)
+            welcome_row.setContentsMargins(0, WELCOME_GAP, 0, 0)
+            self.welcome_panel = WelcomePanel(self._dismiss_welcome)
+            welcome_row.addWidget(self.welcome_panel, 0, Qt.AlignmentFlag.AlignHCenter)
+            column.addWidget(self.welcome)
 
         column.addSpacing(44)
         caption = painters.TerminalLabel("Select a game", rule="both")
@@ -580,7 +599,8 @@ class GameSelectScreen(QWidget):
                 tile.activated.connect(self.gameSelected)
             grid.addWidget(tile)
             tiles.append(tile)
-        painters.install_shadows(content, lambda: [b for b in (t.rest_shadow_target() for t in tiles) if b is not None])
+        painters.install_shadows(content, lambda: [b for b in (t.rest_shadow_target() for t in tiles) if b is not None]
+                                 + ([self.welcome_panel] if self.welcome_panel is not None else []))
         column.addStretch(1)  # content stays top-aligned in a tall window
 
         scroll = QScrollArea()
@@ -594,3 +614,11 @@ class GameSelectScreen(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(scroll)
+
+    def _dismiss_welcome(self) -> None:
+        """"Got it": the welcome row goes under a crossfade of the screen (the
+        caption and tiles move up; Animations setting applies) and
+        MainWindow records it, so it never shows again."""
+        if self.welcome is not None and self.welcome.isVisible():
+            painters.crossfade(self, lambda: self.welcome.setVisible(False), theme.MOTION)
+        self.welcomeDismissed.emit()

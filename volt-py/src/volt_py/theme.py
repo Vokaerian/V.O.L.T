@@ -1696,6 +1696,64 @@ QDialog#syncConfirm {{
     background: {PANEL};
 }}
 
+/* ---- first-run guidance (PLAN.md §10, v0.6.23; screens/first_run_widgets.py) ----
+   The empty-state card over the Active list's empty dot grid: a --panel-2
+   card (a row card's surface) on the --panel list. Title --text 15px 600
+   (12.0:1), body [muted] (5.7:1), Create = primary (6.8:1), Import =
+   accent-outline (--accent 5.4:1). The welcome panel (game select) is a
+   QFrame[panel] with the same title / body roles (13.5:1 / 6.4:1 on --panel). */
+QFrame[role="first-run-card"] {{
+    background: {PANEL_2};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+}}
+QLabel[role="first-run-title"] {{
+    font-size: 15px;
+    font-weight: 600;
+    color: {TEXT};
+}}
+/* The get-started checklist's steps, on its --panel strip: flat text buttons
+   (--text 13.5:1) that show a --muted edge on hover and sink to --bg when
+   pressed; the next step is outlined in --accent with --accent 600 text
+   (6.1:1; hovered --accent-hover 7.6:1, pressed --accent-pressed on --bg
+   5.0:1). Disabled (a done step, or one that can't run yet) = --muted
+   (6.4:1), no edge; the informational last step, never clickable, stays
+   --text 600 while it is the next one. */
+QPushButton[variant="checklist-step"] {{
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 3px 8px;
+    color: {TEXT};
+}}
+QPushButton[variant="checklist-step"]:enabled:hover {{
+    border-color: {MUTED};
+}}
+QPushButton[variant="checklist-step"]:enabled:pressed {{
+    background: {BG};
+}}
+QPushButton[variant="checklist-step"][next="true"] {{
+    border-color: {ACCENT};
+    color: {ACCENT};
+    font-weight: 600;
+}}
+QPushButton[variant="checklist-step"][next="true"]:enabled:hover {{
+    border-color: {ACCENT_HOVER};
+    color: {ACCENT_HOVER};
+}}
+QPushButton[variant="checklist-step"][next="true"]:enabled:pressed {{
+    border-color: {ACCENT_PRESSED};
+    color: {ACCENT_PRESSED};
+}}
+QPushButton[variant="checklist-step"]:disabled {{
+    background: transparent;
+    border-color: transparent;
+    color: {MUTED};
+}}
+QPushButton[variant="checklist-step"][next="true"]:disabled {{
+    color: {TEXT};
+    font-weight: 600;
+}}
+
 /* ---- Installed / already installed (design phase 2, decision 5): a success
    state, not a washed-out disabled control - a 12% --ok wash, a 45% --ok
    edge, --ok text 600 and a drawn check (the screen sets the icon). Last, so

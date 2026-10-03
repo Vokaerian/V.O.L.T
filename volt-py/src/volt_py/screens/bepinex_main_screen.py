@@ -17,6 +17,7 @@ Top to bottom (the mockup):
   paths bar      Settings | Paths: Game / Load order / BepInEx | storefront tag | version ... Help
                  <game folder>  /  <the open load order's BepInEx folder>   (muted, 12px)
   load-order bar Load order [picker] New.. Copy.. [Unsaved changes ↺] ... [⚠ N updates · Update all]
+  checklist      GET STARTED 1. .. 2. .. 3. .. 4. .. ... Hide   (0.6.23, until done / hidden)
   content row    [details | inactive | active] (1.2 : 1 : 1) + actions column (150px)
   footer         divider; [status text]
 
@@ -137,6 +138,18 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     the row entry just pre-fills the search with the package name when
     that matches a file.
 
+First-run guidance (PLAN.md §10, 0.6.23; words + rules in volt_py/first_run.py,
+widgets in screens/first_run_widgets.py): while the game is found and no
+profile is open, a card on the Active list's empty dot grid ("Let's set up
+your first profile." + Create a profile / Import one someone shared = the
+existing New profile / Import... actions); every control disabled only for
+want of a profile says "Create a profile first."; opening the screen with
+zero profiles asks "Create your first profile?" once (New profile's flow,
+name "Default", Create / Not now); and a get-started checklist band under
+the profile bar ticks off game folder / profile / mods / first modded
+launch (settings has_launched), until all four are done or Hide
+(settings checklist_dismissed). _apply_first_run keeps all of it in step.
+
 Network work (create - the framework download; add; update one / all;
 the check pass) runs on a daemon thread (rimworld_main_screen.py's
 _fetch_community_rules pattern: a QObject carrier's queued signal brings
@@ -153,7 +166,7 @@ from datetime import datetime, timedelta, timezone
 from importlib.metadata import version
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -178,6 +191,7 @@ from PySide6.QtWidgets import (
 )
 
 from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, bepinex_share as share, icons, painters, paths, theme
+from volt_py import first_run as fr
 from volt_py import thunderstore as ts
 from volt_py.app_root import migrate_legacy_app_root, resolve_app_root
 from volt_py.applog import clip, init_log, log
@@ -190,6 +204,7 @@ from volt_py.screens.bepinex_issues_window import BepInExIssuesWindow
 from volt_py.screens.bepinex_local_import_dialog import LocalModDialog
 from volt_py.screens.bepinex_mod_list import BepInExModListView, RowInfo
 from volt_py.screens.details_panel import details_well, readout
+from volt_py.screens.first_run_widgets import ChecklistStrip, EmptyStateCard
 from volt_py.screens.bepinex_settings_window import BepInExSettingsWindow
 from volt_py.screens.help_window import HelpWindow
 from volt_py.screens.rimworld_main_screen import (
@@ -515,8 +530,23 @@ class BepInExMainScreen(QWidget):
         layout.setSpacing(0)
         layout.addWidget(self._build_paths_bar())
         layout.addWidget(self._build_load_order_bar())
+        layout.addWidget(self._build_checklist())  # 0.6.23: a new band, nothing above / below it moves
         layout.addLayout(self._build_content_row(), 1)
         layout.addWidget(self._build_footer())
+        # Each control that needs an open profile, with its own tooltip: while
+        # it's disabled only for want of one, it says "Create a profile
+        # first." instead (PLAN.md §10 (d), 0.6.23; _apply_load_order_state).
+        # The Paths links and Update all set theirs where they're computed.
+        self._profile_tips = {w: w.toolTip() for w in (
+            self.load_order_picker, self.copy_button, self.export_button, self.enable_all_button,
+            self.disable_all_button, self.rescan_button, self.config_button, self.add_mod_button,
+            self.browse_button, self.save_button, self.run_button)}
+        # First-run guidance (0.6.23) as last shown: the card / the checklist
+        # band visible, the checklist's state - a change crossfades, a repeat
+        # does nothing (_apply_first_run runs on every state change).
+        self._card_shown = False
+        self._checklist_shown = False
+        self._checklist_state: tuple | None = None
 
         self.game_dir: Path | None = None
         self._game_source: str | None = None
@@ -575,6 +605,11 @@ class BepInExMainScreen(QWidget):
             self._start_update_check()
         else:
             log("no game folder: not opening a load order")
+        # "Create your first profile?" (PLAN.md §10 (e)): once per opening of
+        # this screen, after the screen crossfade has finished
+        if fr.first_profile_prompt(game_found=self.game_dir is not None, busy=self._busy is not None,
+                                   profiles=self.load_order_picker.count()):
+            QTimer.singleShot(theme.MOTION_SCREEN + 50, self, self._first_profile_prompt)
 
     # ---- paths: saved settings, else autodetect ----
     def _resolve_paths(self) -> None:
@@ -745,6 +780,9 @@ class BepInExMainScreen(QWidget):
         self.save_button.setEnabled(ready and has_lo)
         self.run_button.setEnabled(ready and has_lo)
         self.vanilla_button.setEnabled(ready)  # no load order needed for a vanilla launch (user-directed 2026-09-28)
+        no_profile = fr.needs_profile_tip(game_found=has_game, busy=busy, open_slug=self.current_load_order)
+        for widget, tip in self._profile_tips.items():
+            widget.setToolTip(fr.NO_PROFILE_TIP if no_profile else tip)
         # Games (back to game select): disabled for the whole of any busy
         # state, a running game included (leaving would skip its modded-run
         # cleanup); the tooltip says why.
@@ -772,6 +810,7 @@ class BepInExMainScreen(QWidget):
         self._update_issues()
         self.active_list.viewport().update()  # the rows' controls follow busy / toggles
         self.inactive_list.viewport().update()
+        self._apply_first_run()
 
     def _apply_update_button(self) -> None:
         """The load-order bar's permanent update element (THUNDERSTORE.md §3):
@@ -788,7 +827,9 @@ class BepInExMainScreen(QWidget):
         elif self._entries and all(n in self._meta for n in self._entries if self._entries[n].get("online_source", True)):
             text, enabled, variant, tip = "Up to date", False, "", "Every mod in this profile is at its latest version."
         else:
-            text, enabled, variant, tip = "Update all", False, "", ""
+            no_profile = fr.needs_profile_tip(game_found=self.game_dir is not None, busy=self._busy is not None,
+                                              open_slug=self.current_load_order)
+            text, enabled, variant, tip = "Update all", False, "", fr.NO_PROFILE_TIP if no_profile else ""
         button.setText(text)
         # the drawn warning icon (icons.py) before "N updates" - was a "⚠"
         # in the text, which Windows drew as a color emoji
@@ -805,6 +846,90 @@ class BepInExMainScreen(QWidget):
         when any package hit it (it names the cure), else the first."""
         errs = list(self._check_errors.values())
         return ts.RATE_LIMITED_MSG if ts.RATE_LIMITED_MSG in errs else errs[0]
+
+    # ---- first-run guidance (PLAN.md §10 (c)-(f), 0.6.23; volt_py/first_run.py) ----
+    def _apply_first_run(self) -> None:
+        """The empty-state card and the get-started checklist follow the
+        screen's state (from _apply_load_order_state, i.e. after every
+        change): the card while the game is found and no profile is open,
+        its buttons enabled exactly as New profile / Import...; the
+        checklist's four steps ticked live, the next one emphasised, each
+        step's action enabled as its button is. A visibility change
+        crossfades (painters.crossfade: Animations setting, no effect on
+        the lists), a tick changes the band under a short one."""
+        has_game = self.game_dir is not None
+        card = self.first_run_card
+        card.create_button.setEnabled(self.new_button.isEnabled())
+        card.import_button.setEnabled(self.import_button.isEnabled())
+        show = fr.show_card(game_found=has_game, open_slug=self.current_load_order,
+                            active_rows=len(self.active_list.mod_ids()))
+        if show != self._card_shown:
+            self._card_shown = show
+            log(f"first run: empty-state card {'shown' if show else 'hidden'}")
+            self._fade(lambda: card.setVisible(show), self._active_pane)
+        s = self._settings.get()
+        mods = sum(1 for n in self._entries if n != self._framework) if self.current_load_order else 0
+        st = fr.checklist(game_found=has_game, profiles=self.load_order_picker.count(), mods=mods,
+                          launched=s["has_launched"], dismissed=s["checklist_dismissed"])
+        if st["next"] is None and not s["checklist_dismissed"]:
+            log("first run: every get-started step done, the checklist retires")
+            self._remember({"checklist_dismissed": True})
+        enabled = (self.settings_button.isEnabled(), self.new_button.isEnabled(), self.browse_button.isEnabled(), False)
+        state = (st["done"], st["next"], enabled)
+        if st["visible"] != self._checklist_shown:
+            self._checklist_shown = st["visible"]
+            self._checklist_state = state
+            log(f"first run: checklist {'shown' if st['visible'] else 'hidden'} (done={st['done']}, next={st['next']})")
+
+            def swap() -> None:
+                self.checklist.set_state(*state)
+                self._checklist_box.setVisible(st["visible"])
+
+            self._fade(swap)  # the content row moves: the whole screen crossfades
+        elif state != self._checklist_state:
+            if st["done"] != (self._checklist_state or ((),))[0]:
+                log(f"first run: checklist done={st['done']}, next={st['next']}")
+            self._checklist_state = state
+            if st["visible"]:
+                self._fade(lambda: self.checklist.set_state(*state), self.checklist, theme.MOTION_FAST)
+            else:
+                self.checklist.set_state(*state)
+
+    def _fade(self, swap, area: QWidget | None = None, duration: int = theme.MOTION) -> None:
+        """swap() under a crossfade of `area` (a child widget; None = the
+        whole screen). Before the screen is shown it just swaps."""
+        rect = None if area is None else QRect(area.mapTo(self, QPoint(0, 0)), area.size())
+        painters.crossfade(self, swap, duration, rect)
+
+    def _remember(self, patch: dict) -> None:
+        """A first-run settings key (checklist_dismissed / has_launched):
+        best effort - a read-only settings file only means the guidance
+        shows again next time."""
+        try:
+            self._settings.update(patch)
+            log(f"first run: settings {patch}")
+        except OSError as err:
+            log(f"first run: couldn't save {patch}: {err!r}")
+
+    def _hide_checklist(self) -> None:
+        """The checklist's "Hide": gone for this game, for good."""
+        log("first run: checklist hidden by the user")
+        self._remember({"checklist_dismissed": True})
+        self._apply_first_run()
+
+    def _first_profile_prompt(self) -> None:
+        """"Create your first profile?" (PLAN.md §10 (e)): queued by __init__
+        when the game had no profile; re-checked here, as the screen may
+        have been left or a job started meanwhile. Create = New profile's
+        own flow named "Default"; Not now / Esc = nothing (the card stays,
+        no re-prompt until the screen is opened again)."""
+        if self._closed or not fr.first_profile_prompt(game_found=self.game_dir is not None,
+                                                       busy=self._busy is not None,
+                                                       profiles=self.load_order_picker.count()):
+            log("first run: first-profile prompt skipped (state changed since the screen opened)")
+            return
+        log("first run: no profiles yet - asking to create the first one")
+        self._new_load_order(first_run=True)
 
     def _snapshot(self) -> tuple[list[str], dict[str, bool]]:
         ids = self._active_ids()
@@ -878,7 +1003,7 @@ class BepInExMainScreen(QWidget):
         open), and the muted path line under the bar."""
         for link, path in ((self.load_order_link, self._load_order_dir()), (self.bepinex_link, self._bepinex_dir())):
             link.setEnabled(path is not None)
-            link.setToolTip(str(path) if path else "")
+            link.setToolTip(str(path) if path else fr.NO_PROFILE_TIP if self.game_dir is not None else "")
         parts = [str(p) for p in (self.game_dir, self._bepinex_dir()) if p]
         self.path_line.set_text("  /  ".join(parts))
         self.path_line.setVisible(bool(parts))
@@ -1156,26 +1281,45 @@ class BepInExMainScreen(QWidget):
         self._apply_current_load_order_to_panes()
         self._start_update_check()
 
-    def _ask_name(self, title: str, message: str | None = None, default: str = "") -> str | None:
-        name, ok = QInputDialog.getText(self, title, f"{message}\n\nName:" if message else "Name:",
-                                        QLineEdit.EchoMode.Normal, default)
+    def _ask_name(self, title: str, message: str | None = None, default: str = "", *,
+                  ok_label: str | None = None, cancel_label: str | None = None) -> str | None:
+        label = f"{message}\n\nName:" if message else "Name:"
+        if ok_label is None:
+            name, ok = QInputDialog.getText(self, title, label, QLineEdit.EchoMode.Normal, default)
+        else:  # own button labels (the first-open prompt's Create / Not now): QInputDialog's instance API
+            dialog = QInputDialog(self)
+            dialog.setWindowTitle(title)
+            dialog.setLabelText(label)
+            dialog.setTextValue(default)
+            dialog.setOkButtonText(ok_label)
+            dialog.setCancelButtonText(cancel_label or "Cancel")
+            ok = dialog.exec() == QDialog.DialogCode.Accepted  # Enter = OK (the default), Esc = Cancel
+            name = dialog.textValue()
         if not ok or not name.strip():
             log(f"{title}: {'cancelled' if not ok else 'empty name entered'}, nothing created")
             return None
         return name.strip()
 
-    def _new_load_order(self) -> None:
+    def _new_load_order(self, first_run: bool = False) -> None:
         """New load order: a folder + manifest, then the framework package
         downloaded (or taken from the cache) and installed - so the
-        download runs as a job, the screen busy meanwhile."""
+        download runs as a job, the screen busy meanwhile. `first_run`: the
+        first-open prompt's wording (PLAN.md §10 (e)) - name prefilled
+        "Default", Create / Not now; the rest is the same flow."""
         if not self._confirm_discard():
             log("New load order: cancelled at the discard-changes prompt")
             return
-        name = self._ask_name(
-            "New profile",
-            f"A new profile gets its own BepInEx install: {self.ts_game.framework_package} is downloaded "
-            "from Thunderstore (or taken from VOLT's cache) and set up for it right away.",
-        )
+        if first_run:
+            name = self._ask_name(
+                fr.FIRST_PROFILE_TITLE, fr.FIRST_PROFILE_TEXT.replace("{game}", self.game_name),
+                fr.FIRST_PROFILE_NAME, ok_label=fr.FIRST_PROFILE_OK, cancel_label=fr.FIRST_PROFILE_CANCEL,
+            )
+        else:
+            name = self._ask_name(
+                "New profile",
+                f"A new profile gets its own BepInEx install: {self.ts_game.framework_package} is downloaded "
+                "from Thunderstore (or taken from VOLT's cache) and set up for it right away.",
+            )
         if name is None:
             return
         self._set_busy(f"Creating profile \"{name}\" - installing {self.ts_game.framework_package}...")
@@ -1230,7 +1374,8 @@ class BepInExMainScreen(QWidget):
         return [
             ("Import from file...", self._import_file, True, IMPORT_TOOLTIP),
             ("Import from code...", self._import_code, True, IMPORT_CODE_TOOLTIP),
-            ("Local mod (.zip)...", self._import_local_mod, self.current_load_order is not None, IMPORT_LOCAL_TOOLTIP),
+            ("Local mod (.zip)...", self._import_local_mod, self.current_load_order is not None,
+             IMPORT_LOCAL_TOOLTIP if self.current_load_order is not None else fr.NO_PROFILE_TIP),
         ]
 
     def _export_menu_items(self) -> list[tuple]:
@@ -2405,6 +2550,8 @@ class BepInExMainScreen(QWidget):
             if pids:
                 st["phase"], st["started"] = "running", time.monotonic()
                 log(f"run: {st['exe_name']} running (pids {sorted(pids)}) after {elapsed:.0f}s")
+                if st["modded"] and not self._settings.get()["has_launched"]:
+                    self._remember({"has_launched": True})  # the checklist's step 4 (0.6.23)
                 self._set_busy(f"{self.game_name} is running ({what})."
                                + (" VOLT tidies the game folder when it exits." if st["modded"] else ""))
             elif elapsed >= bl.START_TIMEOUT_S:
@@ -2557,6 +2704,25 @@ class BepInExMainScreen(QWidget):
         row.addWidget(self.update_all_button)
         return bar
 
+    # ---- the get-started checklist band (0.6.23): between the profile bar and the content row ----
+    def _build_checklist(self) -> QWidget:
+        """A new band (PLAN.md §10 (f)): the content row's side margins, 8px
+        above (the content row keeps its own 8px under it); hidden until
+        _apply_first_run says otherwise. Steps: Settings, New profile,
+        Browse Mods (the existing actions), then the informational Run."""
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(BAR_SIDE, 8, BAR_SIDE, 0)
+        self.checklist = ChecklistStrip(
+            self.game_name,
+            (lambda: self._show_settings(), lambda: self._new_load_order(), lambda: self._browse_mods(), None),
+            lambda: self._hide_checklist(),
+        )
+        row.addWidget(self.checklist)
+        box.setVisible(False)
+        self._checklist_box = box
+        return box
+
     # ---- .content-row ----
     def _build_content_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -2581,7 +2747,7 @@ class BepInExMainScreen(QWidget):
         # Circuit panel shadows (painters.py: a cached 9-slice this screen
         # paints behind the four panels; the lists themselves are untouched)
         # and the dot grid inside the empty details pane.
-        painters.install_shadows(self, (self.details_panel, self.inactive_list, self.active_list, actions))
+        painters.install_shadows(self, (self.details_panel, self.inactive_list, self.active_list, actions, self.checklist))
         panel = self.details_panel
         painters.install_empty_grid(panel, lambda: panel.details_empty.isVisibleTo(panel), over_default=True)
         return row
@@ -2663,6 +2829,18 @@ class BepInExMainScreen(QWidget):
         no_matches.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         no_matches.setVisible(False)
         list_cell.addWidget(no_matches, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        if draggable:
+            # the Active pane: the first-run card over its empty dot grid while no
+            # profile is open (PLAN.md §10 (c), 0.6.23) - centred in the list's
+            # cell, above it; the list underneath is untouched
+            self._active_pane = pane
+            self.first_run_card = card = EmptyStateCard(
+                fr.fill(fr.PROFILE_CARD, self.game_name), lambda: self._new_load_order(),
+                lambda: self._show_action_menu(card.import_button, self._import_menu_items()),
+            )
+            card.follow(mod_list)
+            card.setVisible(False)
+            list_cell.addWidget(card, 0, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addLayout(list_cell, 1)
         drag_hint = None
         if draggable:

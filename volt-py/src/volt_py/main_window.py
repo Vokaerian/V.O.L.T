@@ -14,6 +14,7 @@ from volt_py.screens.bepinex_help_entries import help_entries
 from volt_py.screens.bepinex_main_screen import BepInExMainScreen
 from volt_py.screens.game_select import GameSelectScreen
 from volt_py.screens.rimworld_main_screen import RimWorldMainScreen
+from volt_py.settings import APP_DEFAULTS, APP_SETTINGS_FILE, SettingsStore
 
 DEFAULT_SIZE = (1600, 900)
 MIN_SIZE = (1000, 600)
@@ -61,6 +62,10 @@ class MainWindow(QMainWindow):
         # Clamp explicitly too, so a bad file can't request a sub-minimum size.
         self.resize(max(width, MIN_SIZE[0]), max(height, MIN_SIZE[1]))
 
+        # The app-wide settings (<base>/app-settings.json, 0.6.23): only the
+        # game-select welcome panel's welcome_seen so far.
+        self._app_settings = SettingsStore(resolve_base_root(), name=APP_SETTINGS_FILE, defaults=APP_DEFAULTS)
+
         # Game-selection screen first (port of Electron's GameSelect/GameGate).
         # The pick isn't persisted (TODO.md #30); each manager's "Games" button
         # / Alt+Left comes back here (_on_back_requested, 0.6.8).
@@ -70,9 +75,20 @@ class MainWindow(QMainWindow):
         # A fresh screen every time (first launch and every way back), so no
         # tile keeps a hover/focus state from before (no origin-tile focus, by
         # decision).
-        game_select = GameSelectScreen()
+        # The welcome panel (PLAN.md §10 (g)) until it's dismissed or a game has opened.
+        game_select = GameSelectScreen(welcome=not self._app_settings.get()["welcome_seen"])
         game_select.gameSelected.connect(self._on_game_selected)
+        game_select.welcomeDismissed.connect(self._welcome_seen)
         return game_select
+
+    def _welcome_seen(self) -> None:
+        # Best effort: a read-only portable folder just shows the welcome again.
+        if self._app_settings.get()["welcome_seen"]:
+            return
+        try:
+            self._app_settings.update({"welcome_seen": True})
+        except OSError as err:
+            print(f"[app-settings] save failed: {err}", file=sys.stderr)
 
     def _on_game_selected(self, slug: str) -> None:
         # Constructing the game's screen is the whole "activation" (Electron's
@@ -96,6 +112,7 @@ class MainWindow(QMainWindow):
             screen = BepInExMainScreen(game, help_entries(game))
         else:
             return
+        self._welcome_seen()  # a game has been opened: the welcome panel never shows again
         screen.back_requested.connect(self._on_back_requested)
         self._swap_to(screen)
 

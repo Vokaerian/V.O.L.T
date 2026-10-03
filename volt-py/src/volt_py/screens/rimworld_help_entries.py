@@ -76,7 +76,9 @@ RIMWORLD_HELP_ENTRIES: list[dict] = [
             "Core and every installed DLC start out in the Active list, in release order; every other installed "
             "mod starts in the Inactive list, so you can build the rest of the Active list from there. "
             "If the current load order has unsaved changes, VOLT asks before discarding them. The new load order "
-            "becomes the one that's open."
+            "becomes the one that's open. While none is open, the empty Active list shows a short card with the same "
+            "Create a load order button, and buttons that need one say \"Create a load order first\" when you "
+            "point at them."
         ),
     },
     {

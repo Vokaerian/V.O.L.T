@@ -43,7 +43,17 @@ DEFAULTS = {
     # Settings > Launch (Thunderstore games): extra command-line arguments for
     # the game, as typed (bepinex_launch.parse_launch_args splits them at Run).
     "launch_args": "",
+    # First-run guidance (PLAN.md §10, 0.6.23; Thunderstore games): the
+    # get-started checklist was dismissed ("Hide", or all four steps done),
+    # and a modded launch of this game has run at least once (its step 4).
+    "checklist_dismissed": False,
+    "has_launched": False,
 }
+
+# The one app-wide file, <base>/app-settings.json (0.6.23; everything else is
+# per game): the game-select welcome panel was dismissed or a game opened.
+APP_SETTINGS_FILE = "app-settings.json"
+APP_DEFAULTS = {"welcome_seen": False}
 
 ACQUIRE_VIA = ("steamcmd", "steamworks", "gog")
 ANIMATIONS = ("windows", "on", "off")
@@ -63,10 +73,14 @@ _HEX_COLOR = re.compile(r"#[0-9a-f]{6}", re.IGNORECASE)
 
 
 class SettingsStore:
-    def __init__(self, app_root: Path | None = None):
+    def __init__(self, app_root: Path | None = None, *, name: str = "settings.json", defaults: dict | None = None):
+        """A game's settings.json by default; `name` / `defaults` give the
+        app-wide store (SettingsStore(base, name=APP_SETTINGS_FILE,
+        defaults=APP_DEFAULTS))."""
         if app_root is None:
             app_root = resolve_app_root(GAME_SLUG)
-        self.file = Path(app_root) / "settings.json"
+        self.file = Path(app_root) / name
+        self._defaults = DEFAULTS if defaults is None else defaults
         self._cache: dict | None = None
 
     def get(self) -> dict:
@@ -74,12 +88,12 @@ class SettingsStore:
         # shared with the cache, so callers must not mutate them in place.
         if self._cache is None:
             try:
-                self._cache = {**DEFAULTS, **read_json(self.file)}
+                self._cache = {**self._defaults, **read_json(self.file)}
             except FileNotFoundError:
-                self._cache = dict(DEFAULTS)
+                self._cache = dict(self._defaults)
             except (OSError, ValueError, TypeError) as err:
                 print(f"[settings] ignoring unreadable {self.file}: {err}", file=sys.stderr)
-                self._cache = dict(DEFAULTS)
+                self._cache = dict(self._defaults)
         return dict(self._cache)
 
     def update(self, patch: dict) -> dict:

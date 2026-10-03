@@ -123,7 +123,7 @@ from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QByteArray, QItemSelectionModel, QObject, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QByteArray, QItemSelectionModel, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -153,6 +153,7 @@ from volt_py import (
     community_rules, download_state, icons, load_orders, mod_decorations, mod_list_io, mod_removal, mods, mods_config,
     offline_mods, painters, paths, sort, steam_client, steam_cmd, steam_ops, steam_web_api, theme, validation,
 )
+from volt_py import first_run as fr
 from volt_py import rimworld_launch as rl
 from volt_py.app_root import GAME_SLUG, migrate_legacy_app_root, resolve_app_root
 from volt_py.applog import clip, init_log, log
@@ -163,6 +164,7 @@ from volt_py.mod_decorations import RowDecor
 from volt_py.screens.collection_dialog import CollectionDialog
 from volt_py.screens.details_panel import DetailsPanel
 from volt_py.screens.download_bar import DownloadBar
+from volt_py.screens.first_run_widgets import EmptyStateCard
 from volt_py.screens.help_window import HelpWindow
 from volt_py.screens.mod_list import ModListView, mod_matches
 from volt_py.screens.offline_mods_dialog import OfflineModsDialog, dialog_rows
@@ -760,6 +762,7 @@ class RimWorldMainScreen(QWidget):
         layout.addWidget(self._build_load_order_bar())
         layout.addLayout(self._build_content_row(), 1)
         layout.addWidget(self._build_footer())
+        self._card_shown = False  # the first-run card as last shown (0.6.23, _apply_first_run)
 
         self.game_dir: Path | None = None
         self.config_dir: Path | None = None
@@ -1176,6 +1179,33 @@ class RimWorldMainScreen(QWidget):
             self.save_button.style().unpolish(self.save_button)
             self.save_button.style().polish(self.save_button)
         self._update_validation()
+        self._apply_first_run()
+
+    def _apply_first_run(self) -> None:
+        """First-run guidance (PLAN.md §10 (c)/(d), 0.6.23; RimWorld has no
+        prompt and no checklist): Save and the picker say "Create a load
+        order first." while that is the only reason they're disabled
+        (Modded and the Paths link set theirs where they're computed); the
+        empty-state card sits on the Active list's empty dot grid while the
+        game is found, no load order is open and Active has no rows - its
+        buttons enabled exactly as New load order / Import...; a change
+        crossfades over the Active pane."""
+        has_game = self.game_dir is not None
+        no_lo = fr.needs_profile_tip(game_found=has_game, busy=False, open_slug=self.current_load_order)
+        for widget in (self.save_button, self.load_order_picker):
+            widget.setToolTip(fr.NO_LOAD_ORDER_TIP if no_lo else "")
+        self._apply_load_order_link()  # its tooltip also follows the game folder
+        card = self.first_run_card
+        card.create_button.setEnabled(self.new_button.isEnabled())
+        card.import_button.setEnabled(self.import_button.isEnabled())
+        show = fr.show_card(game_found=has_game, open_slug=self.current_load_order,
+                            active_rows=self.active_list.mod_model.rowCount())
+        if show != self._card_shown:
+            self._card_shown = show
+            log(f"first run: empty-state card {'shown' if show else 'hidden'}")
+            area = self._active_pane
+            painters.crossfade(self, lambda: card.setVisible(show), theme.MOTION,
+                               QRect(area.mapTo(self, QPoint(0, 0)), area.size()))
 
     def _run_block(self) -> str | None:
         """Why Modded / Vanilla can't start right now (None = they can): the
@@ -1217,6 +1247,8 @@ class RimWorldMainScreen(QWidget):
                 tip += " " + MODDED_OFFLINE_NOTE.format(n=linked)
             elif not own and offline:
                 tip += " " + MODDED_OFFLINE_OFF_NOTE
+            if has_game and self.current_load_order is None:  # disabled only for want of a load order (0.6.23)
+                tip = fr.NO_LOAD_ORDER_TIP
             self.run_button.setToolTip(tip)
             self.vanilla_button.setToolTip(VANILLA_TOOLTIP)
         running = self._launch is not None
@@ -1348,7 +1380,7 @@ class RimWorldMainScreen(QWidget):
         places current_load_order is assigned."""
         path = self._load_order_dir()
         self.load_order_link.setEnabled(path is not None)
-        self.load_order_link.setToolTip(str(path) if path else "")
+        self.load_order_link.setToolTip(str(path) if path else fr.NO_LOAD_ORDER_TIP if self.game_dir is not None else "")
 
     @staticmethod
     def _open_folder(path: Path) -> None:
@@ -4657,6 +4689,18 @@ class RimWorldMainScreen(QWidget):
         no_matches.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         no_matches.setVisible(False)
         list_cell.addWidget(no_matches, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        if draggable:
+            # the Active pane: the first-run card over its empty dot grid while no
+            # load order is open and Active is empty (PLAN.md §10 (c), 0.6.23) -
+            # centred in the list's cell, above it; the list is untouched
+            self._active_pane = pane
+            self.first_run_card = card = EmptyStateCard(
+                fr.fill(fr.LOAD_ORDER_CARD, "RimWorld"), lambda: self._new_load_order(),
+                lambda: self._show_action_menu(card.import_button, self._import_menu_items()),
+            )
+            card.follow(mod_list)
+            card.setVisible(False)
+            list_cell.addWidget(card, 0, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addLayout(list_cell, 1)
         # .pane-hint below the list, sortable (Active) pane only.
         drag_hint = None
