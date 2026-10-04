@@ -30,7 +30,7 @@ Two pages in one window (a QStackedWidget, a short fade between them):
            [Details] [Required (N)] [Versions] [Changelog]│ First uploaded│
            ┌ tab body ────────────────────────────────┐ │ Downloads     │
            │ Details: the README (images included),   │ │ Likes / Size  │
-           │   the ✓/↓/⚠ dependency block under it    │ │ Dependants ↗  │
+           │   the required-mods summary under it     │ │ Dependants ↗  │
            │ Required: one rich row per dependency,   │ │ Categories    │
            │   a click opens that package's page      │ │               │
            │ Versions: version · date · downloads ·   │ │  [chip] [chip]│
@@ -58,9 +58,10 @@ READMEs: split_html_blocks (thunderstore_browse) separates raw-HTML chunks
 from markdown; the markdown parts go through Qt's markdown importer into
 HTML, the HTML parts pass through, and the join is set as one HTML
 document - Qt's importer on its own loses everything after an unclosed
-<div> or a bare <img>. Images (prefetched on the job thread) are served
-through loadResource scaled to the README box's width (never upscaled,
-tall ones capped), and refitted on a resize.
+<div> or a bare <img>. Images arrive after the text (0.6.31, below) and are
+served through loadResource scaled to the README box's width (never
+upscaled, tall ones capped); the document is set again (scroll kept) REFIT_MS
+after the last arrival or resize. One not there (yet, or ever) is a blank box.
 
 Show deprecated / Show NSFW (checkable buttons, the Edit Config Filter
 toggle's look): both off on every open (session-only, never saved); either
@@ -68,33 +69,48 @@ one flipped reloads the listing from page 1 with the site's deprecated= /
 nsfw= set to include those packages alongside the rest. A deprecated
 card carries a red "Deprecated" pill before its name.
 
-Data (volt_py/thunderstore_browse.py): every search / sort / category
-change and page turn is one or two small requests to the site's own paged
-listing (Option B; a PagedListing per search keeps the site pages it
-fetched) - nothing is fetched until it's asked for, and only what this
-window already showed is kept (in memory, dying with the window). Sort
-opens on Most downloaded (user, 2026-09-29). Search waits
-SEARCH_DEBOUNCE_MS after the last keystroke; a reply for a query that was
-superseded meanwhile is dropped (a generation counter). Pinned packages
-(the framework pack, r2modman) never appear. Icons load lazily on a small
-worker pool (_IconLoader, newest request first, the current page's queue
-replacing the last page's) behind the mockup's blank placeholder. A
-detail page is one job: the listing detail, the versions list, the
-selected version's metadata, README + changelog (their images prefetched
-on the same thread, handed to the text browser through loadResource - no
-network inside the widget) and the dependency chain; picking another
-version is the same job minus the package-level pieces.
+Data (volt_py/thunderstore_browse.py): every search / sort / category change
+and page turn is one or two small requests to the site's own paged listing
+(Option B; a PagedListing per search keeps the site pages it fetched) -
+nothing is fetched until it's asked for, and only what this window already
+showed is kept (in memory, dying with the window). Sort opens on Most
+downloaded (user, 2026-09-29). Search waits SEARCH_DEBOUNCE_MS after the
+last keystroke; a reply for a query that was superseded meanwhile is dropped
+(a generation counter). Pinned packages (the framework pack, r2modman) never
+appear. Icons load lazily on a small worker pool (_IconLoader, newest
+request first, the current page's queue replacing the last page's) behind
+the mockup's blank placeholder. A detail page is one job: the listing
+detail, the versions list, the wiki index, the selected version's metadata,
+README + changelog text - then the page shows (header, facts, version
+picker, the README's text) and two background steps start (0.6.31; they used
+to be inside the job, a modpack's page sat on "Loading..." for minutes): the
+images (the README's, then the changelog's, thunderstore_browse.load_images
+- FETCH_WORKERS at once, the disk cache <APP-ROOT>/cache/readme-images/
+first, badge hosts skipped, an IMAGE_BUDGET_S budget per page; a fetched one
+shrunk by shrink_image - at most IMAGE_MAX_WIDTH wide, re-encoded - before
+it is cached or shown; the cache held under 100 MB by a prune when the
+window opens; each merged into its _Readme as it lands through _ImageFeed,
+no network inside the widget) and the dependency chain
+(parallel_dependency_chain over the window's own package cache,
+`_pkg_cache`, so reopening a page or Back refetches nothing). Until the
+chain lands the big Install button shows its plain label but is disabled,
+the dependency sub-line says it is checking and the Required pills read
+Checking.... Picking another version is the same job minus the package-level
+pieces, then the same two steps for that version. Every late arrival for a
+page, version or wiki page no longer showing (`_detail_gen` / `_wiki_gen`),
+or after the window closed, is dropped, and its queued image fetches are
+abandoned.
 
-Wiki (TODO #12, built 2026-09-30, direct implementation): the whole-page
-job also fetches the package's wiki index (thunderstore_browse.fetch_wiki_
+Wiki (TODO #12, built 2026-09-30, direct implementation): the whole-page job
+also fetches the package's wiki index (thunderstore_browse.fetch_wiki_
 index; a 404 = no wiki, any failure logged and treated the same) - the tab
 shows only when there are pages, labelled "Wiki (N)", the rail in
 order_wiki_pages' order. Pages load lazily: nothing until the tab is first
-opened (then its first page), one job per page picked (its markdown + images,
-the README's caps), kept per package in `_wiki_pages` (reset when another
-package opens; a version pick never touches the wiki - it's package-level);
-a superseded page reply is dropped (`_wiki_gen`). Loading / error + Retry
-show inside the page pane.
+opened (then its first page), one job per page picked (its markdown; its
+images then load in the background like the README's), kept per package in
+`_wiki_pages` (reset when another package opens; a version pick never
+touches the wiki - it's package-level); a superseded page reply is dropped
+(`_wiki_gen`). Loading / error + Retry show inside the page pane.
 
 Links in a README / changelog / wiki page (_Readme._open_link): absolute
 ones open in the system browser (as setOpenExternalLinks did), "#section"
@@ -108,8 +124,13 @@ dependencies first, appended to the open load order's Active list, the
 screen's lists refreshed) - and the window stays open so the next mod can
 follow; the button reads Installing... then Installed. The dependency
 block and the Install label come from thunderstore_browse.dependency_chain
-over the selected version's declared dependencies against what the load
-order already has.
+(run as parallel_dependency_chain) over the selected version's declared
+dependencies against what the load order already has. The Details tab's
+block (0.6.31) is one summary line - "41 required mods: 0 already
+installed, 41 will be installed." and a "See the Required tab" link - plus
+only the dependencies with a problem (at most DEPS_PROBLEMS_SHOWN, then "and
+N more"); the README's well keeps README_MIN_HEIGHT whatever sits below it,
+so a modpack's page no longer grows the window or squeezes the README.
 
 Download bars (0.6.26, PLAN.md §11 (c)): the window is modal over the
 manager's footer, so it carries two more copies of the footer's
@@ -141,14 +162,16 @@ box is empty.
 """
 
 import threading
+import time
 from datetime import datetime, timezone
 
 import html
 import re
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QObject, QPoint, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QPainter, QPainterPath, QPalette, QPixmap, QTextDocument,
+    QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QImageReader, QPainter, QPainterPath, QPalette,
+    QPixmap, QTextDocument,
 )
 from PySide6.QtWidgets import (
     QComboBox,
@@ -213,7 +236,12 @@ TAB_INDEX = {"details": 1, "required": 2, "versions": 3, "changelog": 4, "wiki":
 WIKI_RAIL_WIDTH = 240  # the Wiki tab's page rail (the Help window's RAIL_WIDTH)
 WIKI_ENTRY_ROOM = 44  # the rail's margins, an entry's padding and the rail's scrollbar: a title elides past the rest
 IMAGE_MAX_HEIGHT = 1200  # a README image taller than this is scaled down (a whole-page banner never fills the box)
-REFIT_MS = 150  # the README re-lays its images out this long after the last resize
+REFIT_MS = 150  # the README re-lays its images out this long after the last resize / image arrival
+IMAGE_MAX_WIDTH = 1600  # shrink_image: a README image is cached and shown at most this wide (never upscaled)
+IMAGE_MAX_PIXELS = 25_000_000  # shrink_image: a bigger bitmap (~100 MB decoded) is never decoded - skipped
+JPEG_QUALITY = 85  # shrink_image's re-encode of an image without alpha (with alpha: PNG)
+README_MIN_HEIGHT = 240  # the Details README well's floor: never squeezed below this by the block under it (0.6.31)
+DEPS_PROBLEMS_SHOWN = 5  # the Details block lists at most this many problem dependencies, then "and N more"
 AGE_MONTH_DAYS, AGE_YEAR_DAYS = 30, 365  # "Last updated": days -> green, months -> yellow, years -> red
 AGE_COLORS = (theme.RDEP, theme.WARN, theme.DANGER)
 BUTTON_TEXT_PADDING = 24  # the big Install button's horizontal padding + border, for fitting its text
@@ -458,6 +486,60 @@ class _IconLoader(QObject):
                     return
 
 
+def shrink_image(data: bytes) -> bytes | None:
+    """A fetched README image as it is cached and shown (load_images' shrink;
+    runs on its worker threads - QImage / QImageReader are reentrant, no
+    widget involved): decoded, scaled down smoothly to IMAGE_MAX_WIDTH (aspect
+    kept, never up) and re-encoded - PNG when it has an alpha channel, else
+    JPEG at JPEG_QUALITY. An image that needed no scaling keeps its own bytes
+    when the re-encode isn't smaller. None: not decodable here (load_images
+    decides whether to keep it); ValueError: bigger than IMAGE_MAX_PIXELS -
+    checked from the header before the full decode (Qt's own allocation
+    limit, 256 MB, backs it up for formats that don't say their size). Logs
+    each image's decode / scale / encode time and bytes before -> after."""
+    started = time.perf_counter()
+    source = QBuffer()
+    source.setData(QByteArray(data))
+    source.open(QIODevice.OpenModeFlag.ReadOnly)
+    reader = QImageReader(source)
+    size = reader.size()
+    if size.isValid() and size.width() * size.height() > IMAGE_MAX_PIXELS:
+        raise ValueError(f"{size.width()}x{size.height()} is too large to show (over {IMAGE_MAX_PIXELS // 1_000_000} megapixels)")
+    image = reader.read()
+    decoded = time.perf_counter()
+    if image.isNull():
+        log(f"[browse] image shrink: not decodable ({reader.errorString()}), {len(data)} bytes")
+        return None
+    width, height = image.width(), image.height()
+    scaled = width > IMAGE_MAX_WIDTH
+    if scaled:
+        image = image.scaledToWidth(IMAGE_MAX_WIDTH, Qt.TransformationMode.SmoothTransformation)
+    rescaled = time.perf_counter()
+    kind = "PNG" if image.hasAlphaChannel() else "JPEG"
+    target = QBuffer()
+    target.open(QIODevice.OpenModeFlag.WriteOnly)
+    saved = image.save(target, kind, -1 if kind == "PNG" else JPEG_QUALITY)
+    encoded = target.data().data() if saved else b""
+    finished = time.perf_counter()
+    out = encoded if encoded and (scaled or len(encoded) < len(data)) else data
+    log(f"[browse] image shrink: {width}x{height}" + (f" -> {image.width()}x{image.height()}" if scaled else "")
+        + f", {kind if out is encoded else 'original kept'}, decode {(decoded - started) * 1000:.0f} ms, "
+        f"scale {(rescaled - decoded) * 1000:.0f} ms, encode {(finished - rescaled) * 1000:.0f} ms, "
+        f"{len(data)} -> {len(out)} bytes")
+    return out
+
+
+class _ImageFeed(QObject):
+    """Brings README / changelog / wiki images from the background image
+    steps (thunderstore_browse.load_images' workers) to the GUI thread:
+    `arrived` (target, gen, url, bytes) over a queued connection - target
+    "detail" or a wiki page id, gen the page's generation when the step
+    started. _IconLoader's rules: no Qt parent (the workers keep it alive
+    until they finish), nothing touched but the signal off the GUI thread."""
+
+    arrived = Signal(object)
+
+
 class _CardDownloadBar(PackageDownloadBar):
     """The detail header card's copy of the download bar (0.6.26): a child
     of the card kept out of its layout (nothing in the card moves), docked
@@ -675,13 +757,14 @@ class _DepRow(QFrame):
 
 class _Readme(QTextBrowser):
     """The README / changelog box: markdown (+ raw HTML, render_markdown_html),
-    external links, and the images the job thread prefetched (`images`:
-    url -> bytes) served through loadResource - Qt asks for each image at
-    layout time, this answers from memory, never from the network, scaled
-    to the box's width (never up; IMAGE_MAX_HEIGHT caps a tall one) and
-    re-served after a resize (the document is set again, REFIT_MS after the
-    last resize, the scroll position kept). An image that wasn't fetched
-    stays a blank box (Qt's default)."""
+    external links, and its images (`images`: url -> bytes, merged in by
+    add_images as the background step brings them, 0.6.31) served through
+    loadResource - Qt asks for each image at layout time, this answers from
+    memory, never from the network, scaled to the box's width (never up;
+    IMAGE_MAX_HEIGHT caps a tall one) and re-served after a resize or new
+    images (the document is set again, REFIT_MS after the last one - a burst
+    of arrivals is one re-layout - the scroll position kept). An image not
+    there (yet, or ever) stays a blank box (Qt's default)."""
 
     def __init__(self, object_name: str) -> None:
         super().__init__()
@@ -692,6 +775,8 @@ class _Readme(QTextBrowser):
         self.viewport().setAutoFillBackground(False)
         self.images: dict[str, bytes] = {}
         self._decoded: dict[str, QImage] = {}  # url -> the native image
+        self._wanted: set[str] = set()  # the image URLs this document shows (add_images takes only these)
+        self._stale = False  # new images since the document was last set
         self._html = ""
         self._fit_width = 0  # the width the images were last scaled for
         self._refit_timer = QTimer(self)
@@ -702,13 +787,26 @@ class _Readme(QTextBrowser):
     def set_markdown(self, markdown: str, images: dict[str, bytes] | None = None, *, fallback: str = "") -> None:
         self.images = dict(images or {})
         self._decoded = {}
+        self._stale = False
         self._html = render_markdown_html(markdown) if markdown.strip() else ""
+        self._wanted = set(tb.markdown_image_urls(markdown)) if self._html else set()
         self._fit_width = self._available_width()
         if self._html:
             self.setHtml(self._html)
         else:
             self.setPlainText(fallback.strip() or "No description.")
         self.verticalScrollBar().setValue(0)
+
+    def add_images(self, images: dict[str, bytes]) -> None:
+        """Images that just arrived: the ones this document shows (and doesn't
+        have yet) are merged in and the document is set again REFIT_MS later
+        (_refit; more arrivals meanwhile restart the wait)."""
+        fresh = {url: data for url, data in images.items() if url in self._wanted and url not in self.images}
+        if not fresh:
+            return
+        self.images.update(fresh)  # never decoded before (loadResource only decodes what images holds)
+        self._stale = True
+        self._refit_timer.start()
 
     def _open_link(self, url: QUrl) -> None:
         """An absolute link opens in the system browser (Qt's openExternalLinks
@@ -756,8 +854,9 @@ class _Readme(QTextBrowser):
             self._refit_timer.start()
 
     def _refit(self) -> None:
-        if not self._html or self._available_width() == self._fit_width:
+        if not self._html or (not self._stale and self._available_width() == self._fit_width):
             return
+        self._stale = False
         self._fit_width = self._available_width()
         scroll = self.verticalScrollBar().value()
         self.setHtml(self._html)  # the document's resource cache goes with it: loadResource scales again
@@ -936,7 +1035,8 @@ def _clear_layout(layout) -> None:
 
 class BepInExBrowseWindow(QDialog):
     def __init__(self, game, game_name: str, load_order_name: str, *, installed, framework: str | None,
-                 run_job, install, switch_version, is_busy, app_version=None, parent: QWidget | None = None) -> None:
+                 run_job, install, switch_version, is_busy, app_version=None, app_root=None,
+                 parent: QWidget | None = None) -> None:
         """`game`: the ThunderstoreGame (community slug). `installed()` ->
         the open load order's full_name -> entry dict (read live, it grows
         with every install; each entry's "version" is what's on disk);
@@ -945,7 +1045,9 @@ class BepInExBrowseWindow(QDialog):
         the screen's install job (on_done({"ok": ...} or {"error": ...})
         after the screen refreshed); `switch_version(full_name, version |
         None, on_done, parent)`: its in-place re-install at that version
-        (None = the latest). `is_busy()`: the screen's mutating-job lock."""
+        (None = the latest). `is_busy()`: the screen's mutating-job lock.
+        `app_root`: the game's app root, for the README image cache (None:
+        no disk cache)."""
         super().__init__(parent)
         self.setObjectName("browseMods")
         self.setWindowTitle(f"Browse Thunderstore Mods - {game_name}")
@@ -960,6 +1062,7 @@ class BepInExBrowseWindow(QDialog):
         self._switch_version = switch_version
         self._is_busy = is_busy
         self.app_version = app_version
+        self._app_root = app_root
         self._closed = False
         # browse state
         self._query = ""
@@ -984,7 +1087,9 @@ class BepInExBrowseWindow(QDialog):
         self._versions: list[dict] = []  # fetch_versions rows, newest first
         self._version: str | None = None  # the selected version (the header's picker)
         self._version_meta: dict | None = None  # fetch_version of the selected version
-        self._chain: dict | None = None  # dependency_chain for the selected version
+        self._chain: dict | None = None  # dependency_chain for the selected version (None while its step runs)
+        self._chain_error: str | None = None  # that step's failure, shown in the block until the next page / version
+        self._pkg_cache: dict[str, dict] = {}  # full_name -> fetch_package, for the chain (dies with the window)
         self._has_changelog = False
         self._wiki: list[dict] = []  # the package's wiki pages [{id, title}], rail order; [] = no wiki (tab hidden)
         self._wiki_pages: dict[str, dict] = {}  # page id -> {markdown, images}, this package's pages fetched so far
@@ -998,6 +1103,8 @@ class BepInExBrowseWindow(QDialog):
         self._icons: dict[str, QPixmap] = {}
         self._icon_loader = _IconLoader(app_version)
         self._icon_loader.loaded.connect(self._on_icon, Qt.ConnectionType.QueuedConnection)
+        self._image_feed = _ImageFeed()
+        self._image_feed.arrived.connect(self._on_image, Qt.ConnectionType.QueuedConnection)
 
         layout = QVBoxLayout(self)  # .modal: padding 16px
         layout.setContentsMargins(16, 16, 16, 16)
@@ -1044,6 +1151,8 @@ class BepInExBrowseWindow(QDialog):
         # the manager screen renders these with its own footer bar (_render_dl), same state (0.6.26)
         self.download_bars = (self.download_bar, self.detail_download_bar)
         log(f"browse window opened ({game.community}, load order {load_order_name!r})")
+        if app_root:  # the README image cache's size cap, off the GUI thread (0.6.31)
+            self._run_job("browse-image-cache-prune", lambda report: tb.prune_image_cache(app_root), lambda payload: None)
         self.search.setFocus()
         self._load_categories()
         self._load_page()
@@ -1308,7 +1417,9 @@ class BepInExBrowseWindow(QDialog):
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.setSpacing(10)
         self.readme = _Readme("browseReadme")
-        details_layout.addWidget(_well(self.readme), 1)  # 3.3: the README sunk into a recessed well
+        readme_well = _well(self.readme)  # 3.3: the README sunk into a recessed well
+        readme_well.setMinimumHeight(README_MIN_HEIGHT)  # 0.6.31: never squeezed to nothing by the block below
+        details_layout.addWidget(readme_well, 1)
         divider = QFrame()
         divider.setObjectName("browseDivider")
         divider.setFixedHeight(1)
@@ -1746,6 +1857,7 @@ class BepInExBrowseWindow(QDialog):
         self._version = None
         self._version_meta = None
         self._chain = None
+        self._chain_error = None
         self._has_changelog = False
         self._detail_gen += 1
         gen = self._detail_gen
@@ -1798,12 +1910,12 @@ class BepInExBrowseWindow(QDialog):
 
     def _run_detail_job(self, gen: int, listing: dict, *, version: str | None) -> None:
         """The detail job. version=None: the whole page (listing detail,
-        versions, the latest version's pieces); a version: just that
-        version's metadata, README, changelog and chain."""
+        versions, wiki index, the latest version's pieces); a version: just
+        that version's metadata, README and changelog. Text only - the
+        images and the dependency chain are background steps started once
+        the page shows (_show_detail)."""
         community, app_version = self.game.community, self.app_version
         ns, name = listing["namespace"], listing["name"]
-        installed = set(self._installed())
-        framework = self._framework
         has_changelog = self._has_changelog
 
         def job(report):
@@ -1834,11 +1946,7 @@ class BepInExBrowseWindow(QDialog):
                     changelog = tb.fetch_changelog(ns, name, picked, app_version)
                 except ts.ThunderstoreError as err:
                     log(f"browse: changelog unavailable for {ns}-{name} {picked}: {err}")
-            images = tb.prefetch_images(readme, app_version)
-            if changelog:
-                images.update(tb.prefetch_images(changelog, app_version))
-            chain = tb.dependency_chain(meta["dependencies"], installed, framework, app_version)
-            out.update(version=picked, meta=meta, readme=readme, changelog=changelog, images=images, chain=chain)
+            out.update(version=picked, meta=meta, readme=readme, changelog=changelog)
             return out
 
         def done(payload: dict) -> None:
@@ -1882,14 +1990,97 @@ class BepInExBrowseWindow(QDialog):
         self._version_meta = res["meta"]
         website = (self._detail["website_url"] if self._detail else "") or res["meta"]["website_url"]
         self._set_links(listing["namespace"], website)
-        self.readme.set_markdown(res["readme"], res["images"], fallback=res["meta"]["description"] or listing["description"])
+        self.readme.set_markdown(res["readme"], None, fallback=res["meta"]["description"] or listing["description"])
         if self._has_changelog:
-            self.changelog.set_markdown(res["changelog"], res["images"], fallback="No changelog for this version.")
-        self._set_deps(res["chain"])
+            self.changelog.set_markdown(res["changelog"], None, fallback="No changelog for this version.")
+        self._chain_error = None
+        self._set_deps(None)  # "checking required mods...", the Required pills Checking..., Install disabled
         self._fill_required_tab()
         hidden = (self._tab == "changelog" and not self._has_changelog) or (self._tab == "wiki" and not self._wiki)
         self._select_tab("details" if hidden else self._tab)  # off the status page
         self._apply_detail_button()
+        self._start_chain()
+        self._start_images("detail", [res["readme"], res["changelog"] if self._has_changelog else ""])
+
+    def _start_chain(self) -> None:
+        """The selected version's dependency chain as a background step
+        (parallel_dependency_chain over `_pkg_cache`); when it lands - still
+        on this page and version - the block, the Required pills and the big
+        button fill in (_refresh_chain re-derives against the load order as
+        it is by then). A failure shows in the block; the button stays off."""
+        listing, version, gen = self._detail_listing, self._version, self._detail_gen
+        deps = list((self._version_meta or {}).get("dependencies") or [])
+        installed, framework = set(self._installed()), self._framework
+        app_version, cache = self.app_version, self._pkg_cache
+        started = time.monotonic()
+
+        def job(report):
+            return tb.parallel_dependency_chain(deps, installed, framework, app_version, cache=cache)
+
+        def done(payload: dict) -> None:
+            if self._closed or gen != self._detail_gen:
+                log(f"browse: dependency chain for {listing['full_name']} {version} dropped (page left)")
+                return
+            if "error" in payload:
+                log(f"browse: dependency chain for {listing['full_name']} {version} failed: {clip(payload['error'])}")
+                self._chain_error = payload["error"]
+                self._set_deps(None)
+                self._fill_required_tab()
+                self._apply_detail_button()
+                return
+            chain = payload["ok"]
+            log(f"browse: dependency chain for {listing['full_name']} {version} in {time.monotonic() - started:.2f}s: "
+                f"{len(chain['satisfied'])} installed, {len(chain['missing'])} to install, {len(chain['problems'])} problems")
+            self._chain = chain
+            self._refresh_chain()
+
+        log(f"browse: dependency chain for {listing['full_name']} {version}: {len(deps)} declared, "
+            f"{len(cache)} packages in the window's cache")
+        self._run_job(f"browse-chain-{listing['full_name']}-{version}", job, done)
+
+    def _start_images(self, target: str, markdowns: list[str]) -> None:
+        """The images of a page as a background step (thunderstore_browse.
+        load_images): target "detail" = the README's then the changelog's
+        (the queue's order is the priority), else a wiki page id. Each one
+        reaches _on_image as it lands; a newer page / version / wiki page or
+        the window closing (the generation moved on) abandons the queue."""
+        urls: list[str] = []
+        for markdown in markdowns:
+            urls += [u for u in tb.image_urls(markdown) if u not in urls]
+        have = self.wiki_readme.images if target != "detail" else {}
+        urls = [u for u in urls if u not in have]  # a cached wiki page shown again: only what it's missing
+        if not urls:
+            return
+        wiki = target != "detail"
+        gen = self._wiki_gen if wiki else self._detail_gen
+        feed, app_version, app_root = self._image_feed, self.app_version, self._app_root
+
+        def superseded() -> bool:
+            return self._closed or gen != (self._wiki_gen if wiki else self._detail_gen)
+
+        def job(report):
+            return tb.load_images(urls, app_version, app_root=app_root, shrink=shrink_image, cancelled=superseded,
+                                  on_image=lambda url, data: feed.arrived.emit((target, gen, url, data)))
+
+        self._run_job(f"browse-images-{target}-{gen}", job, lambda payload: None)
+
+    def _on_image(self, payload) -> None:
+        """An image from a background step (GUI thread): into the page's
+        _Readme(s) while that page is still the one showing; a wiki page's
+        also into its cache entry, for its next showing."""
+        target, gen, url, data = payload
+        if self._closed:
+            return
+        if target == "detail":
+            if gen == self._detail_gen:
+                self.readme.add_images({url: data})
+                self.changelog.add_images({url: data})
+            return
+        page = self._wiki_pages.get(target)
+        if page is not None:
+            page["images"][url] = data
+        if gen == self._wiki_gen:
+            self.wiki_readme.add_images({url: data})
 
     def _version_changed(self) -> None:
         version = self.version_combo.currentData()
@@ -2055,8 +2246,7 @@ class BepInExBrowseWindow(QDialog):
         self.wiki_stack.setCurrentIndex(0)
 
         def job(report):
-            markdown = tb.fetch_wiki_page(page_id, app_version)
-            return {"markdown": markdown, "images": tb.prefetch_images(markdown, app_version)}
+            return {"markdown": tb.fetch_wiki_page(page_id, app_version), "images": {}}  # images: _start_images
 
         def done(payload: dict) -> None:
             if self._closed or gen != self._wiki_gen:
@@ -2074,6 +2264,8 @@ class BepInExBrowseWindow(QDialog):
     def _show_wiki_page(self, page: dict) -> None:
         self.wiki_readme.set_markdown(page["markdown"], page["images"], fallback="This wiki page is empty.")
         self.wiki_stack.setCurrentIndex(1)
+        if self._wiki_page is not None:
+            self._start_images(self._wiki_page, [page["markdown"]])
 
     def _retry_wiki(self) -> None:
         if self._wiki_page is not None:
@@ -2094,39 +2286,63 @@ class BepInExBrowseWindow(QDialog):
         self._set_wiki([])  # hidden until the package's index says it has pages
 
     def _set_deps(self, chain: dict | None) -> None:
-        """The Details tab's dependency block (Option X, the full block): one
-        row per dependency - ✓ already installed, ↓ will be pulled in
-        (accent), ⚠ a problem (warn)."""
+        """The Details tab's dependency block (0.6.31: a summary - a modpack's
+        41 rows, one per dependency, grew the window and squeezed the README):
+        one line of counts with a "See the Required tab" link, then only the
+        dependencies with a problem (⚠, warn), at most DEPS_PROBLEMS_SHOWN,
+        then "and N more"; past CHAIN_LIMIT a muted note says the rest
+        aren't counted (that marker is not a problem and not in the total).
+        None: the chain step is still running (or failed: _chain_error)."""
         self._chain = chain
         _clear_layout(self.deps_layout)
         if chain is None:
-            self.deps_label.setText("checking which mods it needs...")
+            self.deps_label.setText(f"couldn't check required mods: {self._chain_error}" if self._chain_error
+                                    else "checking required mods...")
             return
-        # the marks are drawn icons (icons.py) in each row's text color
-        rows = ([("check", n, "already installed", None) for n in chain["satisfied"]]
-                + [("arrow-down", n, "will be downloaded and installed too", "browse-dep-missing") for n in chain["missing"]]
-                + [("warn", n, msg, "browse-dep-problem") for n, msg in chain["problems"]])
-        mark_color = {None: theme.TEXT, "browse-dep-missing": theme.ACCENT, "browse-dep-problem": theme.WARN}
-        if not rows:
+        satisfied, missing = len(chain["satisfied"]), len(chain["missing"])
+        problems = [p for p in chain["problems"] if p[1] != tb.CHAIN_LIMIT_MESSAGE]
+        cut_off = len(problems) != len(chain["problems"])  # the CHAIN_LIMIT marker: its own note, not counted
+        total = satisfied + missing + len(problems)
+        if not total and not cut_off:
             self.deps_label.setText("nothing else - it needs no other mods.")
             return
         self.deps_label.setText("installed automatically with this mod")
-        for mark, name, text, role in rows:
-            # 3.3: the name mono 12px (in the row's colour), the state --muted
-            label = QLabel(f"{icons.inline(mark, mark_color[role])} "
+        counts = [f"{satisfied} already installed", f"{missing} will be installed"]
+        if problems:
+            counts.append(f"{len(problems)} {'has a problem' if len(problems) == 1 else 'have problems'}")
+        summary = QLabel(f"{total} required mod{'s' if total != 1 else ''}: {', '.join(counts)}."
+                         f"&nbsp;&nbsp;{link_html('#required', 'See the Required tab')}")
+        summary.setTextFormat(Qt.TextFormat.RichText)
+        summary.setWordWrap(True)
+        summary.linkActivated.connect(lambda _href: self._select_tab("required", animate=True))
+        self.deps_layout.addWidget(summary)
+        # the problem rows: the old block's ⚠ rows (a drawn icon in the row's --warn)
+        for name, text in problems[:DEPS_PROBLEMS_SHOWN]:
+            label = QLabel(f"{icons.inline('warn', theme.WARN)} "
                            f'<span style="font-family: {MONO_HTML}; font-size: 12px">{html.escape(name)}</span> '
                            f'<span style="color: {theme.MUTED}">— {html.escape(text)}</span>')
             label.setTextFormat(Qt.TextFormat.RichText)
             label.setWordWrap(True)
-            if role:
-                label.setProperty("role", role)
+            label.setProperty("role", "browse-dep-problem")
             self.deps_layout.addWidget(label)
+        if len(problems) > DEPS_PROBLEMS_SHOWN:
+            more = QLabel(f"and {len(problems) - DEPS_PROBLEMS_SHOWN} more")
+            more.setProperty("muted", True)
+            self.deps_layout.addWidget(more)
+        if cut_off:
+            note = QLabel(f"It needs more than {tb.CHAIN_LIMIT} required mods; the rest aren't counted here.")
+            note.setProperty("muted", True)
+            note.setWordWrap(True)
+            self.deps_layout.addWidget(note)
 
     def _dep_status(self, full_name: str) -> tuple[str, str]:
-        """(pill text, pill state) of a dependency for the Required tab."""
+        """(pill text, pill state) of a dependency for the Required tab;
+        "pending" (a plain muted pill) while the chain step runs."""
         chain = self._chain or {"satisfied": [], "missing": [], "problems": []}
         if full_name in chain["satisfied"] or full_name in self._installed() or full_name == self._framework:
             return "Already installed", "ok"
+        if self._chain is None:
+            return ("Couldn't check", "warn") if self._chain_error else ("Checking...", "pending")
         if any(n == full_name for n, _ in chain["problems"]):
             return "Unavailable", "warn"
         return "Will be installed", "get"
@@ -2188,6 +2404,7 @@ class BepInExBrowseWindow(QDialog):
             pill = QLabel(status)
             pill.setProperty("role", "browse-pill")
             pill.setProperty("state", state)
+            pill.setProperty("muted", state == "pending")  # no tint of its own: the existing muted text (0.6.31)
             layout.addWidget(pill, 0, Qt.AlignmentFlag.AlignTop)
             self.required_layout.addWidget(row)
         self.required_layout.addStretch(1)

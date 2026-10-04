@@ -52,7 +52,7 @@ from .applog import clip, log
 SITE = "https://thunderstore.io"
 TIMEOUT_S = 15.0  # metadata requests
 DOWNLOAD_TIMEOUT_S = 60.0  # per socket operation while streaming a zip, not the whole transfer
-CACHE_DIR = "cache"  # <APP-ROOT>/cache/ (packages/ + the metadata cache; the browser keeps no disk cache)
+CACHE_DIR = "cache"  # <APP-ROOT>/cache/ (packages/, icons/, the metadata cache; the browser's readme-images/ since 0.6.31)
 PACKAGES_DIR = "packages"  # <APP-ROOT>/cache/packages/<Team-Package-Version>.zip
 META_FILE = "package-meta.json"  # <APP-ROOT>/cache/package-meta.json (read_meta_cache)
 _CHUNK = 1 << 16

@@ -2489,7 +2489,7 @@ class BepInExMainScreen(QWidget):
             self.ts_game, self.game_name, name,
             installed=lambda: self._entries, framework=self._framework, run_job=self._run_job,
             install=self._install_package, switch_version=self._switch_version, is_busy=lambda: self._busy is not None,
-            app_version=self.app_version, parent=self,
+            app_version=self.app_version, app_root=self.app_root, parent=self,  # app_root: the README image cache (0.6.31)
         )
         self._extra_dl_bars = list(window.download_bars)  # the same bar state as the footer's (0.6.26)
         try:

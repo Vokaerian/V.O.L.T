@@ -52,10 +52,19 @@ The documented experimental endpoints used alongside:
   RandyKnapp-EpicLoot: 8 pages "1. What is Epic Loot" .. "8. Cheats/Commands",
   API order = the numbering; an unknown page id is a 404). The Wiki tab
   orders the pages with order_wiki_pages.
-README / changelog images: markdown_image_urls picks the http(s) image
-links out of the markdown and prefetch_images fetches them (a size cap
-each, failures skipped) on the job thread, so the window can hand them to
-its text browser before the markdown is set - no browser-side network.
+README / changelog / wiki images (0.6.31): image_urls picks the http(s) image
+links out of the markdown (the first IMAGE_LIMIT) and load_images fetches
+them in the background, FETCH_WORKERS at once in list order: the disk cache
+first (<APP-ROOT>/cache/readme-images/<sha256 of the URL>, no network on a
+hit), badge hosts (BADGE_HOSTS) skipped outright, IMAGE_TIMEOUT_S per socket
+operation, a size cap each, and an IMAGE_BUDGET_S budget per page after which
+nothing new starts (what is in flight finishes and is kept); each image is
+handed back as it lands (on_image), so the window's text browser fills in
+while the page is already up - still no browser-side network. A fetched image
+goes through the window's shrinker first (at most 1600 px wide, re-encoded;
+web-page / text replies are never kept), and prune_image_cache holds the
+folder under IMAGE_CACHE_CAP (least recently used first) each time a Browse
+Mods window opens; Settings' Clean up downloads empties it.
 
 Also here: PagedListing - the browser's own pages over that stream, every
 one PAGE_SIZE long with the pinned packages taken out (the site's page 1
@@ -64,20 +73,28 @@ tops a page up from the next site page and keeps the offsets consistent);
 dependency_chain (which of a package's dependencies the open load
 order already has, which get pulled in - recursively, at Thunderstore's
 latest, THUNDERSTORE.md §1 / §9's policy - so the detail view's Install
-button can say "+ N dependencies"), fetch_bytes for the card icons (ccdn.
+button can say "+ N dependencies") and parallel_dependency_chain (the same
+answer, its package metadata fetched level by level FETCH_WORKERS at once
+first), fetch_bytes for the card icons (ccdn.
 thunderstore.io), and the number formatting the cards use.
 
 Pure Python, no Qt; every request goes through thunderstore.env.urlopen (the
 harness seam) with the same User-Agent. tools/checks/volt_py_thunderstore_
-browse.py fakes the site.
+browse.py fakes the site; tools/checks/volt_py_browse_perf.py the background
+image / dependency-chain loading (0.6.31).
 """
 
+import hashlib
 import http.client
 import json
+import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.parse
+from collections import Counter
+from pathlib import Path
 from . import thunderstore as ts
 from .applog import clip, log
 from .thunderstore import ThunderstoreError
@@ -98,6 +115,18 @@ IMAGE_LIMIT = 24  # images fetched per README / changelog, in order of appearanc
 # ![alt](url "title") and <img src="url"> - the two ways a README carries an image.
 _MD_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+\"[^\"]*\")?\s*\)|<img\b[^>]*?\bsrc\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
 CHAIN_LIMIT = 40  # dependency_chain stops resolving past this many packages (a runaway graph)
+# dependency_chain's problems entry at the cut-off (the window shows it as a note, not as a problem)
+CHAIN_LIMIT_MESSAGE = f"more than {CHAIN_LIMIT} dependencies; the rest aren't listed here"
+FETCH_WORKERS = 6  # load_images / parallel_dependency_chain: requests at once (0.6.31; were one at a time)
+IMAGE_TIMEOUT_S = 8.0  # per socket operation for a README image (the API calls keep thunderstore.TIMEOUT_S)
+IMAGE_BUDGET_S = 20.0  # per page: no new image fetch starts after this; the queue is abandoned
+IMAGE_CACHE_DIR = "readme-images"  # <APP-ROOT>/cache/readme-images/<sha256 of the URL>
+IMAGE_CACHE_CAP = 100 << 20  # prune_image_cache: over this when a Browse Mods window opens ...
+IMAGE_CACHE_TARGET = 80 << 20  # ... the least recently used files go until it's under this
+IMAGE_KEEP_RAW_MAX = 1 << 20  # an image the shrinker can't decode is cached as is only below this size
+# Badge services: a README's build / version / download-count badges - tiny, often slow (img.shields.io
+# answered HTTP 408 after ~8 s in the 0.6.31 log), never worth a fetch. Skipped, they stay blank boxes.
+BADGE_HOSTS = ("img.shields.io", "badgen.net", "forthebadge.com", "badge.fury.io", "badges.gitter.im")
 SHAPE_MESSAGE = "Thunderstore's mod listing has changed shape; VOLT's mod browser needs an update."
 
 
@@ -153,12 +182,13 @@ def dependants_page_url(community: str, namespace: str, name: str) -> str:
     return f"{ts.SITE}/c/{community}/p/{namespace}/{name}/dependants/"
 
 
-def _get(url: str, app_version, what: str, *, max_bytes: int | None = None) -> bytes:
+def _get(url: str, app_version, what: str, *, max_bytes: int | None = None, timeout: float | None = None) -> bytes:
     """One GET through the env seam; HTTP / network failures are
-    ThunderstoreErrors with user-facing text (`what` names the thing)."""
-    log(f"[browse] GET {url}")
+    ThunderstoreErrors with user-facing text (`what` names the thing).
+    `timeout`: per socket operation, thunderstore.TIMEOUT_S by default."""
+    log(f"[browse] GET {url}" + (f" (timeout {timeout:g}s)" if timeout else ""))
     try:
-        with ts.open_url(ts._request(url, app_version), ts.TIMEOUT_S) as res:  # HTTP 429 retried there
+        with ts.open_url(ts._request(url, app_version), timeout or ts.TIMEOUT_S) as res:  # HTTP 429 retried there
             status = getattr(res, "status", 200)
             body = res.read(max_bytes + 1) if max_bytes else res.read()
     except urllib.error.HTTPError as err:
@@ -637,30 +667,219 @@ def markdown_image_urls(markdown: str) -> list[str]:
     return out
 
 
-def prefetch_images(markdown: str, app_version=None, *, limit: int = IMAGE_LIMIT,
-                    max_bytes: int = IMAGE_MAX_BYTES, fetch=None) -> dict[str, bytes]:
-    """url -> bytes for the first `limit` images of `markdown`; one that
-    fails (network, HTTP, too big) is skipped and logged - the text still
-    shows, that image stays blank. Meant for the job thread."""
-    fetch = fetch or fetch_bytes
-    out: dict[str, bytes] = {}
+def image_urls(markdown: str, limit: int = IMAGE_LIMIT) -> list[str]:
+    """The first `limit` image URLs of `markdown` (markdown_image_urls); the rest is logged, not fetched."""
     urls = markdown_image_urls(markdown)
-    for url in urls[:limit]:
-        try:
-            out[url] = fetch(url, app_version, what="image", max_bytes=max_bytes)
-        except (ThunderstoreError, ValueError) as err:
-            log(f"[browse] image {url}: skipped ({err})")
     if len(urls) > limit:
         log(f"[browse] {len(urls) - limit} more images not fetched (limit {limit})")
-    return out
+    return urls[:limit]
 
 
-def fetch_bytes(url: str, app_version=None, *, what: str = "icon", max_bytes: int = ICON_MAX_BYTES) -> bytes:
-    """A small binary (a card icon from ccdn.thunderstore.io). Only http(s)
-    URLs; anything else is a ValueError."""
+def is_badge(url: str) -> bool:
+    """A BADGE_HOSTS image (the host or a subdomain of it)."""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in BADGE_HOSTS)
+
+
+def image_cache_path(app_root, url: str) -> Path:
+    return Path(app_root) / ts.CACHE_DIR / IMAGE_CACHE_DIR / hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+def _cache_image(path: Path, data: bytes) -> None:
+    """mod_icons' write: a temp file, then replace - best effort, a failure only costs a refetch."""
+    # ponytail: the IMAGE_CACHE_CAP is enforced when a Browse Mods window opens (prune_image_cache), so one
+    # long session can run past it until the next open; prune after each page too if that ever matters.
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.part")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except OSError as err:
+        log(f"[browse] image cache write failed for {path.name} ({err})")
+
+
+def _is_text_body(data: bytes) -> bool:
+    """A web page / JSON / text reply where an image was expected (a host's
+    error page with HTTP 200): never shown, never cached. SVG is XML but an
+    image, so it doesn't count."""
+    head = data[:512].lstrip().lower()
+    if b"<svg" in head:
+        return False
+    return head.startswith((b"<!doctype html", b"<html", b"<head", b"<body", b"{", b"[")) or b"<html" in head
+
+
+def prune_image_cache(app_root, cap: int = IMAGE_CACHE_CAP, target: int = IMAGE_CACHE_TARGET) -> dict:
+    """The README image cache's size cap: when the folder holds more than
+    `cap` bytes, the least recently used files (oldest mtime - load_images
+    touches a file on every hit) are deleted until it's at or under `target`.
+    cap=target=0 empties it (Settings' Clean up downloads). Best effort: a
+    file that can't be read or deleted is logged and skipped. Returns
+    {"total": bytes before, "removed": count, "freed": bytes, "failed": count}."""
+    folder = Path(app_root) / ts.CACHE_DIR / IMAGE_CACHE_DIR
+    res = {"total": 0, "removed": 0, "freed": 0, "failed": 0}
+    files = []
+    try:
+        with os.scandir(folder) as it:
+            for entry in it:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        st = entry.stat(follow_symlinks=False)
+                        files.append((st.st_mtime, st.st_size, entry.path))
+                except OSError as err:
+                    log(f"[browse] image cache: can't read {entry.name} ({err})")
+    except FileNotFoundError:
+        return res
+    except OSError as err:
+        log(f"[browse] image cache: can't list {folder} ({err})")
+        return res
+    total = res["total"] = sum(size for _, size, _ in files)
+    if total <= cap:
+        log(f"[browse] image cache: {len(files)} files, {format_size(total)} (cap {format_size(cap)}), nothing to prune")
+        return res
+    for _, size, path in sorted(files):  # oldest use first
+        if total <= target:
+            break
+        try:
+            os.remove(path)
+        except OSError as err:
+            res["failed"] += 1
+            log(f"[browse] image cache: couldn't delete {Path(path).name} ({err})")
+            continue
+        total -= size
+        res["removed"] += 1
+        res["freed"] += size
+    log(f"[browse] image cache pruned: {res['removed']} of {len(files)} files deleted, {format_size(res['freed'])} freed "
+        f"({format_size(res['total'])} -> {format_size(total)}; cap {format_size(cap)}, target {format_size(target)}), "
+        f"{res['failed']} failed")
+    return res
+
+
+_END = object()
+
+
+def _parallel(items, work, workers: int) -> None:
+    """work(item) for every item, `workers` at a time, taken in list order
+    (the list is the priority); returns when all are done. Daemon threads,
+    not concurrent.futures (whose workers the interpreter waits for at exit):
+    closing VOLT mid-load never waits on a slow image host. An exception
+    from one item is logged and the rest carry on."""
+    items = list(items)
+    if not items:
+        return
+    it, lock = iter(items), threading.Lock()
+
+    def run() -> None:
+        while True:
+            with lock:
+                item = next(it, _END)
+            if item is _END:
+                return
+            try:
+                work(item)
+            except Exception as err:  # noqa: BLE001 - a worker never dies silently, the queue keeps draining
+                log(f"[browse] background fetch of {clip(item)} failed: {err!r}")
+
+    threads = [threading.Thread(target=run, name=f"browse-fetch-{i}", daemon=True) for i in range(min(workers, len(items)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+def load_images(urls: list[str], app_version=None, *, app_root=None, max_bytes: int = IMAGE_MAX_BYTES, fetch=None,
+                shrink=None, on_image=None, cancelled=None, workers: int = FETCH_WORKERS, budget_s: float = IMAGE_BUDGET_S,
+                timeout: float = IMAGE_TIMEOUT_S, clock=time.monotonic) -> dict[str, bytes]:
+    """url -> bytes for `urls` (image_urls' list; its order is the queue's),
+    `workers` at a time: a badge host is skipped, the disk cache under
+    `app_root` answers first (no network), else a fetch (`timeout` per
+    socket operation) that is then cached. After `budget_s` from the start
+    no new fetch begins - the queued ones are abandoned, one already in
+    flight still lands. `cancelled()` true (a newer page, the window gone):
+    everything still queued is dropped. `on_image(url, bytes)` runs on the
+    worker as each one lands. A failure (network, HTTP, too big) is skipped
+    and logged; its image stays blank; so is a web page / text reply
+    (_is_text_body), never cached. `shrink(bytes) -> bytes | None` (the
+    window's Qt shrink_image; None = no shrinking, the harness) runs on the
+    worker before anything is cached or shown, so the first showing and
+    every later cache hit are the same bytes: None back = it couldn't decode
+    them (shown as is - most likely blank - and cached only under
+    IMAGE_KEEP_RAW_MAX), a ValueError = too large to decode (skipped). A
+    cache hit touches the file's mtime (prune_image_cache's "recently used")."""
+    fetch = fetch or fetch_bytes
+    start = clock()
+    got: dict[str, bytes] = {}
+    outcome: dict[str, str] = {}  # url -> cache / fetched / failed / badge / budget / cancelled (dict writes are atomic)
+
+    def one(url: str) -> None:
+        if cancelled is not None and cancelled():
+            outcome[url] = "cancelled"
+            return
+        if is_badge(url):
+            outcome[url] = "badge"
+            return
+        path = image_cache_path(app_root, url) if app_root else None
+        data = None
+        if path is not None:
+            try:
+                data = path.read_bytes()
+                outcome[url] = "cache"
+            except OSError:
+                pass
+            else:
+                try:
+                    os.utime(path)  # used now: the last to go when the cache is pruned
+                except OSError:
+                    pass
+        if data is None:
+            if clock() - start > budget_s:
+                outcome[url] = "budget"
+                return
+            try:
+                data = fetch(url, app_version, what="image", max_bytes=max_bytes, timeout=timeout)
+                if _is_text_body(data):
+                    raise ValueError(f"the reply is a web page or text, not an image ({len(data)} bytes)")
+                cacheable = True
+                if shrink is not None:
+                    small = shrink(data)  # ValueError: too large to decode
+                    if small is None:
+                        cacheable = len(data) < IMAGE_KEEP_RAW_MAX
+                        log(f"[browse] image {url}: couldn't be decoded ({len(data)} bytes) - "
+                            f"{'cached as is' if cacheable else 'not cached'}")
+                    else:
+                        data = small
+            except (ThunderstoreError, ValueError) as err:
+                log(f"[browse] image {url}: skipped ({err})")
+                outcome[url] = "failed"
+                return
+            outcome[url] = "fetched"
+            if path is not None and cacheable:
+                _cache_image(path, data)
+        got[url] = data
+        if on_image is not None:
+            on_image(url, data)
+
+    log(f"[browse] images: {len(urls)} queued, {min(workers, len(urls))} workers, budget {budget_s:g}s, "
+        f"disk cache {'on' if app_root else 'off'}")
+    _parallel(urls, one, workers)
+    counts = Counter(outcome.values())
+    log(f"[browse] images done in {clock() - start:.1f}s: {counts['cache']} from the cache, {counts['fetched']} fetched, "
+        f"{counts['failed']} failed, {counts['badge']} badges skipped, {counts['budget']} skipped (over the {budget_s:g}s budget), "
+        f"{counts['cancelled']} dropped (page left)")
+    for why in ("badge", "budget"):
+        skipped = [u for u in urls if outcome.get(u) == why]
+        if skipped:
+            log(f"[browse] images skipped ({why}): {clip(skipped, 600)}")
+    return {u: got[u] for u in urls if u in got}
+
+
+def fetch_bytes(url: str, app_version=None, *, what: str = "icon", max_bytes: int = ICON_MAX_BYTES,
+                timeout: float | None = None) -> bytes:
+    """A small binary (a card icon from ccdn.thunderstore.io, a README
+    image). Only http(s) URLs; anything else is a ValueError. `timeout`:
+    _get's (thunderstore.TIMEOUT_S unless given)."""
     if not isinstance(url, str) or urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"Not an http(s) URL: {url!r}")
-    return _get(url, app_version, what, max_bytes=max_bytes)
+    return _get(url, app_version, what, max_bytes=max_bytes, timeout=timeout)
 
 
 def dependency_chain(dependencies: list[str], installed, framework: str | None, app_version=None, *,
@@ -697,7 +916,7 @@ def dependency_chain(dependencies: list[str], installed, framework: str | None, 
                 satisfied.append(full)
                 continue
             if len(missing) >= CHAIN_LIMIT:
-                problems.append((full, f"more than {CHAIN_LIMIT} dependencies; the rest aren't listed here"))
+                problems.append((full, CHAIN_LIMIT_MESSAGE))
                 return
             try:
                 meta = fetch(ref.namespace, ref.name, app_version)
@@ -711,6 +930,73 @@ def dependency_chain(dependencies: list[str], installed, framework: str | None, 
     visit([d for d in dependencies if isinstance(d, str)])
     log(f"[browse] dependency chain: {len(satisfied)} satisfied, {len(missing)} to install {missing}, {len(problems)} problems")
     return {"satisfied": satisfied, "missing": missing, "problems": problems}
+
+
+def parallel_dependency_chain(dependencies: list[str], installed, framework: str | None, app_version=None, *,
+                              fetch=None, cache: dict | None = None, workers: int = FETCH_WORKERS) -> dict:
+    """dependency_chain's exact answer (same order, same CHAIN_LIMIT cut-off,
+    same problems), faster: the packages it will ask for are fetched first,
+    level by level (breadth first), `workers` at a time, into `cache`
+    (full_name -> fetch_package's dict; the window passes its own so a
+    reopened page or Back costs nothing - successes only, a failure is
+    retried next time), then dependency_chain runs over that cache. A
+    package the warm-up didn't reach (past 2 x CHAIN_LIMIT) is fetched on
+    demand as before."""
+    fetch = fetch or ts.fetch_package
+    cache = {} if cache is None else cache
+    failed: dict[str, ThunderstoreError] = {}  # this run only
+    installed = set(installed)
+    seen: set[str] = set()
+    hits = fetched = levels = 0
+    start = time.monotonic()
+
+    def new_refs(dep_strings) -> list:
+        out = []
+        for dep in dep_strings:
+            if not isinstance(dep, str):
+                continue
+            try:
+                ref = ts.PackageRef.parse(dep)
+            except ValueError:
+                continue  # dependency_chain reports it
+            if ref.full_name in seen or ref.full_name == framework or ref.full_name in installed:
+                continue
+            seen.add(ref.full_name)
+            out.append(ref)
+        return out
+
+    def warm(ref) -> None:
+        try:
+            cache[ref.full_name] = fetch(ref.namespace, ref.name, app_version)
+        except ThunderstoreError as err:
+            failed[ref.full_name] = err
+
+    level = new_refs(dependencies)
+    # ponytail: no cancel - a page left mid-warm-up still finishes its levels (at most 2 x CHAIN_LIMIT small
+    # API calls, ~1-2 s; the results stay in the window's cache). Add a `cancelled` like load_images' if it shows.
+    while level and fetched < 2 * CHAIN_LIMIT:
+        level = level[:2 * CHAIN_LIMIT - fetched]
+        todo = [r for r in level if r.full_name not in cache]
+        hits += len(level) - len(todo)
+        fetched += len(todo)
+        levels += 1
+        _parallel(todo, warm, workers)
+        level = new_refs(d for r in level for d in ((cache.get(r.full_name) or {}).get("latest", {}).get("dependencies") or []))
+    log(f"[browse] dependency chain warm-up: {fetched} fetched ({len(failed)} failed), {hits} from the window's cache, "
+        f"{levels} levels, {time.monotonic() - start:.2f}s")
+
+    def cached(namespace: str, name: str, app_version=None) -> dict:
+        full = f"{namespace}-{name}"
+        if full in cache:
+            return cache[full]
+        if full in failed:
+            raise failed[full]
+        log(f"[browse] dependency chain: {full} past the warm-up, fetched on demand")
+        meta = fetch(namespace, name, app_version)
+        cache[full] = meta
+        return meta
+
+    return dependency_chain(dependencies, installed, framework, app_version, fetch=cached)
 
 
 def format_count(n) -> str:

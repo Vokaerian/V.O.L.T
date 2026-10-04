@@ -1060,11 +1060,16 @@ def clean_package_cache(app_root) -> dict:
     order's manifest can't be read, nothing is deleted - never sweep on
     incomplete information. The caller makes sure no install / download is
     running meanwhile (the screen's busy state).
+    Since 0.6.31 it also empties the Browse Mods README image cache
+    (thunderstore_browse.prune_image_cache with a zero cap: those pictures
+    are fully regenerable), unless it aborted.
     Returns {"unreadable": [{"slug", "error"}] (non-empty = aborted, nothing
     deleted), "load_orders": count read, "removed": [(name, bytes)],
     "freed": bytes, "failed": [(name, error)], "kept": [names], "ignored":
-    [names]}. OSError if a folder itself can't be listed."""
-    res = {"unreadable": [], "load_orders": 0, "removed": [], "freed": 0, "failed": [], "kept": [], "ignored": []}
+    [names], "images": prune_image_cache's {"total", "removed", "freed",
+    "failed"}}. OSError if a folder itself can't be listed."""
+    res = {"unreadable": [], "load_orders": 0, "removed": [], "freed": 0, "failed": [], "kept": [], "ignored": [],
+           "images": {"total": 0, "removed": 0, "freed": 0, "failed": 0}}
     manifests = []
     try:
         dirs = sorted(e.name for e in os.scandir(load_orders_root(app_root)) if e.is_dir())
@@ -1110,6 +1115,8 @@ def clean_package_cache(app_root) -> dict:
         res["removed"].append((name, size))
         res["freed"] += size
         log(f"[cache] clean: removed {name} ({size} bytes)")
+    res["images"] = tb.prune_image_cache(app_root, cap=0, target=0)  # README pictures: all go (0.6.31)
     log(f"[cache] clean done: removed {len(res['removed'])} ({res['freed']} bytes freed), "
-        f"{len(res['failed'])} failed, {len(res['kept'])} kept")
+        f"{len(res['failed'])} failed, {len(res['kept'])} kept; README images: {res['images']['removed']} removed "
+        f"({res['images']['freed']} bytes), {res['images']['failed']} failed")
     return res

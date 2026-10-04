@@ -24,7 +24,8 @@ Thunderstore game actually needs today:
   UNITY_LAUNCH_ARG_EXAMPLES.
 - Troubleshooting: Open log file / Open previous log file, as RimWorld's,
   then Clean cache (labelled "Clean up downloads" since 0.6.24; THUNDERSTORE.md §8c): deletes every cached package zip
-  no load order of this game references (bepinex_load_orders.
+  no load order of this game references (and, since 0.6.31, every Browse Mods README picture under
+  cache/readme-images/) (bepinex_load_orders.
   clean_package_cache - aborts with nothing deleted if a load order can't
   be read), synchronously (a scan + a few unlinks), then says what it did
   in a message box (clean_result_text). No confirm: the cache is fully
@@ -102,8 +103,8 @@ from volt_py.screens.settings_window import (
 from volt_py.settings import SettingsStore
 from volt_py.thunderstore_browse import format_size
 
-CLEAN_CACHE_TOOLTIP = ("Deletes VOLT's downloaded copies of mods that no profile uses, to free up space "
-                       "(they download again if you need them later)")
+CLEAN_CACHE_TOOLTIP = ("Deletes VOLT's downloaded copies of mods that no profile uses, and the saved pictures "
+                       "from mod pages in Browse Mods, to free up space (they download again if you need them later)")
 CLEAN_CACHE_BUSY_TOOLTIP = "Unavailable while VOLT is installing, updating or running the game"
 LOG_COPY_BYTES = 200 * 1024  # Copy log to clipboard: the log's tail, so a long session doesn't flood the clipboard
 COPY_LOG_TOOLTIP = "Copies the log file as plain text (the last 200 KB when it's longer)"
@@ -139,18 +140,27 @@ def clean_result_text(res: dict) -> tuple[str, str, bool]:
             True,
         )
     kept = len(res["kept"])
+    pics = res.get("images") or {"removed": 0, "freed": 0, "failed": 0}  # Browse Mods' saved pictures (0.6.31)
     if res["removed"]:
         text = (f"Removed {_plural(len(res['removed']), 'downloaded mod')} that no profile uses, "
                 f"freeing {format_size(res['freed'])}.")
         if kept:
             text += f" {_plural(kept, 'downloaded mod')} in use {'was' if kept == 1 else 'were'} kept."
-    else:
+    elif not pics["removed"]:
         text = ("Nothing to clean up: every downloaded mod is used by a profile." if kept
                 else "Nothing to clean up: VOLT has no downloaded mods.")
+    else:
+        text = ("Every downloaded mod is used by a profile, so none were removed." if kept
+                else "VOLT has no downloaded mods.")
+    if pics["removed"]:
+        text += (f" Also removed {_plural(pics['removed'], 'saved picture')} from mod pages in Browse Mods, "
+                 f"freeing {format_size(pics['freed'])}.")
     if res["failed"]:
         names = ", ".join(name for name, _ in res["failed"])
         text += f" {_plural(len(res['failed']), 'file')} couldn't be removed (in use by another program?): {names}."
-    return "Clean up downloads", text, bool(res["failed"])
+    if pics["failed"]:
+        text += f" {_plural(pics['failed'], 'saved picture')} couldn't be removed."
+    return "Clean up downloads", text, bool(res["failed"] or pics["failed"])
 
 
 class BepInExSettingsWindow(QDialog):
