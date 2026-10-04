@@ -700,6 +700,10 @@ def import_profile(app_root, path, name: str, game: lo.ThunderstoreGame, app_ver
     check_game(profile, game, game_name)
     fw_mod = framework_entry(profile, game)
     fw_wanted = fw_mod["version"] if fw_mod else None
+    # the download bar's whole total before the first download (0.6.26; no request the install wouldn't make)
+    # (a generator: a ref that won't build fails inside plan_downloads' guard, never the import)
+    lo.plan_downloads(app_root, None, game, (ts.PackageRef(m["namespace"], m["name"], m["version"]) for m in profile["mods"]
+                                             if m["full_name"] != game.framework_package), app_version, lookup_pinned=False)
     report(f"Installing {game.framework_package}{' ' + fw_wanted if fw_wanted else ''}...")
     manifest = lo.create_load_order(app_root, name, game, app_version, framework_version=fw_wanted)
     slug = manifest["slug"]
@@ -847,16 +851,16 @@ def describe_import(summary: dict) -> str:
             lines[2:2] = [f'{_plural(len(summary["replace_skipped"]), "file")} of "{summary["replaced"]}" couldn\'t be '
                           "removed (in use?) and were left in its folder."]
     fw = summary["framework"]
-    fw_line = f"Framework: {fw['installed']}"
+    fw_line = f"Mod loader: {fw['installed']}"  # 0.6.24 plain words: "framework" -> "mod loader"
     if fw["fell_back"]:
         fw_line += f" (the file's {fw['wanted']} is no longer on Thunderstore; the latest was installed instead)"
     elif not fw["wanted"]:
-        fw_line += " (the file doesn't list the framework; the latest was installed)"
+        fw_line += " (the file doesn't list the mod loader; the latest was installed)"
     lines.append(fw_line)
     got = len(summary["installed"])
     line = f"Mods installed: {got} of {total}"
     if summary["extra"]:
-        line += f", plus {_plural(len(summary['extra']), 'dependency', 'dependencies')} the file doesn't list ({', '.join(summary['extra'])})"
+        line += f", plus {_plural(len(summary['extra']), 'required mod')} the file doesn't list ({', '.join(summary['extra'])})"
     lines.append(line + ".")
     if summary["disabled"]:
         lines.append(f"Switched off, as in the file: {', '.join(summary['disabled'])}.")
@@ -869,9 +873,9 @@ def describe_import(summary: dict) -> str:
         lines += ["", f"{_plural(len(summary['failed']), 'mod')} couldn't be installed:"]
         lines += [f"  - {f['package']}: {f['message']}" for f in summary["failed"]]
     lines.append("")
-    files = f"Config files restored: {len(summary['restored'])}"
+    files = f"Mod settings files restored: {len(summary['restored'])}"
     if summary["skipped"]:
-        files += f" ({_plural(len(summary['skipped']), 'file')} in the archive skipped - not config files, or unsafe to restore)"
+        files += f" ({_plural(len(summary['skipped']), 'file')} in the file skipped - not settings files, or unsafe to restore)"
     lines.append(files + ".")
     if summary["problems"]:
         lines += ["", "Oddities in the file:"] + [f"  - {p}" for p in summary["problems"]]

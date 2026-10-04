@@ -27,6 +27,19 @@ over RimWorld's: a way to fix the errors in place -
 Inactive / switched-off dependencies aren't installs: their detail says
 what to do (activate / switch on) and has no button. The framework
 package never appears here (dependency_issues skips it). Esc closes.
+
+"Files missing" (0.6.27, PLAN.md §11 (f)): the screen also lists
+bepinex_load_orders.files_issue's dicts (kind "files", a warning, "dep" =
+the mod itself) under the mod's own header - some or all of its files are
+gone from the profile folder; the detail says so and points at the row's
+Reinstall (no button here).
+
+Three sections (0.6.28, PLAN.md §11 (g)): under the heading, the detail
+reads "What happened" / "What it means" / "What to try" (detail_text's
+three parts), each a small terminal label (the "side" rule, as Browse
+Mods' "Requires") over its text shown as help_window.TextBlocks
+(paragraphs, numbered steps); the Install button and its result stay
+below them.
 """
 
 from collections.abc import Callable
@@ -44,36 +57,62 @@ from PySide6.QtWidgets import (
 
 from volt_py import bepinex_load_orders as lo, painters
 from volt_py.applog import log
+from volt_py.screens.help_window import TextBlocks
 
 WINDOW_SIZE = (900, 600)  # the Warnings and errors / Scan issues window
 RAIL_WIDTH = 280
 GROUP_GAP = 6
 
-RAIL_LABEL = {"missing": "Missing dependency", "inactive": "Dependency inactive", "off": "Dependency switched off"}
+# 0.6.24 plain words: a "dependency" is a "required mod" (a mod another mod needs to work).
+RAIL_LABEL = {"missing": "Required mod missing", "inactive": "Required mod inactive", "off": "Required mod switched off",
+              "files": "Files missing"}
 HEADING = {
-    "missing": "Missing dependency (not installed)",
-    "inactive": "Dependency installed but inactive",
-    "off": "Dependency switched off",
+    "missing": "A mod it needs isn't installed",
+    "inactive": "A mod it needs is in the Inactive list",
+    "off": "A mod it needs is switched off",
+    "files": "Some of its files are gone",
 }
+SECTIONS = ("What happened", "What it means", "What to try")
+SECTION_GAP = 4  # a section label to its text (the detail's own 8px sits between sections)
 
 
-def detail_text(issue: dict, name: str, dep_name: str) -> str:
-    """What the selected issue means and what fixes it."""
+def detail_text(issue: dict, name: str, dep_name: str) -> tuple[str, str, str]:
+    """The selected issue as SECTIONS: what happened, what it means, what to
+    try (plain text: blank lines split paragraphs, "1. " lines are steps)."""
     kind = issue["kind"]
+    if kind == "files":
+        missing, total = issue["missing"], issue["total"]
+        count = (f"All {total} of {name}'s files are" if missing >= total
+                 else f"{missing} of {name}'s {total} files are")
+        return (
+            f"{count} gone from the profile folder. Something outside VOLT removed them: they may have been "
+            "deleted by hand, or moved away by an antivirus program.",
+            f"The game may skip {name}, or fail while loading it.",
+            f"1. Right-click {name} in the list.\n"
+            "2. Choose \"Reinstall\".\n\n"
+            "VOLT puts the same version back. It keeps the mod's settings files, its place in the list, and "
+            "whether it's on or off.",
+        )
     if kind == "missing":
         return (
-            f"{name} requires {dep_name}, which isn't installed in this profile. BepInEx will skip {name} "
-            f"(or it will fail while loading). Install {dep_name} below - VOLT downloads its latest version, "
-            "with anything it needs itself, and adds it to the Active list."
+            f"{name} needs {dep_name} to work, and {dep_name} isn't installed in this profile.",
+            f"The game will skip {name}, or {name} will fail while the game loads.",
+            f"Press \"Install {dep_name}\" below. VOLT downloads the latest version of {dep_name}, with anything "
+            "it needs itself, and adds it to the Active list.\n\n"
+            "\"Install all missing\" at the top installs every missing mod in one go.",
         )
     if kind == "inactive":
         return (
-            f"{name} requires {dep_name}, which is installed but in the Inactive list, so it isn't loaded. "
-            f"Double-click {dep_name} in the Inactive list to activate it, then Save."
+            f"{name} needs {dep_name} to work, and {dep_name} is in the Inactive list.",
+            f"Mods in the Inactive list aren't loaded, so {name} can't use {dep_name}.",
+            f"1. Double-click {dep_name} in the Inactive list to move it to Active.\n"
+            "2. Press \"Save\".",
         )
     return (
-        f"{name} requires {dep_name}, which is in the Active list but switched off, so it isn't loaded. "
-        f"Switch {dep_name} back on with its toggle, then Save."
+        f"{name} needs {dep_name} to work, and {dep_name} is switched off.",
+        f"Switched-off mods aren't loaded, so {name} can't use {dep_name}.",
+        f"1. Click the switch at the right of {dep_name} to turn it back on.\n"
+        "2. Press \"Save\".",
     )
 
 
@@ -143,7 +182,7 @@ class BepInExIssuesWindow(QDialog):
         self.install_all_button = QPushButton("Install all missing")
         self.install_all_button.setProperty("variant", "accent-outline")
         self.install_all_button.setAutoDefault(False)
-        self.install_all_button.setToolTip("Install every dependency listed as not installed, each at its latest version")
+        self.install_all_button.setToolTip("Install every required mod listed as not installed, each at its latest version")
         header.addWidget(self.install_all_button)
         self.close_button = QPushButton("Close")
         self.close_button.setAutoDefault(False)
@@ -203,14 +242,22 @@ class BepInExIssuesWindow(QDialog):
         self._heading = painters.TerminalLabel(rule="heading")
         self._heading.setTextFormat(Qt.TextFormat.PlainText)
         self._heading.setWordWrap(True)
-        self._text = _wrapped()
+        self._sections = []  # one TextBlocks per SECTIONS entry (0.6.28)
         self._package = _wrapped(role="scan-mono")  # the dependency's full_name, mono
         self.install_button = QPushButton("Install")
         self.install_button.setProperty("variant", "primary")
         self.install_button.setAutoDefault(False)
         self._result_label = _wrapped()
-        for widget in (self._heading, self._text, self._package):
-            detail.addWidget(widget)
+        detail.addWidget(self._heading)
+        for title in SECTIONS:
+            section = QVBoxLayout()
+            section.setSpacing(SECTION_GAP)
+            section.addWidget(painters.TerminalLabel(title, rule="side"))
+            blocks = TextBlocks()
+            section.addWidget(blocks)
+            self._sections.append(blocks)
+            detail.addLayout(section)
+        detail.addWidget(self._package)
         detail.addWidget(self.install_button, 0, Qt.AlignmentFlag.AlignLeft)
         detail.addWidget(self._result_label)
         detail.addStretch(1)
@@ -286,7 +333,8 @@ class BepInExIssuesWindow(QDialog):
             _repolish(self._detail)
         name, dep = self._display_name(sel["mod_id"]), sel["dep"]
         self._heading.setText(HEADING[sel["kind"]])
-        self._text.setText(detail_text(sel, name, dep))
+        for blocks, text in zip(self._sections, detail_text(sel, name, dep)):
+            blocks.setText(text)
         self._package.setText(dep)
         is_missing = sel["kind"] == "missing"
         self.install_button.setVisible(is_missing)
@@ -333,7 +381,7 @@ class BepInExIssuesWindow(QDialog):
                 got = [p for p in asked if p not in failed]
                 parts = []
                 if got:
-                    parts.append(f"Installed {', '.join(got)}" + (" and its dependencies." if len(got) == 1 else " and their dependencies."))
+                    parts.append(f"Installed {', '.join(got)}" + (" and the mods it needs." if len(got) == 1 else " and the mods they need."))
                 parts += [f"{name}: {msg}" for name, msg in res["failed"]]
                 self._result, self._result_error = " ".join(parts), bool(res["failed"])
             self.refresh()  # the rows that dependency caused are gone now (the screen recomputed)

@@ -69,17 +69,52 @@ Clean cache (THUNDERSTORE.md §8c): clean_package_cache() deletes every
 cached package zip no load order references (framework, active or
 inactive); the pure unreferenced_cache_files() decides which. An unreadable
 manifest aborts it with nothing deleted.
+
+Download progress (0.6.25, PLAN.md §11 (a)): inside `with
+package_progress(cb):` every package fetch + install (_fetch_and_install -
+create_load_order's framework, install_mod and its dependencies, update_mod,
+an import's mods) calls cb({"type": "start", "id": full_name})
+before it and cb({"type": "item-done", "id", "ok", "message"}) after it (a
+cache hit = start + done at once). The manager screen's footer bar folds
+these into download_state (apply_package_event); the existing text
+progress (`report` / `progress=`) is untouched.
+
+Total up front (0.6.26, PLAN.md §11 (d)): plan_downloads() is a pre-pass a
+download job runs before its installs - the mods the install will fetch
+(targets not yet installed + their missing required mods, resolved as
+install_mod does, through thunderstore_browse.dependency_chain), announced
+as one {"type": "plan", "ids": [...]} event, so the bar's total is known
+before the first download. Inside package_progress every package metadata
+lookup is remembered for the rest of the block (_fetch_meta), so the
+install reuses the pre-pass's requests instead of repeating them. The
+pre-pass never raises and never changes what the install does; a mod it
+missed still joins the total when it starts, as before.
+
+Missing files (0.6.27, PLAN.md §11 (f)): the manifest is the truth for what is
+installed (THUNDERSTORE.md §3a), so files deleted from a tree outside VOLT
+(Explorer, an antivirus quarantine) went unnoticed. missing_files() compares
+each installed mod's tracked non-config files with the tree - one walk of
+BepInEx/, a file counting as present under its own name or its
+DISABLED_SUFFIX twin; config files and the framework are left out - and
+files_issue() turns a result into the manager's "files" issue.
+reinstall_mod() is the fix: update_mod(reinstall=True) at the installed
+version, from the cached zip (downloaded first when it's gone), keeping the
+mod's on-disk state, list position and config files.
 """
 
 import os
 import shutil
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import bepinex_install as bx
 from . import thunderstore as ts
-from .applog import log
+from . import thunderstore_browse as tb
+from .applog import clip, log
 from .fsutil import read_json, remove_tree_best_effort, write_json
 from .mods import natural_key
 from .slug import is_valid_slug, slugify
@@ -277,6 +312,69 @@ def mod_missing_dependencies(entries: dict[str, dict], mod_id: str, framework_pa
             if dep != framework_package and dep != mod_id and dep not in entries]
 
 
+# ---- missing files (0.6.27; module docstring, "Missing files") ----
+FILES_ISSUE_TEXT = ("Some of this mod's files are gone from the profile folder (deleted outside VOLT?). "
+                    "Right-click > Reinstall to fix it.")
+FILES_ISSUE_TEXT_ALL = ("All of this mod's files are gone from the profile folder (deleted outside VOLT?). "
+                        "Right-click > Reinstall to fix it.")
+
+
+def missing_files(app_root, slug, manifest: dict) -> dict[str, tuple[int, int]]:
+    """{full_name: (missing, total)} for each installed mod (Active and
+    Inactive; the framework left out) with at least one tracked non-config
+    file missing from the tree under both its own name and its disabled
+    twin - total = its tracked non-config files; healthy mods aren't listed.
+    One os.walk of <tree>/BepInEx (every non-framework file routes under it,
+    bepinex_install.route_file) instead of a stat per file; names compared
+    case-folded (Windows' file system ignores case). One log line per call.
+    Never raises: any failure is logged and gives {}."""
+    try:
+        t0 = time.monotonic()
+        root = tree_root(app_root, slug)
+        present: set[str] = set()
+        for dirpath, _dirs, files in os.walk(root / bx.BEPINEX_DIR):
+            rel_dir = Path(dirpath).relative_to(root).as_posix()
+            present.update(f"{rel_dir}/{f}".casefold() for f in files)
+        out: dict[str, tuple[int, int]] = {}
+        for e in manifest["active"] + manifest["inactive"]:
+            tracked = [f for f in e["files"] if not bx.is_config_path(f)]
+            gone = sum(1 for f in tracked
+                       if f.casefold() not in present and (f + bx.DISABLED_SUFFIX).casefold() not in present)
+            if gone:
+                out[e["full_name"]] = (gone, len(tracked))
+        mods = len(manifest["active"]) + len(manifest["inactive"])
+        detail = ", ".join(f"{n} ({m}/{t}{' ALL' if m == t else ''})" for n, (m, t) in out.items())
+        log(f"[loadorders] {slug}: files check: {len(out)} of {mods} mods have files missing"
+            f" ({len(present)} files in BepInEx/, {(time.monotonic() - t0) * 1000:.0f} ms)"
+            + (f": {clip(detail, 1000)}" if out else ""))
+        return out
+    except Exception as err:  # a check that can't run must never stop the profile from opening
+        log(f"[loadorders] {slug}: files check failed ({err!r}); no mod marked")
+        return {}
+
+
+def files_issue(mod_id: str, missing: int, total: int) -> dict:
+    """missing_files' result for one mod as a manager issue (the
+    dependency_issues shape, kind "files", severity "warning"; "dep" = the
+    mod itself, so (mod_id, dep) stays a unique key)."""
+    return {"mod_id": mod_id, "dep": mod_id, "kind": "files", "severity": "warning",
+            "missing": missing, "total": total,
+            "text": FILES_ISSUE_TEXT_ALL if missing >= total else FILES_ISSUE_TEXT}
+
+
+def reinstall_source(app_root, entry: dict) -> str | None:
+    """Where reinstall_mod would get `entry`'s zip: "cache" (its exact
+    version is in the package cache), "download" (from Thunderstore), or
+    None (a local .zip mod whose cached copy is gone: nowhere to get it)."""
+    try:
+        ref = ts.PackageRef(entry["namespace"], entry["name"], entry["version"])
+    except ValueError:
+        return None
+    if ts.cached_package(app_root, ref) is not None:
+        return "cache"
+    return "download" if entry.get("online_source", True) else None
+
+
 def _write(app_root, slug, manifest: dict) -> dict:
     manifest = {k: v for k, v in manifest.items() if k != "slug"}
     manifest["schema_version"] = SCHEMA_VERSION
@@ -344,12 +442,117 @@ def _make_entry(ref: ts.PackageRef, result: dict) -> dict:
     }
 
 
+# ponytail: a per-thread hook instead of a progress= parameter threaded through
+# create_load_order / install_mod / update_mod / bepinex_share's imports; each
+# screen job is its own thread, so jobs never see each other's hook. Make it a
+# parameter if a caller ever needs progress across threads.
+_progress = threading.local()
+
+
+@contextmanager
+def package_progress(cb):
+    """Within the block (on this thread), every package fetch + install
+    reports to cb(event) - module docstring, "Download progress"."""
+    prev = getattr(_progress, "cb", None), getattr(_progress, "meta", None)
+    _progress.cb, _progress.meta = cb, {}  # meta: _fetch_meta's lookups, for this block only
+    try:
+        yield
+    finally:
+        _progress.cb, _progress.meta = prev
+
+
+def _fetch_meta(namespace: str, name: str, app_version=None) -> dict:
+    """ts.fetch_package, remembered for the rest of a package_progress block
+    (the pre-pass's lookups serve the install); a plain fetch outside one.
+    Failures aren't remembered (the install asks again, as it always did)."""
+    memo = getattr(_progress, "meta", None)
+    key = f"{namespace}-{name}"
+    if memo is not None and key in memo:
+        return memo[key]
+    meta = ts.fetch_package(namespace, name, app_version)
+    if memo is not None:
+        memo[key] = meta
+    return meta
+
+
+def _planned_dependencies(app_root, ref: ts.PackageRef, app_version, lookup_pinned: bool) -> list[str]:
+    """plan_downloads: `ref`'s declared dependencies - an exact version's
+    from its cached zip, else (lookup_pinned) from Thunderstore when its
+    latest is that version; the latest's for an unpinned ref. [] when not
+    known without a request the install wouldn't make, or on any failure."""
+    try:
+        if ref.version is not None:
+            cached = ts.cached_package(app_root, ref)
+            if cached is not None:
+                with bx.PackageSource(cached) as src:
+                    return list(bx.read_manifest(src)["dependencies"])
+            if not lookup_pinned:
+                return []
+        latest = _fetch_meta(ref.namespace, ref.name, app_version)["latest"]
+        if ref.version is not None and latest.get("version_number") != ref.version:
+            return []
+        return [d for d in latest.get("dependencies") or [] if isinstance(d, str)]
+    except (ts.ThunderstoreError, bx.PackageError, OSError, ValueError) as err:
+        log(f"[loadorders] pre-pass: {ref.full_name}'s dependencies unknown ({err})")
+        return []
+
+
+def plan_downloads(app_root, slug, game: ThunderstoreGame, refs, app_version=None, *, lookup_pinned: bool = True) -> list[str]:
+    """The pre-pass (module docstring, "Total up front"): inside
+    package_progress, the full_names installing `refs` into load order
+    `slug` (None = a load order not created yet: only the framework counts
+    as there) will fetch - each ref not installed yet, then their missing
+    required mods (latest versions, dependency_chain's walk = install_mod's)
+    - emitted as one "plan" event and returned. `lookup_pinned` False (an
+    import: every listed mod pinned) keeps a pinned ref without a cached zip
+    from costing a request the install wouldn't make. Outside
+    package_progress: nothing, []. Never raises."""
+    if getattr(_progress, "cb", None) is None:
+        return []
+    try:
+        have = set(installed(load_load_order(app_root, slug))) if slug else set()
+        have.add(game.framework_package)
+        plan: list[str] = []
+        deps: list[str] = []
+        for ref in refs:
+            if ref.full_name in have or ref.full_name in plan:
+                continue
+            plan.append(ref.full_name)
+            deps += _planned_dependencies(app_root, ref, app_version, lookup_pinned)
+        chain = tb.dependency_chain(deps, have | set(plan), game.framework_package, app_version, fetch=_fetch_meta)
+        plan += [f for f in chain["missing"] if f not in plan]
+    except Exception as err:  # the bar's total must never break an install
+        log(f"[loadorders] pre-pass failed ({err!r}); the total grows as mods start")
+        return []
+    log(f"[loadorders] pre-pass: {len(plan)} mods to fetch {plan}")
+    _emit({"type": "plan", "ids": plan})
+    return plan
+
+
+def _emit(event: dict) -> None:
+    cb = getattr(_progress, "cb", None)
+    if cb is not None:
+        cb(event)
+
+
 def _fetch_and_install(app_root, slug, ref: ts.PackageRef, framework: bool, app_version=None) -> dict:
     """Resolve `ref` (a pinned version, else Thunderstore's latest), get the
-    zip into the shared cache, extract it into the tree. Returns the entry."""
+    zip into the shared cache, extract it into the tree. Returns the entry.
+    Reports start / item-done to package_progress's hook, if one is set."""
+    _emit({"type": "start", "id": ref.full_name})
+    try:
+        entry = _fetch_and_install_quiet(app_root, slug, ref, framework, app_version)
+    except Exception as err:
+        _emit({"type": "item-done", "id": ref.full_name, "ok": False, "message": str(err) or repr(err)})
+        raise
+    _emit({"type": "item-done", "id": ref.full_name, "ok": True})
+    return entry
+
+
+def _fetch_and_install_quiet(app_root, slug, ref: ts.PackageRef, framework: bool, app_version=None) -> dict:
     url = None
     if ref.version is None:
-        meta = ts.fetch_package(ref.namespace, ref.name, app_version)
+        meta = _fetch_meta(ref.namespace, ref.name, app_version)
         ref = ts.latest_ref(meta)
         url = meta["latest"].get("download_url") if isinstance(meta["latest"].get("download_url"), str) else None
     zip_path = ts.ensure_cached(app_root, ref, url, app_version)
@@ -682,7 +885,8 @@ def check_updates(manifest: dict, app_version=None, only=None) -> dict[str, dict
     return out
 
 
-def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_version=None, *, version: str | None = None) -> dict:
+def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_version=None, *, version: str | None = None,
+               reinstall: bool = False) -> dict:
     """Re-downloads + installs `full_name` at Thunderstore's current latest
     version - or at `version` (the browser's Versions tab: any release,
     newer or older) - in place (the framework included). New files
@@ -692,7 +896,9 @@ def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_versi
     back disabled). Returns {"manifest", "entry", "updated": bool} -
     updated False when the installed version already is the one asked for
     (nothing touched). ValueError for a package not in this load order or
-    a bad version; ThunderstoreError / PackageError from the fetch/install."""
+    a bad version; ThunderstoreError / PackageError from the fetch/install.
+    `reinstall` (with `version` = the installed one; reinstall_mod): install
+    it again anyway, putting back files missing from the tree."""
     manifest = load_load_order(app_root, slug)
     entry = installed(manifest).get(full_name)
     if entry is None:
@@ -707,7 +913,7 @@ def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_versi
             return {"manifest": manifest, "entry": entry, "updated": False}
     else:
         latest = ts.PackageRef(entry["namespace"], entry["name"], version)  # validates; "latest" = the target below
-        if version == entry["version"]:
+        if version == entry["version"] and not reinstall:
             log(f"[loadorders] {slug}: {full_name} already is {version}, nothing to do")
             return {"manifest": manifest, "entry": entry, "updated": False}
     on_disk_enabled = is_framework or (
@@ -726,9 +932,35 @@ def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_versi
     else:
         for key in ("active", "inactive"):
             manifest[key] = [new_entry if e["full_name"] == full_name else e for e in manifest[key]]
-    log(f"[loadorders] {slug}: {'updated' if version is None else 'switched'} {full_name} {entry['version']} -> {latest.version}"
+    log(f"[loadorders] {slug}: {'updated' if version is None else 'reinstalled' if reinstall else 'switched'} {full_name} {entry['version']} -> {latest.version}"
         f"{' (framework)' if is_framework else ''}{'' if on_disk_enabled else ', kept disabled'}")
     return {"manifest": _write(app_root, slug, manifest), "entry": new_entry, "updated": True}
+
+
+def reinstall_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_version=None) -> dict:
+    """The Missing files fix (module docstring): `full_name` extracted again
+    at its installed version - from the cached zip, else downloaded through
+    the normal path - over the tree (update_mod(reinstall=True): on-disk
+    enabled / disabled state, list position and config files kept; no other
+    mod touched). Returns update_mod's dict plus "source" ("cache" /
+    "download") and "missing_before" / "missing_after" (that mod's missing
+    file count). ValueError (plain words) for a local .zip mod with no
+    cached copy; ThunderstoreError / PackageError from the fetch/install."""
+    manifest = load_load_order(app_root, slug)
+    entry = installed(manifest).get(full_name)
+    if entry is None:
+        raise ValueError(f"{full_name} is not installed in this profile")
+    source = reinstall_source(app_root, entry)
+    if source is None:
+        raise ValueError(f"VOLT no longer has the .zip file {entry['display_name']} was added from, so it can't put its files back.")
+    before = missing_files(app_root, slug, manifest).get(full_name, (0, 0))[0]
+    log(f"[loadorders] {slug}: reinstall {full_name} {entry['version']}: from the {source}, "
+        f"{before} of {len([f for f in entry['files'] if not bx.is_config_path(f)])} files missing before")
+    res = update_mod(app_root, slug, game, full_name, app_version, version=entry["version"], reinstall=True)
+    after = missing_files(app_root, slug, res["manifest"]).get(full_name, (0, 0))[0]
+    log(f"[loadorders] {slug}: reinstall {full_name}: done, {len(res['entry']['files'])} files tracked, "
+        f"{after} still missing")
+    return {**res, "source": source, "missing_before": before, "missing_after": after}
 
 
 def copy_load_order(app_root, slug, new_name: str) -> dict:

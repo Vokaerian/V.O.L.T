@@ -1,12 +1,21 @@
 """The Help window's entries (screens/help_window.py) for every Thunderstore/
-BepInEx game's manager screen (screens/bepinex_main_screen.py): one per
-button/control, the row right-click menu grouped into one entry, as
-RimWorld's (rimworld_help_entries.py; the list THUNDERSTORE.md §6 scoped,
-written against what the screen actually does today).
+BepInEx game's manager screen (screens/bepinex_main_screen.py). Since 0.6.24
+(PLAN.md §10 (h)) written as tasks ("How do I add a mod?") in plain words,
+not one entry per button: every button and feature is still named in some
+entry, and the row right-click menu keeps one grouped entry, as RimWorld's
+(rimworld_help_entries.py).
 
-Plain data, no Qt. The window sorts by name itself; kept roughly in
-on-screen order (header, load-order bar, panes, rows, actions column).
-Update an entry whenever the control it describes changes.
+0.6.28 (PLAN.md §11 (g)): every name is a short question - "How do I
+<task>?" or "What ...?" - of at most NAME_MAX characters, so it
+fits the Help rail (240px) on one line; no game name in a name.
+"long" is plain-text paragraphs (blank line between) and list lines
+("1. " steps, "- " items) that help_window.TextBlocks lays out; button and
+menu names are quoted as on screen (a trailing "..." left off).
+
+Plain data, no Qt. The window sorts by name itself (the "How do I" entries
+group together, then the "What is" ones); kept here in a getting-going ->
+mods -> sharing -> trouble order. Update an entry whenever a feature it
+describes changes.
 
 Shared by every game in bepinex_games.GAMES: "{game}" becomes the game
 module's NAME and "{example_package}" its EXAMPLE_PACKAGE (a well-known
@@ -18,6 +27,9 @@ appended at the end). Valheim needs neither: help_entries(valheim) is,
 string for string, the old VALHEIM_HELP_ENTRIES
 (tools/checks/volt_py_bepinex_games.py).
 """
+
+
+NAME_MAX = 28  # the rail's one-line cap (tools/checks/volt_py_help_window.py measures it)
 
 
 def _fill(text: str, values: dict) -> str:
@@ -38,342 +50,251 @@ def help_entries(game) -> list[dict]:
 
 
 BEPINEX_HELP_ENTRIES: list[dict] = [
-    # ---- header ----
+    # ---- getting going ----
     {
-        "name": "Settings",
-        "short": "Opens the Settings window, where you tell VOLT where {game} is installed.",
+        "name": "How do I get started?",
+        "short": "Tell VOLT where {game} is, make a profile, add some mods, then press Modded to play.",
         "long": (
-            "General shows the game folder with a Browse button, plus Autodetect to find your Steam install for "
-            "you. It's the only path {game} needs: every profile keeps its mods and their BepInEx config in "
-            "its own folder under VOLT's data folder, never inside the game. Troubleshooting opens VOLT's log "
-            "file (or the one from the previous run), which is handy when reporting a problem. Its Clean cache "
-            "button deletes downloaded mod files that no profile uses any more, to free up space - a "
-            "Thunderstore mod just downloads again if you install it later."
+            "The \"Get started\" list under the profile bar walks you through those four steps and ticks each one "
+            "off. Click a step to go straight to it, or press \"Hide\" to put the list away for good.\n\n"
+            "While you have no profile, the empty Active list shows a card with \"Create a profile\" and \"Import "
+            "one someone shared\".\n\n"
+            "Point at any greyed-out button to see why it's greyed out (\"Create a profile first.\", for example)."
         ),
     },
     {
-        "name": "Paths: Game folder",
-        "short": "Opens {game}'s install folder in your file explorer.",
+        "name": "How do I find the game?",
+        "short": "Open Settings and press Autodetect, or press Browse and pick the game folder.",
         "long": (
-            "This is the \"Game\" link next to \"Paths:\" at the top of the window. It's greyed out until a game "
-            "folder is set. Hover it to see the full path. The line under the links spells out the game folder "
-            "and the open profile's BepInEx folder."
+            "1. Press \"Settings\" at the top of the window.\n"
+            "2. On the \"General\" tab, press \"Autodetect paths\". It looks in Steam's usual library folders.\n"
+            "3. If that doesn't find {game}, press \"Browse\" and pick the game folder yourself.\n\n"
+            "To find the folder, right-click {game} in Steam and choose Manage > Browse local files.\n\n"
+            "That's the only folder VOLT needs: your mods live in VOLT's own folder, never inside the game. "
+            "The \"Game\" link next to \"Paths:\" at the top opens the game folder, and the line under the links "
+            "shows the full paths."
         ),
     },
     {
-        "name": "Paths: Profile folder",
-        "short": "Opens the currently open profile's own folder.",
+        "name": "How do I change settings?",
+        "short": "Press Settings at the top of the window.",
         "long": (
-            "This is the \"Profile\" link next to \"Paths:\". Each profile is a complete, separate BepInEx "
-            "install under VOLT's data folder: its loadorder.json (what's installed and switched on) sits beside "
-            "its BepInEx folder. Greyed out while no profile is open; it follows the picker."
+            "Settings has three tabs:\n"
+            "- \"General\": the game folder (\"Browse\", \"Autodetect paths\"), Animations (on, off, or follow "
+            "Windows) and \"Open data folder\", which shows VOLT's own folder for {game}.\n"
+            "- \"Launch\": extra start options for the game, like -console, used by both \"Modded\" and "
+            "\"Vanilla\".\n"
+            "- \"Troubleshooting\": open or copy VOLT's log, copy a short summary for a bug report, free up space "
+            "with \"Clean up downloads\", and \"Reset installation\" for a damaged game install."
         ),
     },
     {
-        "name": "Paths: BepInEx folder",
-        "short": "Opens the open profile's BepInEx folder (plugins, config, patchers...).",
+        "name": "What is a profile?",
+        "short": "A profile is your own saved list of mods for {game}, and you can have as many as you like.",
         "long": (
-            "This is the \"BepInEx\" link next to \"Paths:\". Inside are core (BepInEx itself), plugins (one "
-            "subfolder per mod), config (every mod's settings files, kept across updates) and patchers. Greyed "
-            "out while no profile is open."
+            "Each profile has its own copy of the mod loader, its own mods and its own mod settings, all kept in "
+            "VOLT's folder. Switching between profiles is instant and nothing is copied around.\n\n"
+            "Pick one in the \"Profile\" drop-down at the top. If the open one has unsaved changes, VOLT asks "
+            "first.\n\n"
+            "The \"Profile\" link next to \"Paths:\" opens the open profile's folder."
         ),
     },
     {
-        "name": "Help",
-        "short": "Opens this window.",
-        "long": "Pick an entry on the left to read what that part of the screen does.",
-    },
-    {
-        "name": "Get started checklist",
-        "short": "A short list of the first four steps, shown under the profile bar until you've done them.",
+        "name": "How do I make a profile?",
+        "short": "Press New profile, type a name, and VOLT sets it up for you.",
         "long": (
-            "The steps are: tell VOLT where {game} is installed, create a profile, add some mods, and press "
-            "[Modded] to play. Each one ticks itself off when it's done, and the next one is outlined in blue. "
-            "Click a step to go straight to it: Settings, New profile or Browse Mods. Hide puts the list away "
-            "for good, and it also goes away by itself once all four steps are done."
+            "VOLT downloads the mod loader (BepInEx) from Thunderstore, or reuses one it already has, so the new "
+            "profile is ready to play right away.\n\n"
+            "\"Copy to new\" makes a copy of the open profile instead: its mods, their settings, and any changes "
+            "you haven't saved yet.\n\n"
+            "To delete a profile, right-click the \"Profile\" drop-down and choose \"Delete\". Its mods are "
+            "removed from disk after you confirm; the game itself isn't touched."
         ),
     },
-    # ---- load-order bar ----
+    # ---- mods ----
     {
-        "name": "Profile picker",
-        "short": "Switches between your saved profiles.",
+        "name": "How do I add a mod?",
+        "short": "Press Browse Mods, find the mod, and press Install.",
         "long": (
-            "The drop-down in the second row. Each profile is its own BepInEx install with its own mods, so "
-            "switching costs nothing - nothing is copied around. If the open profile has unsaved changes, "
-            "VOLT asks before switching. Right-click the picker to delete the open profile."
-        ),
-    },
-    {
-        "name": "New profile",
-        "short": "Creates an empty profile with BepInEx set up in it.",
-        "long": (
-            "Asks for a name, then downloads BepInExPack for {game} from Thunderstore (or takes it from VOLT's "
-            "cache if another profile already fetched it) and installs it into the new profile's folder, "
-            "so it's ready to run right away. That framework package is pinned at the top of the Active list. "
-            "While no profile exists, the empty Active list shows a short card with the same Create a profile "
-            "button, and one to import a profile someone shared."
+            "\"Browse Mods\" searches Thunderstore, the site {game} mods come from. Type a name, pick a category, "
+            "or change the sort order.\n\n"
+            "\"Install\" adds the mod, plus any other mods it needs, to your Active list. The browser stays open "
+            "so you can keep going.\n\n"
+            "Click a mod's card to read about it, see which mods it needs, or pick an older version. \"Back to "
+            "results\", Esc or Backspace go back, and the X closes the browser. \"Show deprecated\" and \"Show "
+            "NSFW\", next to the X, add those mods to the results.\n\n"
+            "If you already know a mod's name (like {example_package}) or its thunderstore.io address, \"Add "
+            "mod\" installs it straight away.\n\n"
+            "While mods download, a download bar at the bottom right of the screen and of the browser shows which "
+            "mod VOLT is getting and how many of them are done."
         ),
     },
     {
-        "name": "Copy to new",
-        "short": "Duplicates the open profile, mods and settings included, under a new name.",
+        "name": "How do I turn off a mod?",
+        "short": "Click its switch to turn it off, double-click it to move it to Inactive, or right-click it and choose Uninstall.",
         "long": (
-            "Copies the whole profile folder - BepInEx, every installed mod, their config files and which "
-            "ones are switched on - and opens the copy. Unsaved changes on screen are applied to the copy."
+            "The switch at the right of an Active mod turns it off but keeps its place. A switched-off mod shows "
+            "a yellow \"Disabled\" label.\n\n"
+            "Double-clicking moves a mod between the Active and Inactive lists. Inactive mods stay downloaded, so "
+            "moving one back is instant.\n\n"
+            "\"Enable all\" and \"Disable all\" (under \"Export\") flip every switch at once.\n\n"
+            "None of this takes effect until you press \"Save\". \"Uninstall\" is different: it removes the mod "
+            "from this profile right away (its settings files are kept)."
         ),
     },
     {
-        "name": "Undo",
-        "short": "Takes back the most recent change to the Active list.",
+        "name": "How do I save my changes?",
+        "short": "Press Save, which turns yellow while you have unsaved changes.",
         "long": (
-            "The ↺ button that appears next to \"Unsaved changes\" whenever the lists differ from what's saved. "
-            "Each click restores the lists (order, membership and toggles) from before the previous change. "
-            "Ctrl+Z does the same, except while you're typing in a text box (there it undoes the typing). "
-            "There's no redo."
+            "\"Save\" writes your Active list and every switch into the profile, so the game uses them next time. "
+            "Nothing is downloaded and the game folder isn't touched.\n\n"
+            "Undo (the ↺ next to \"Unsaved changes\", or Ctrl+Z) takes back your last change, one step at a "
+            "time.\n\n"
+            "\"Rescan\" reads the profile from disk again and checks for updates. It asks first if that would "
+            "drop unsaved changes."
         ),
     },
     {
-        "name": "Update all",
-        "short": "Downloads and installs the newest version of every mod that has one.",
+        "name": "How do I play with mods?",
+        "short": "Press Modded to start {game} with the open profile, or Vanilla to start it without any mods.",
         "long": (
-            "The button at the right end of the second row. VOLT checks Thunderstore for updates when the "
-            "manager opens, when you switch to a profile it hasn't checked yet, after a mod is added, "
-            "removed or updated, and on Rescan. While updates are waiting the button turns yellow and shows how "
-            "many; click it to update them all. \"Up to date\" means none are waiting; \"Update check failed · "
-            "Retry\" means Thunderstore couldn't be reached - click to try again. Updating never changes which "
-            "mods are switched on. The same check spots mods deprecated on Thunderstore: their rows get a red "
-            "Deprecated pill before the name (in either list) and the details panel a yellow warning that the mod "
-            "may no longer be maintained, until a later check finds it no longer deprecated."
+            "\"Modded\" copies two small mod loader files into the {game} folder and starts the game through "
+            "Steam. It removes them again when you quit, so your game install stays as it was.\n\n"
+            "\"Vanilla\" needs no profile and copies nothing.\n\n"
+            "VOLT locks its buttons while the game runs, and picks a running game up again if you reopen it.\n\n"
+            "Neither button saves. With unsaved changes \"Modded\" asks first, and it also asks before starting "
+            "with mods that are missing a mod they need."
         ),
     },
     {
-        "name": "Delete profile",
-        "short": "Removes a profile and everything in it from disk.",
+        "name": "How do I update my mods?",
+        "short": "Press Update all at the right of the profile bar, or the yellow ↑ on a single mod.",
         "long": (
-            "Right-click the profile picker and choose Delete. The profile's whole folder goes - its "
-            "BepInEx install and every mod in it - after a confirmation. Downloaded packages stay in VOLT's "
-            "cache, and the game itself is never touched."
+            "VOLT checks Thunderstore for newer versions when this screen opens, when you switch profiles, after "
+            "you add or remove a mod, and on \"Rescan\".\n\n"
+            "While updates are waiting, \"Update all\" turns yellow and shows how many. \"Update check failed · "
+            "Retry\" means Thunderstore couldn't be reached.\n\n"
+            "Updating keeps each mod's settings and never changes which mods are switched on.\n\n"
+            "A red \"Deprecated\" label means the mod's author no longer looks after it."
         ),
     },
     {
-        "name": "Edit config",
-        "short": "View, edit or delete the config files the profile's mods have written.",
+        "name": "How do I search my mods?",
+        "short": "Type in the search box above the list.",
         "long": (
-            "Click Config in the actions column (under Rescan), or right-click the profile picker (or any mod "
-            "row) and choose Edit config..., to open the "
-            "profile's BepInEx/config folder: every file in it, listed flat on the left with a search box, a sort "
-            "and a \"Show all files\" switch for the non-text data some mods keep there. Click a file to load it "
-            "on the right: a BepInEx .cfg becomes a settings form - each setting with its description, type, "
-            "default and the right control (a drop-down, check boxes, a number, a color swatch, a text box) - and "
-            "any other file (.json, .yml, .txt) is shown as raw text. Save writes your changes, Revert drops them, "
-            "Delete removes the file (a mod writes a fresh default one on the next run) and Open externally opens "
-            "it in your usual editor. Until the profile has been run once only BepInEx's own "
-            "BepInEx.cfg is there, since BepInEx creates each mod's config file on first launch."
-        ),
-    },
-    # ---- panes ----
-    {
-        "name": "Search box",
-        "short": "Filters a list by mod or author name.",
-        "long": (
-            "Each list has its own search box. Typing hides every row that doesn't match the mod's name, its "
-            "author (the Thunderstore team) or its package name. The count in the list's title shows how many "
-            "match."
+            "It matches a mod's name, its author or its Thunderstore name. The eye at the end of the box switches "
+            "between hiding the mods that don't match and just dimming them.\n\n"
+            "You can drag mods up and down the Active list, but the order is only for you: the mod loader works "
+            "out the real load order itself. Dragging is off while the search is hiding mods.\n\n"
+            "Each mod shows its icon from Thunderstore, or a plain square if VOLT has none for it."
         ),
     },
     {
-        "name": "Search eye icon",
-        "short": "Switches a search between hiding non-matches and dimming them.",
+        "name": "How do I edit mod settings?",
+        "short": "Press Config, or right-click a mod and choose Edit config.",
         "long": (
-            "The eye at the right end of a search box. Closed (the default) hides rows that don't match. Open "
-            "shows every row, with the non-matches dimmed and the matches marked with a blue bar. Drag-reorder "
-            "is off while rows are hidden."
+            "\"Config\" lists the settings files the open profile's mods have written. Click one to change it.\n\n"
+            "Most files become a form, with a description for each setting; others show as plain text.\n\n"
+            "- \"Save\" writes your changes.\n"
+            "- \"Revert\" drops them.\n"
+            "- \"Delete\" removes the file (the mod writes a fresh one next time).\n"
+            "- \"Open externally\" opens it in your usual editor.\n\n"
+            "A mod only writes its settings file after the game has been started with it once."
         ),
     },
     {
-        "name": "Drag to reorder",
-        "short": "Drag a row in the Active list to change its position.",
+        "name": "What's the right-click menu?",
+        "short": "Right-click any mod for its folder, its Thunderstore page, its settings and more.",
         "long": (
-            "Press on a row in the Active list and move it; the other rows slide aside, and the row lands where "
-            "you release it. The framework row at the top can't be moved and nothing can be dropped above it. "
-            "The order is only for you: BepInEx works out the real load order from each mod's own dependency "
-            "information, so it never changes how the game loads."
+            "- \"Open folder\" shows the mod's files.\n"
+            "- \"Open on Thunderstore\" and \"Open website\" open its pages.\n"
+            "- \"Copy Thunderstore name\" copies its name in the Author-ModName form.\n"
+            "- \"Edit config\" opens its settings files.\n"
+            "- \"Install missing required mods\" fetches the mods it needs.\n"
+            "- \"Update\" installs a newer version when there is one.\n"
+            "- \"Reinstall\" puts the same version back if its files went missing.\n"
+            "- \"Uninstall\" removes it from this profile after you confirm.\n\n"
+            "Options that can't be used right now are greyed out."
         ),
     },
     {
-        "name": "Moving mods between lists",
-        "short": "Double-click a row to move it to the other list.",
+        "name": "What are required mods?",
+        "short": "Many mods need other mods to work (their dependencies), and VOLT installs those for you.",
         "long": (
-            "Double-clicking an Inactive mod appends it to the Active list, switched on; double-clicking an "
-            "Active mod moves it to Inactive. An inactive mod stays installed in the profile, just switched "
-            "off on disk when you Save, so moving it back never downloads anything. The framework row can't "
-            "be moved."
+            "Adding a mod also installs every mod it needs that you don't have yet.\n\n"
+            "If one goes missing later, the ⚠ / ✕ button above \"Save\" shows it. ✕ means not installed; ⚠ means "
+            "installed but inactive or switched off.\n\n"
+            "Click that button for the list. It has an \"Install\" button for each missing mod and \"Install all "
+            "missing\" at the top.\n\n"
+            "Fix a ⚠ by switching the needed mod back on or moving it to Active."
         ),
     },
     {
-        "name": "Per-mod on/off toggle",
-        "short": "Switches an Active mod off without removing it from the list.",
+        "name": "What is BepInEx?",
+        "short": "BepInEx is the mod loader: the part that lets {game} load mods at all.",
         "long": (
-            "The pill at the right end of every Active row except the framework's. Off keeps the mod in the "
-            "list, at its position, but its files are disabled when you Save - a quick, reversible way to "
-            "leave one mod out for a test. Blue means on. A switched-off row shows a yellow Disabled pill before "
-            "its name, and the name turns grey and struck through. The framework row has no toggle: a "
-            "profile can't start without it. Enable all / Disable all (under Export...) set every Active toggle at "
-            "once - still unsaved until Save, one Undo puts them back, and the framework always stays on."
+            "Every profile has its own copy, pinned at the top of the Active list. It can't be moved, switched "
+            "off or removed, and it gets updates like any mod.\n\n"
+            "The \"BepInEx\" link next to \"Paths:\" opens its folder in the open profile: plugins holds your mods "
+            "and config their settings.\n\n"
+            "If {game}'s own folder already has BepInEx in it, VOLT asks before starting the game and leaves that "
+            "copy alone."
+        ),
+    },
+    # ---- sharing ----
+    {
+        "name": "How do I share my profile?",
+        "short": "Press Export and choose Export to file or Export as code.",
+        "long": (
+            "\"Export to file\" saves a .r2z file (the profile format VOLT, r2modman and Thunderstore Mod Manager "
+            "all read) with your mod list, versions, switches and mod settings. The mods themselves aren't in it: "
+            "they download again on the other computer.\n\n"
+            "\"Export as code\" uploads the same thing to Thunderstore and gives you a short code to send. Anyone "
+            "with the code can get it and it can't be taken back, so leave out private settings like server "
+            "passwords.\n\n"
+            "\"Dependency strings\" is for modpack makers: it lists your mods as Author-ModName-Version lines."
         ),
     },
     {
-        "name": "Per-mod update button",
-        "short": "The yellow ↑ on a row: installs that one mod's newest version.",
+        "name": "How do I import a profile?",
+        "short": "Press Import and choose Import from file or Import from code.",
         "long": (
-            "Shown on an Active row (the framework included) only while Thunderstore has a newer version than "
-            "the installed one - its second line then reads \"update available\" in yellow. Click it to "
-            "download and install just that mod's latest version; \"Update all\" does every mod at once. "
-            "The mod's config files are kept."
+            "With a profile open, VOLT asks whether to add it as a new profile or replace the open one. A "
+            "replacement only happens once the import has finished, so if it fails your profile stays as it "
+            "was.\n\n"
+            "VOLT sets up the mod loader, downloads every mod at the version in the file (or the newest one, if "
+            "that version is gone) and puts the mod settings in place, so you need an internet connection.\n\n"
+            "A profile made for another game is refused.\n\n"
+            "\"Local mod (.zip)\" is different: it installs one mod from a Thunderstore .zip on your computer, "
+            "and that mod is never checked for updates."
+        ),
+    },
+    # ---- trouble ----
+    {
+        "name": "How do I fix a broken mod?",
+        "short": "Switch some mods off, Save, and press Modded again until the problem goes away.",
+        "long": (
+            "To find the mod causing it:\n"
+            "1. Switch off the mod you added last, or half of your mods.\n"
+            "2. Press \"Save\", then \"Modded\", and see if the problem is gone.\n"
+            "3. Switch mods back on in smaller groups until you find the one.\n\n"
+            "The ⚠ / ✕ button above \"Save\" lists mods that are missing a mod they need.\n\n"
+            "A mod marked \"Files missing\" lost some of its files outside VOLT (deleted, or moved away by an "
+            "antivirus program). Right-click it and choose \"Reinstall\" to put them back.\n\n"
+            "\"Update all\" often helps, and \"Config\" lets you change a mod's settings.\n\n"
+            "If the game itself seems damaged, Settings > Troubleshooting > \"Reset installation\" deletes the "
+            "game folder and has Steam download it again. Your profiles are kept."
         ),
     },
     {
-        "name": "Framework row (BepInExPack)",
-        "short": "The pinned first row of the Active list: BepInEx itself.",
+        "name": "How do I get help?",
+        "short": "Press Report a problem at the top of this window and send the file it saves to whoever is helping you.",
         "long": (
-            "Every profile is built on Thunderstore's BepInExPack for {game}, installed when the profile "
-            "is created. It's pinned at the top of Active, can't be dragged, switched off, moved to Inactive or "
-            "uninstalled, and gets the yellow update button like any mod when a newer pack is out."
-        ),
-    },
-    {
-        "name": "Mod right-click menu",
-        "short": "Open the mod's folder or pages, copy its package name, edit config, install missing dependencies, update or uninstall it.",
-        "long": (
-            "Right-click a row in either list. Open folder opens the mod's own subfolder under BepInEx/plugins, "
-            "Open on Thunderstore its Thunderstore page and Open website its own site, when it has one. Copy "
-            "package name copies the Team-Package name Thunderstore uses, and Edit config... opens the profile's "
-            "config files with the search pre-filled with this mod's name. Install missing dependencies (N) "
-            "appears only on a mod whose dependencies aren't installed and fetches them - each at its latest "
-            "version, with whatever they need themselves - into the Active list; Update is available while a "
-            "newer version is out; Uninstall... removes the mod's files from this profile (its config files "
-            "are kept; other profiles aren't affected) after a confirmation."
-        ),
-    },
-    {
-        "name": "Warnings and errors",
-        "short": "The \"⚠ N · ✕ M\" button: mods whose dependencies aren't there, with a fix for the missing ones.",
-        "long": (
-            "Appears above Save while an Active, switched-on mod declares a dependency that isn't installed in "
-            "this profile (an error, marked ✕ on the row) or is installed but inactive or switched off (a "
-            "warning). Click it for the window: one entry per problem, grouped by mod, with what it means and "
-            "what fixes it. A missing dependency has an Install button right there (its latest version, with "
-            "whatever it needs itself, added to the Active list), and Install all missing at the top does them "
-            "all at once; a dependency that's merely inactive or switched off is fixed by activating or "
-            "switching it back on, so it has no button. Adding a mod installs its dependencies with it, so this "
-            "mostly shows up after something was uninstalled or switched off."
-        ),
-    },
-    # ---- actions column ----
-    {
-        "name": "Rescan",
-        "short": "Re-reads the open profile from disk and checks for updates again.",
-        "long": (
-            "Reloads what's installed and switched on from the profile's own folder, dropping any unsaved "
-            "changes on screen (it asks first), then runs the update check again."
-        ),
-    },
-    {
-        "name": "Add mod",
-        "short": "Installs a Thunderstore package into the open profile.",
-        "long": (
-            "Asks for a package: its Team-Package name (as on Thunderstore, e.g. {example_package}) or the "
-            "address of its thunderstore.io page. VOLT downloads its latest version (or takes it from the "
-            "cache), installs any of its dependencies that aren't in the profile yet, and appends it to the "
-            "Active list switched on. Downloads are shared: a package fetched once is reused by every "
-            "profile. It's the shortcut for when you already know the package; Browse Mods is the same install "
-            "with searching built in."
-        ),
-    },
-    {
-        "name": "Browse Mods",
-        "short": "Opens the in-app Thunderstore browser to find {game} mods and install them into the open profile.",
-        "long": (
-            "Search by name, narrow by category, and sort by most downloaded (the starting order), last updated, "
-            "top rated or newest - each page comes straight from Thunderstore as you ask for it, so nothing is "
-            "downloaded until you press Install. A card's Install button adds that mod (and any dependencies it "
-            "needs) to the Active list, exactly like Add mod, and the browser stays open so you can keep going. "
-            "Click a card itself for the mod's page: Details (its README, with the dependency check underneath), "
-            "Required (each dependency and whether it's already in the profile - click one to open its own page), Versions (every release, each "
-            "with its own Install) and Changelog, plus the latest version's facts and categories on the right - the "
-            "version selector in the header decides what the big Install button installs, and it says how many "
-            "extra packages come along. Back to results, Esc or Backspace go one step back - to the mod you came "
-            "from through Required, else to the grid where you left it; "
-            "the X (or Esc on the grid) closes the browser. Show deprecated and Show NSFW, next to the X, add "
-            "those mods to the results alongside the rest (both start off each time the browser opens); a "
-            "deprecated mod's card has a red Deprecated pill, and its page opens with a yellow warning that it "
-            "may no longer be maintained."
-        ),
-    },
-    {
-        "name": "Import",
-        "short": (
-            "Creates a new profile from a .r2z profile file - VOLT's or r2modman / Thunderstore Mod Manager's - or "
-            "replaces the open profile with it."
-        ),
-        "long": (
-            "Pick \"Import from file...\" and choose the file; with a profile open VOLT asks whether to add it as a new "
-            "profile (the default: it asks for a name, the file's own profile name offered, and no existing profile is "
-            "changed) or to replace the open profile (the result takes the file's profile name, the open profile's mods "
-            "that aren't in the file drop out, and it's only replaced once the import completes - if anything fails it's "
-            "left exactly as it was), and with none open it simply makes a new one. It sets up BepInEx at the "
-            "file's version, downloads every listed mod at exactly the version in the file (if Thunderstore no longer "
-            "has that version, the latest is installed and the summary says so; a mod that can't be fetched at all is "
-            "listed as failed and the rest still install), puts the file's config files in place, and switches off "
-            "the mods the file has switched off. A file made for another game is refused. Mod files never travel in "
-            "the file itself, so an import needs an internet connection. \"Import from code...\" takes a profile code "
-            "instead - VOLT's, r2modman's or Thunderstore Mod Manager's - downloads that profile from Thunderstore and "
-            "then imports it exactly the same way. \"Local mod (.zip)...\" is different: it installs one mod from "
-            "a Thunderstore package zip on your computer into the open profile (added to Active, its missing "
-            "dependencies downloaded), marked as a local package that's never checked for updates."
-        ),
-    },
-    {
-        "name": "Export",
-        "short": "Saves the open profile as a .r2z profile file that VOLT and r2modman / Thunderstore Mod Manager can read.",
-        "long": (
-            "Pick \"Export to file...\" and choose where to save it (the profile's name is the default file name). "
-            "The file holds the mod list as shown on screen right now - unsaved changes included, like Copy to new - "
-            "with each mod's version and on/off state, plus every file in the profile's BepInEx config folder, "
-            "so a friend's import gets your settings too. Inactive mods are written as switched off (that's what "
-            "another mod manager understands); VOLT itself restores them to Inactive. Mod files aren't included - "
-            "they're downloaded again on import. \"Export as code...\" uploads the same profile to Thunderstore's public "
-            "profile-sharing service (after asking you to confirm - anyone with the code can fetch it, and it can't be "
-            "taken back) and shows a short code with a Copy button; VOLT, r2modman and Thunderstore Mod Manager can all "
-            "import it. \"Dependency strings...\" lists the framework and every switched-on Active mod as "
-            "\"Team-Package-Version\" lines, ready to copy into a modpack's manifest.json (locally imported mods "
-            "aren't on Thunderstore, so they're left out)."
-        ),
-    },
-    {
-        "name": "Modded and Vanilla",
-        "short": "The two play buttons: Modded starts {game} with the open profile, Vanilla without mods or BepInEx.",
-        "long": (
-            "Modded copies the profile's two BepInEx loader files (winhttp.dll and doorstop_config.ini) into the "
-            "{game} folder - anything already there under those names is set aside - and starts the game through "
-            "Steam with launch arguments that point BepInEx at the profile's own folder, so the game install "
-            "itself stays as it is; when the game exits, the copied files are removed and anything set aside is put "
-            "back. Vanilla starts {game} through Steam as it is, with nothing copied and no BepInEx - it needs "
-            "no profile open. Either way "
-            "the screen stays locked while {game} runs, and a game left running when VOLT closes is picked up "
-            "again the next time this screen opens. Neither button saves: with unsaved changes Modded asks first "
-            "and {game} gets the profile as it was last saved, and it also asks before starting with mods "
-            "whose dependencies aren't installed."
-        ),
-    },
-    {
-        "name": "Save",
-        "short": "Writes the Active list and every toggle into the profile for real.",
-        "long": (
-            "The one save there is: every Active, switched-on mod gets its files enabled in the profile's "
-            "BepInEx folder, everything else (Inactive mods, toggled-off mods) gets them disabled, and the "
-            "order is remembered. Nothing is downloaded and the game install is never touched. Turns yellow "
-            "while there are unsaved changes."
+            "The file is a .zip with VOLT's log for {game} (a step-by-step record of what VOLT did) and a short "
+            "note with VOLT's version, your Windows version and the profile name.\n\n"
+            "When something fails, the message has a \"Copy details\" button that copies the technical details to "
+            "paste into a message.\n\n"
+            "Settings > Troubleshooting can also open or copy the log."
         ),
     },
 ]

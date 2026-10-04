@@ -25,12 +25,15 @@ no global logging config for a dependency to trip over.
 import faulthandler
 import json
 import os
+import re
+import zipfile
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
 
 LOG_NAME = "volt.log"
 CRASH_LOG_NAME = "volt-crash.log"
+REPORT_CRASH_TAIL = 200_000  # write_report keeps only this much of a file (~200 KB)
 
 _file: Path | None = None  # unset until init_log: log() is then a no-op
 _started: set[Path] = set()  # log files already rotated + started this process
@@ -164,3 +167,43 @@ def troubleshooting_text(fields, log_path=None, lines: int = 50) -> str:
         else:
             out += ["", f"Last {len(tail)} lines of {log_path}:", *tail]
     return "\n".join(out) + "\n"
+
+
+# ---- Help > Report a problem (0.6.24, PLAN.md §10 (i)) ----
+REPORT_NOTE_NAME = "report.txt"
+
+
+def scrub_home(text: str, home=None) -> str:
+    """`text` with the user's home folder (C:\\Users\\<name>) replaced by "~",
+    whatever the slashes (\\, /, or JSON's doubled \\\\) and letter case, so a
+    report doesn't carry the Windows user name. Other paths (the game, a
+    Steam library) are kept: they're what a helper needs. `home`: for tests."""
+    home = str(home if home is not None else Path.home())
+    parts = [p for p in re.split(r"[\\/]+", home) if p]
+    if len(parts) < 2:  # no real home folder (a bare drive or root): nothing to scrub
+        return text
+    lead = r"[\\/]+" if home[:1] in "\\/" else ""  # /home/<name> keeps its root slash in the match
+    pattern = lead + r"[\\/]+".join(re.escape(p) for p in parts) + r"(?![^\\/\s\"'])"
+    return re.sub(pattern, "~", text, flags=re.IGNORECASE)
+
+
+def write_report(dest, fields, log_path=None, home=None) -> list[str]:
+    """Help > Report a problem: a zip at `dest` holding report.txt (one
+    "Key: value" line per (key, value) in `fields`) and this game's volt.log,
+    volt.log.prev and volt-crash.log (its last REPORT_CRASH_TAIL characters) when they exist, every text with the home folder
+    scrubbed (scrub_home). Stdlib only, nothing leaves the computer.
+    Returns the names written into the zip. OSError on a failed write."""
+    note = "VOLT problem report\n\n" + "".join(f"{k}: {'(none)' if v in (None, '') else v}\n" for k, v in fields)
+    names = [REPORT_NOTE_NAME]
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(REPORT_NOTE_NAME, scrub_home(note, home))
+        if log_path is not None:
+            log_path = Path(log_path)
+            for path in (log_path, log_path.with_name(log_path.name + ".prev"), log_path.with_name(CRASH_LOG_NAME)):
+                if path.is_file():
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                    if len(text) > REPORT_CRASH_TAIL:  # only volt-crash.log grows unbounded (append-only)
+                        text = f"[truncated: last {REPORT_CRASH_TAIL} of {len(text)} characters]\n" + text[-REPORT_CRASH_TAIL:]
+                    z.writestr(path.name, scrub_home(text, home))
+                    names.append(path.name)
+    return names

@@ -110,10 +110,10 @@ NO_PREV_LOG_TOOLTIP = "No previous log yet (created on the next launch)"
 FOLDERS_NOTE = "Where RimWorld and its config live. Local mods is always the game folder's Mods folder."
 ANIMATIONS_NOTE = "Screen, page and tab transitions. Windows follows Windows' own \"Animation effects\" setting."
 ACQUIRE_NOTE = (
-    "How VOLT gets Workshop mods: SteamCMD, then sync to Steam; the Steam client directly; or SteamCMD, "
-    "kept in the Mods folder (for GOG installs)."
+    "How VOLT gets Workshop mods: SteamCMD (Valve's own download tool), then sync to Steam; the Steam client "
+    "directly; or SteamCMD, kept in the Mods folder (for GOG installs)."
 )
-CHECK_MISSING_NOTE = "Downloads every active mod that isn't on disk but has a Workshop id, using the method above."
+CHECK_MISSING_NOTE = "Downloads every active mod that isn't on your computer but has a Workshop ID, using the method above."
 LOGS_NOTE = "VOLT's record of what it did this run and the run before."
 
 # .modal.settings-window: 900 x 600, at most the viewport minus 32px.
@@ -297,7 +297,7 @@ class SettingsWindow(QDialog):
         ('game' | 'config'), on_autodetect(parent) and on_check_missing(parent)
         (Check for missing Workshop mods): the screen's own actions,
         reporting any failure themselves over `parent` (this window).
-        warn(title, message, parent): the screen's _warn. log_path: this
+        warn(title, what, means=, tryit=, details=, parent=): the screen's _warn. log_path: this
         run's volt.log, None when there's no log (it couldn't be written)."""
         super().__init__(parent)
         self.setObjectName("settings")
@@ -477,7 +477,10 @@ class SettingsWindow(QDialog):
             self._settings.set_steam_acquire_via(via)
         except (OSError, ValueError) as err:
             log(f"settings: download method {via} FAILED to save: {err!r}")
-            self._warn("Couldn't save download method", str(err), self)
+            self._warn("Couldn't save download method", "VOLT couldn't save this setting.",
+                       means="The download method you had before is still used.",
+                       tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                       details=str(err), parent=self)
         else:
             log(f"settings: download method set to {via} (was {before or 'unset (auto)'})")
         self._refresh()
@@ -490,6 +493,9 @@ class SettingsWindow(QDialog):
             paths.open_path(path)
         except OSError as err:
             log(f"settings: open log {path}: the OS refused: {err!r}")
-            self._warn("Couldn't open log file", str(err), self)
+            self._warn("Couldn't open log file", "Windows couldn't open the log file.",
+                       means="No program is set up to open .log files, or the file was moved.",
+                       tryit="Open it from VOLT's folder with Notepad, or use Help > Report a problem.",
+                       details=f"{path}\n{err}", parent=self)
             return
         log(f"settings: opened log {path}")

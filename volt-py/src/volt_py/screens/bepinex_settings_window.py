@@ -23,7 +23,7 @@ Thunderstore game actually needs today:
   under the note - the game module's LAUNCH_ARG_EXAMPLES, else
   UNITY_LAUNCH_ARG_EXAMPLES.
 - Troubleshooting: Open log file / Open previous log file, as RimWorld's,
-  then Clean cache (THUNDERSTORE.md §8c): deletes every cached package zip
+  then Clean cache (labelled "Clean up downloads" since 0.6.24; THUNDERSTORE.md §8c): deletes every cached package zip
   no load order of this game references (bepinex_load_orders.
   clean_package_cache - aborts with nothing deleted if a load order can't
   be read), synchronously (a scan + a few unlinks), then says what it did
@@ -101,12 +101,13 @@ from volt_py.screens.settings_window import (
 from volt_py.settings import SettingsStore
 from volt_py.thunderstore_browse import format_size
 
-CLEAN_CACHE_TOOLTIP = "Removes cached mods that aren't in any profile to free up storage space"
+CLEAN_CACHE_TOOLTIP = ("Deletes VOLT's downloaded copies of mods that no profile uses, to free up space "
+                       "(they download again if you need them later)")
 CLEAN_CACHE_BUSY_TOOLTIP = "Unavailable while VOLT is installing, updating or running the game"
 LOG_COPY_BYTES = 200 * 1024  # Copy log to clipboard: the log's tail, so a long session doesn't flood the clipboard
 COPY_LOG_TOOLTIP = "Copies the log file as plain text (the last 200 KB when it's longer)"
 COPY_INFO_TOOLTIP = "Copies versions, paths, the profile and the log's last 50 lines as plain text, for a bug report"
-LAUNCH_ARGS_NOTE = "Extra command-line arguments appended when starting the game, for both Modded and Vanilla."
+LAUNCH_ARGS_NOTE = "Extra start options for the game (command-line arguments), used by both Modded and Vanilla."
 # Launch's examples when the game module has no LAUNCH_ARG_EXAMPLES: Unity
 # player options (docs.unity3d.com "Unity Standalone Player command line
 # arguments"), true for any Unity game.
@@ -115,7 +116,7 @@ UNITY_LAUNCH_ARG_EXAMPLES = (
     ("-window-mode borderless", "borderless fullscreen"),
     ("-screen-width 1920 -screen-height 1080", "sets the resolution"),
 )
-DATA_FOLDER_NOTE = "VOLT's own files for this game: profiles, mod cache and settings."
+DATA_FOLDER_NOTE = "VOLT's own files for this game: profiles, downloaded mods and settings."
 SUPPORT_NOTE = "Versions, paths and the profile (plus the log's last lines), ready to paste into a bug report."
 
 
@@ -130,25 +131,25 @@ def clean_result_text(res: dict) -> tuple[str, str, bool]:
         names = ", ".join(f'"{u["slug"]}"' for u in res["unreadable"])
         first = res["unreadable"][0]["error"]
         return (
-            "Couldn't clean cache",
+            "Couldn't clean up downloads",
             f"Nothing was deleted: VOLT couldn't read the profile{'s' if len(res['unreadable']) > 1 else ''} "
-            f"{names} ({first}). Clean cache only runs when every profile can be read, so it never removes a "
+            f"{names} ({first}). Clean up downloads only runs when every profile can be read, so it never removes a "
             f"mod one of them uses.",
             True,
         )
     kept = len(res["kept"])
     if res["removed"]:
-        text = (f"Removed {_plural(len(res['removed']), 'cached mod')} that no profile uses, "
+        text = (f"Removed {_plural(len(res['removed']), 'downloaded mod')} that no profile uses, "
                 f"freeing {format_size(res['freed'])}.")
         if kept:
-            text += f" {_plural(kept, 'cached mod')} in use {'was' if kept == 1 else 'were'} kept."
+            text += f" {_plural(kept, 'downloaded mod')} in use {'was' if kept == 1 else 'were'} kept."
     else:
-        text = ("Nothing to clean: every cached mod is used by a profile." if kept
-                else "Nothing to clean: the mod cache is empty.")
+        text = ("Nothing to clean up: every downloaded mod is used by a profile." if kept
+                else "Nothing to clean up: VOLT has no downloaded mods.")
     if res["failed"]:
         names = ", ".join(name for name, _ in res["failed"])
         text += f" {_plural(len(res['failed']), 'file')} couldn't be removed (in use by another program?): {names}."
-    return "Clean cache", text, bool(res["failed"])
+    return "Clean up downloads", text, bool(res["failed"])
 
 
 class BepInExSettingsWindow(QDialog):
@@ -248,8 +249,8 @@ class BepInExSettingsWindow(QDialog):
         row.addWidget(self.game_browse)
         layout.addLayout(row)
         note = _muted(
-            f"Mods and their BepInEx config live inside each profile's own folder under VOLT's data folder, "
-            f"never in the {self._game_name} install - so this is the only path to set."
+            f"Your mods and their settings live in each profile's own folder in VOLT's data folder, never in the "
+            f"{self._game_name} install - so this is the only folder to set."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -334,17 +335,17 @@ class BepInExSettingsWindow(QDialog):
         self.copy_info_button.setToolTip(COPY_INFO_TOOLTIP)
         _group(layout, "Support info", SUPPORT_NOTE, self.copy_info_button)
         layout.addSpacing(SECTION_GAP)
-        self.clean_cache_button = _button("Clean cache")
+        self.clean_cache_button = _button("Clean up downloads")
         self._apply_clean_state()
-        _group(layout, "Mod cache", f"{CLEAN_CACHE_TOOLTIP}.", self.clean_cache_button)
+        _group(layout, "Downloaded mods", f"{CLEAN_CACHE_TOOLTIP}.", self.clean_cache_button)
         layout.addStretch(1)  # the destructive group sits apart, at the bottom of the page
         self.reset_button = _button("Reset installation")
         self._apply_clean_state()
         _group(
             layout, "Reset installation",
-            f"Fixes problems from corrupted or leftover modding files. Deletes everything in the {self._game_name} "
-            "folder, then asks Steam to verify and re-download the game files. Your profiles and mods in VOLT's "
-            "data folder are untouched.",
+            f"Fixes a game damaged by broken or leftover mod files. Deletes everything in the {self._game_name} "
+            "folder, then asks Steam to check and download the game files again. Your profiles and mods in VOLT's "
+            "data folder are kept.",
             self.reset_button,
         )
         self.log_button.clicked.connect(lambda: self._open_log(self._log_path))
@@ -380,7 +381,10 @@ class BepInExSettingsWindow(QDialog):
             paths.open_path(path)
         except OSError as err:
             log(f"settings: open log {path}: the OS refused: {err!r}")
-            self._warn("Couldn't open log file", str(err), self)
+            self._warn("Couldn't open log file", "Windows couldn't open the log file.",
+                       means="No program is set up to open .log files, or the file was moved.",
+                       tryit="Use Copy log instead, or open the file from VOLT's data folder with Notepad.",
+                       details=f"{path}\n{err}", parent=self)
             return
         log(f"settings: opened log {path}")
 
@@ -399,17 +403,23 @@ class BepInExSettingsWindow(QDialog):
         log(f"settings: Clean cache ({self._app_root})")
         if self._is_busy():  # safety net behind the disabled button: never race a download into the cache
             log("settings: Clean cache refused: the screen is busy")
-            self._warn("Clean cache", "VOLT is busy installing, updating or running the game. Try again once it's done.", self)
+            self._warn("Clean up downloads", "VOLT is busy right now.",
+                       means="It's installing, updating or running the game.",
+                       tryit="Wait until that's done, then try again.", parent=self)
             return
         try:
             res = lo.clean_package_cache(self._app_root)
         except Exception as err:  # a folder that can't be listed: nothing is half-swept silently
             log(f"settings: Clean cache FAILED: {err!r}")
-            self._warn("Couldn't clean cache", str(err) or repr(err), self)
+            self._warn("Couldn't clean up downloads", "VOLT couldn't clean up its downloaded mod files.",
+                       means="Nothing was deleted.",
+                       tryit="Close the game and try again.",
+                       details=str(err) or repr(err), parent=self)
             return
         title, text, warning = clean_result_text(res)
         if warning:
-            self._warn(title, text, self)
+            self._warn(title, text, tryit="Close the game and anything else using VOLT's files, then try again.",
+                       details=f"VOLT's data folder: {self._app_root}", parent=self)
         else:
             log(f"info shown: {title}: {text}")
             QMessageBox.information(self, title, text)
@@ -419,7 +429,10 @@ class BepInExSettingsWindow(QDialog):
             paths.open_path(self._app_root)
         except OSError as err:
             log(f"settings: open data folder {self._app_root}: the OS refused: {err!r}")
-            self._warn("Couldn't open data folder", str(err), self)
+            self._warn("Couldn't open data folder", "Windows couldn't open VOLT's data folder.",
+                       means="It may have been moved or deleted.",
+                       tryit="Restart VOLT, then try again.",
+                       details=f"{self._app_root}\n{err}", parent=self)
             return
         log(f"settings: opened data folder {self._app_root}")
 
@@ -433,14 +446,19 @@ class BepInExSettingsWindow(QDialog):
         except ValueError as err:
             self._bad_launch_args = text
             log(f"settings: launch arguments {text!r} refused: {err}")
-            self._warn("Launch arguments not saved",
-                       f"VOLT couldn't read these launch arguments ({err}) - check for a missing closing quote.", self)
+            self._warn("Launch options not saved", "VOLT couldn't read these launch options.",
+                       means="They weren't saved; the game keeps starting with the ones you had before.",
+                       tryit="Check for a missing closing quote (\"), or clear the box.",
+                       details=f"Text: {text!r}\n{err}", parent=self)
             return
         try:
             self._settings.set_launch_args(text)
         except (OSError, ValueError) as err:
             log(f"settings: launch arguments FAILED to save: {err!r}")
-            self._warn("Couldn't save settings", str(err), self)
+            self._warn("Couldn't save settings", "VOLT couldn't save your settings.",
+                       means="The change you made won't be remembered next time VOLT starts.",
+                       tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                       details=str(err), parent=self)
             return
         self._bad_launch_args = None
         log(f"settings: launch arguments set to {text!r} -> {args}")
@@ -457,7 +475,10 @@ class BepInExSettingsWindow(QDialog):
             text = read_tail(self._log_path, LOG_COPY_BYTES)
         except OSError as err:
             log(f"settings: copy log {self._log_path} FAILED: {err!r}")
-            self._warn("Couldn't copy log", str(err), self)
+            self._warn("Couldn't copy log", "VOLT couldn't read its log file.",
+                       means="Nothing was copied.",
+                       tryit="Use Open log file instead, or Help > Report a problem.",
+                       details=f"{self._log_path}\n{err}", parent=self)
             return
         QGuiApplication.clipboard().setText(text)
         size = self._log_path.stat().st_size if self._log_path.exists() else 0
@@ -492,18 +513,24 @@ class BepInExSettingsWindow(QDialog):
         log(f"settings: Reset installation ({game_dir}, source {source})")
         if self._is_busy():
             log("settings: Reset installation refused: the screen is busy")
-            self._warn("Reset installation", "VOLT is busy installing, updating or running the game. Try again once it's done.", self)
+            self._warn("Reset installation", "VOLT is busy right now.",
+                       means="It's installing, updating or running the game.",
+                       tryit="Wait until that's done, then try again.", parent=self)
             return
         reason = bl.reset_refusal(game_dir, source, self._game.is_game_root, self._app_root)
         if reason:
             log(f"settings: Reset installation refused: {reason}")
-            self._warn("Reset installation", reason, self)
+            self._warn("Reset installation", "Nothing was deleted.", means=reason,
+                       tryit="Check the game folder in Settings > General first.", details=f"Game folder: {game_dir}",
+                       parent=self)
             return
         exe = self._game.find_game_exe(game_dir)
         pids = bl.running_pids(exe.name) if exe else set()
         if pids:
             log(f"settings: Reset installation refused: {exe.name} is running (pids {sorted(pids)})")
-            self._warn("Reset installation", f"{exe.name} is running - quit {self._game_name} first. Nothing was deleted.", self)
+            self._warn("Reset installation", f"{self._game_name} is running.", means="Nothing was deleted.",
+                       tryit=f"Quit {self._game_name}, then try again.", details=f"Running: {exe.name} (pids {sorted(pids)})",
+                       parent=self)
             return
         if not self._confirm(
             "Reset installation",
@@ -519,7 +546,10 @@ class BepInExSettingsWindow(QDialog):
             res = bl.wipe_game_folder(self._app_root, game_dir)
         except (bl.LaunchError, OSError) as err:
             log(f"settings: Reset installation FAILED: {err!r}")
-            self._warn("Reset installation failed", str(err), self)
+            self._warn("Reset installation failed", "Couldn't empty the game folder.",
+                       means="Some or all of the game's files are still there.",
+                       tryit=f"Quit {self._game_name} and Steam, then try again.",
+                       details=f"Game folder: {game_dir}\n{err}", parent=self)
             return
         url = bl.validate_url(self._game.STEAM_APPID)
         try:
@@ -539,7 +569,10 @@ class BepInExSettingsWindow(QDialog):
             text += (f" {len(res['failed'])} couldn't be deleted (in use by another program?): {names}"
                      + (f" and {more} more" if more > 0 else "") + ".")
         if res["failed"] or not opened:
-            self._warn("Reset installation", text, self)
+            self._warn("Reset installation", text,
+                       tryit=f"Close anything using the game folder, then use Steam's Verify integrity of game files "
+                             f"(Steam > {self._game_name} > Properties > Installed Files).",
+                       details=f"Game folder: {game_dir}", parent=self)
         else:
             log(f"info shown: Reset installation: {text}")
             QMessageBox.information(self, "Reset installation", text)

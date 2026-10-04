@@ -21,6 +21,15 @@ screen's second instance, `copy_bar`): render(..., copying=True) labels it
 "Copying..." and makes the button a Cancel (a stop square, "Cancel copy"),
 everything else - pill, counter, speed, failure triangle - as for a download.
 
+PackageDownloadBar (0.6.25, PLAN.md §11 (a)) is the Thunderstore managers'
+footer row: this row minus the button and the speed (no pause / cancel;
+counts are mods, not bytes), the counter moved before the pill to read as
+the user worded it - "Downloading: <mod name>  <done> / <total>  [pill]" -
+and the label elided at LABEL_MAX_WIDTH (full name as its tooltip). The
+state is the same DownloadState (download_state's package helpers).
+Since 0.6.26 Browse Mods shows two more of it on the same state (its footer,
+its detail card), so the bar stays in sight over the modal window.
+
 Fill stripes: CSS's repeating-linear-gradient(90deg, accent 0 3px,
 transparent 3px 6px) is painted literally - one 3px accent rect every 6px
 from the fill's left edge, clipped to the fill's width (a partial stripe at
@@ -39,7 +48,8 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWi
 
 from volt_py import theme
 from volt_py.download_state import (
-    DownloadState, count_text, failure_summary, failure_tooltip, label_text, percent_of, speed_text, toggle_tooltip,
+    DownloadState, count_text, failure_summary, failure_tooltip, label_text, package_label, percent_of, speed_text,
+    toggle_tooltip,
 )
 
 # styles.css (px)
@@ -54,6 +64,7 @@ STRIPE_ON, STRIPE_PERIOD = 3, 6  # .dl-fill: accent 0-3px, transparent 3-6px, re
 FILL_MS = 300  # .dl-fill transition: width 0.3s ease-out
 SPEED_CH = 9  # .dl-speed min-width: 9ch
 WARN_ICON_SIZE = 14  # the JSX svg's width / height
+LABEL_MAX_WIDTH = 260  # PackageDownloadBar: a long mod name elides here, so the status text keeps its room
 
 # DownloadBar.jsx's inline SVGs, verbatim; `currentColor` becomes the real token.
 _PAUSE_SVG = (
@@ -277,3 +288,25 @@ class DownloadBar(QWidget):
 
     def state(self) -> DownloadState | None:
         return self._state
+
+
+class PackageDownloadBar(DownloadBar):
+    """The Thunderstore managers' footer row (module docstring): render(state,
+    titles) with titles = full_name -> mod name; the warn triangle (a mod
+    that failed, its tooltip naming it and why) as RimWorld's."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.toggle_button.setVisible(False)
+        self.speed_label.setVisible(False)
+        row = self.layout()
+        row.removeWidget(self.count_label)
+        row.insertWidget(row.indexOf(self.track), self.count_label)
+        self.track.setAccessibleName("Mod download progress")
+        self.label_max = LABEL_MAX_WIDTH  # the label's elide width (0.6.26: Browse Mods' detail copy narrows it)
+
+    def render(self, state: DownloadState, titles: dict[str, str], *, copying: bool = False) -> None:
+        super().render(state, titles)
+        text = package_label(state, titles)
+        self.label.setToolTip(text)
+        self.label.setText(self.label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, self.label_max))

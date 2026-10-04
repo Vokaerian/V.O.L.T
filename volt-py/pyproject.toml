@@ -1,6 +1,6 @@
 [project]
 name = "volt-py"
-version = "0.6.23"
+version = "0.6.29"
 description = "Add your description here"
 readme = "README.md"
 authors = [

@@ -111,6 +111,14 @@ block and the Install label come from thunderstore_browse.dependency_chain
 over the selected version's declared dependencies against what the load
 order already has.
 
+Download bars (0.6.26, PLAN.md §11 (c)): the window is modal over the
+manager's footer, so it carries two more copies of the footer's
+PackageDownloadBar (`download_bars`, which the screen renders from the same
+state while the window is open): at the right end of the pagination row
+(the pager stays centred) and docked bottom right in the detail header
+card, on the stats line under the Version picker (_CardDownloadBar). Each
+shows only while an install / switch downloads, like the footer's.
+
 Every request runs on a job thread the screen provides (`run_job`, its
 _run_job) so the window never blocks; the screen's own busy lock (one
 mutating job at a time) is honored through `is_busy`.
@@ -165,6 +173,7 @@ from PySide6.QtWidgets import (
 
 from volt_py import icons, painters, theme, thunderstore as ts, thunderstore_browse as tb
 from volt_py.applog import clip, log
+from volt_py.screens.download_bar import LABEL_MAX_WIDTH, PackageDownloadBar
 from volt_py.screens.flow_layout import FlowLayout
 
 WINDOW_SIZE = (1400, 820)  # .modal.browse-mods
@@ -211,8 +220,8 @@ BUTTON_TEXT_PADDING = 24  # the big Install button's horizontal padding + border
 INSTALLED_ICON_ROOM = 24  # the already-installed state's check icon (16) + its gap, and the 600 weight's extra width
 # Thunderstore's own deprecated-package warning (the detail page's banner;
 # the manager's details panel shows the same text).
-DEPRECATED_BANNER = ("This package has been deprecated and may no longer be maintained. "
-                     "We recommend looking for an alternative.")
+DEPRECATED_BANNER = ("This mod is marked deprecated: its author may no longer look after it, so it may stop "
+                     "working. Look for an alternative if you can.")  # 0.6.24 plain words
 
 
 def clamp_text(text: str, fm, width: int, max_lines: int) -> str:
@@ -240,8 +249,8 @@ def clamp_text(text: str, fm, width: int, max_lines: int) -> str:
 
 
 def install_label(name: str, missing: int, load_order: str) -> str:
-    """The big button: "Install EpicLoot + 1 dependency to Vanilla+"."""
-    extra = f" + {missing} dependenc{'ies' if missing != 1 else 'y'}" if missing else ""
+    """The big button: "Install EpicLoot + 1 required mod to Vanilla+"."""
+    extra = f" + {missing} required mod{'s' if missing != 1 else ''}" if missing else ""
     return f"Install {name}{extra} to {load_order}"
 
 
@@ -393,15 +402,18 @@ def rounded_pixmap(pixmap: QPixmap, size: int, radius: int = theme.RADIUS) -> QP
 class _IconLoader(QObject):
     """Fetches icons off the GUI thread: request(url) queues it (newest
     first - the page on screen beats one scrolled past), `loaded` brings
-    the bytes back over a queued connection (b"" when the fetch failed)."""
+    the bytes back over a queued connection (b"" when the fetch failed).
+    `fetch(key) -> bytes` replaces the download (0.6.26: the manager's
+    rows pass mod_icons.load_icon over icon keys - disk only)."""
 
-    loaded = Signal(str, object)  # url, bytes
+    loaded = Signal(str, object)  # url (or fetch's key), bytes
 
-    def __init__(self, app_version) -> None:
+    def __init__(self, app_version, fetch=None) -> None:
         # No Qt parent on purpose: the workers keep this object alive until
         # they finish, so a late reply never lands on a deleted receiver.
         super().__init__()
         self._app_version = app_version
+        self._fetch = fetch or (lambda url: tb.fetch_bytes(url, app_version))
         self._pending: list[str] = []
         self._cv = threading.Condition()
         self._stopped = False
@@ -435,7 +447,7 @@ class _IconLoader(QObject):
                     return
                 url = self._pending.pop()
             try:
-                data = tb.fetch_bytes(url, self._app_version)
+                data = self._fetch(url)
             except (ts.ThunderstoreError, ValueError) as err:
                 log(f"[browse] icon {url}: {err}")
                 data = b""
@@ -444,6 +456,42 @@ class _IconLoader(QObject):
                     self.loaded.emit(url, data)
                 except RuntimeError:  # the window is gone
                     return
+
+
+class _CardDownloadBar(PackageDownloadBar):
+    """The detail header card's copy of the download bar (0.6.26): a child
+    of the card kept out of its layout (nothing in the card moves), docked
+    with its right edge on the card's right padding - under the Version
+    picker - and centred on the stats line (`anchor`); its label is elided
+    to the room right of the stats text, so the stats stay clear (the label
+    gives way first; only a header card narrower than any real window,
+    under ~650px, would bring the pill itself over them)."""
+
+    def __init__(self, card: QFrame, anchor: QLabel) -> None:
+        super().__init__(card)
+        self._card, self._anchor = card, anchor
+        card.installEventFilter(self)
+        anchor.installEventFilter(self)
+
+    def render(self, state, titles, *, copying: bool = False) -> None:
+        super().render(state, titles)
+        self._dock()
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+            self._dock()
+        return False
+
+    def _dock(self) -> None:
+        stats = self._anchor.geometry()
+        right = self._card.width() - HEADER_PAD
+        room = right - (stats.left() + self._anchor.sizeHint().width() + HEADER_THUMB_GAP)
+        fixed = self.sizeHint().width() - self.label.sizeHint().width()  # everything but the label
+        self.label_max = max(0, min(LABEL_MAX_WIDTH, room - fixed))
+        text = self.label.toolTip()
+        self.label.setText(self.label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, self.label_max))
+        self.adjustSize()
+        self.move(right - self.width(), stats.center().y() - self.height() // 2)
 
 
 class _ElidedLabel(QLabel):
@@ -993,6 +1041,8 @@ class BepInExBrowseWindow(QDialog):
         self.show_nsfw.toggled.connect(lambda _on: self._filters_changed())
         self.detail_close_button.clicked.connect(lambda _=False: self.reject())
 
+        # the manager screen renders these with its own footer bar (_render_dl), same state (0.6.26)
+        self.download_bars = (self.download_bar, self.detail_download_bar)
         log(f"browse window opened ({game.community}, load order {load_order_name!r})")
         self.search.setFocus()
         self._load_categories()
@@ -1116,7 +1166,15 @@ class BepInExBrowseWindow(QDialog):
         pagination.addWidget(self.prev_button)
         pagination.addWidget(self.pager_box)
         pagination.addWidget(self.next_button)
-        pagination.addStretch(1)
+        # 0.6.26: the manager's download bar at the row's right end while an install runs; its
+        # box takes the trailing stretch's place (same stretch), so the pager stays centred
+        bar_box = QHBoxLayout()
+        bar_box.setContentsMargins(0, 0, 0, 0)
+        bar_box.addStretch(1)
+        self.download_bar = PackageDownloadBar()
+        self.download_bar.setVisible(False)
+        bar_box.addWidget(self.download_bar, 0, Qt.AlignmentFlag.AlignVCenter)
+        pagination.addLayout(bar_box, 1)
         self.pagination = QWidget()
         self.pagination.setLayout(pagination)
         layout.addWidget(self.pagination)
@@ -1193,6 +1251,9 @@ class BepInExBrowseWindow(QDialog):
         names.addWidget(self.detail_stats)
         names.addStretch(1)
         row.addLayout(names, 1)
+        # 0.6.26: the download bar's detail copy, docked bottom right on the stats line (_CardDownloadBar)
+        self.detail_download_bar = _CardDownloadBar(card, self.detail_stats)
+        self.detail_download_bar.setVisible(False)
         self.version_combo = QComboBox()  # top-right: drives Install, Required, Changelog
         self.version_combo.setFixedWidth(VERSION_PICKER_WIDTH)
         self.version_combo.setEnabled(False)
@@ -1898,7 +1959,7 @@ class BepInExBrowseWindow(QDialog):
         count = d["dependant_count"]
         f["dependants"].setText(link_html(tb.dependants_page_url(self.game.community, d["namespace"], d["name"]),
                                           f"{tb.format_count(count)} other mod{'s' if count != 1 else ''}"))
-        f["dependants"].setToolTip("Opens the list of mods that depend on this one on thunderstore.io")
+        f["dependants"].setToolTip("Opens the list of mods that need this one, on thunderstore.io")
 
     def _set_chips(self, categories: list[dict]) -> None:
         _clear_layout(self.chips_layout)
@@ -2039,7 +2100,7 @@ class BepInExBrowseWindow(QDialog):
         self._chain = chain
         _clear_layout(self.deps_layout)
         if chain is None:
-            self.deps_label.setText("checking dependencies...")
+            self.deps_label.setText("checking which mods it needs...")
             return
         # the marks are drawn icons (icons.py) in each row's text color
         rows = ([("check", n, "already installed", None) for n in chain["satisfied"]]
@@ -2047,7 +2108,7 @@ class BepInExBrowseWindow(QDialog):
                 + [("warn", n, msg, "browse-dep-problem") for n, msg in chain["problems"]])
         mark_color = {None: theme.TEXT, "browse-dep-missing": theme.ACCENT, "browse-dep-problem": theme.WARN}
         if not rows:
-            self.deps_label.setText("nothing else - no dependencies.")
+            self.deps_label.setText("nothing else - it needs no other mods.")
             return
         self.deps_label.setText("installed automatically with this mod")
         for mark, name, text, role in rows:
@@ -2089,7 +2150,7 @@ class BepInExBrowseWindow(QDialog):
                          "description": known.get("description", ""), "icon_url": known.get("icon_url", "")})
         self.tab_buttons["required"].setText(f"Required ({len(rows)})")
         if not rows:
-            empty = QLabel("This package has no dependencies.")
+            empty = QLabel("This mod needs no other mods.")
             empty.setProperty("muted", True)
             self.required_layout.addWidget(empty)
             self.required_layout.addStretch(1)
@@ -2118,7 +2179,7 @@ class BepInExBrowseWindow(QDialog):
                 desc.setTextFormat(Qt.TextFormat.PlainText)
                 desc.setWordWrap(True)
                 text.addWidget(desc)
-            version = QLabel(f"Version: <span style='color:{theme.ACCENT}'>{r['version'] or '?'}</span> (declared; installs the latest)")
+            version = QLabel(f"Version: <span style='color:{theme.ACCENT}'>{r['version'] or '?'}</span> (the version it lists; VOLT installs the latest)")
             version.setTextFormat(Qt.TextFormat.RichText)
             version.setProperty("role", "browse-small")
             text.addWidget(version)

@@ -371,7 +371,7 @@ class RulesWindow(QDialog):
     ) -> None:
         """settings: the screen's SettingsStore (user_rules is read fresh here,
         on every open). mods: the screen's scanned mods (id -> mod), for names
-        and found/not-found; never modified. warn(title, message, parent): the
+        and found/not-found; never modified. warn(title, what, ..., parent=): the
         screen's _warn. select_id: the entry to select (Create rule's new
         entry; the Load Before input gets focus), else the first entry."""
         super().__init__(parent)
@@ -619,7 +619,9 @@ class RulesWindow(QDialog):
     # ---- actions (each saves at once) ----
     def _save_failed(self, title: str, what: str, err: Exception) -> None:
         log(f"rules: {what} FAILED: {err!r}")
-        self._warn(title, str(err), self)
+        self._warn(title, "VOLT couldn't save your rules.", means="The last change wasn't kept.",
+                   tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                   details=str(err), parent=self)
 
     def _edit_mod(self, text: str) -> None:
         rule = self._rule()

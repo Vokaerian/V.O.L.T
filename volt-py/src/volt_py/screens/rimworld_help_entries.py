@@ -1,298 +1,258 @@
-"""RimWorld's entries for the Help window (screens/help_window.py): one per
-button/control on the main screen, with the mod right-click menu grouped
-into a single entry (decided with the user, PLAN.md §7 / RIMWORLD.md).
+"""RimWorld's entries for the Help window (screens/help_window.py). Since
+0.6.24 (PLAN.md §10 (h)) written as tasks ("How do I add a mod?") in plain
+words, not one entry per button; RimWorld keeps its own words (load order,
+Workshop, Push, Sync, SteamCMD). Every button and feature is still named in
+some entry, and the mod right-click menu keeps one grouped entry (decided
+with the user, PLAN.md §7 / RIMWORLD.md).
 
-Plain data, no Qt. The window sorts by name itself, so order here doesn't
-matter; kept roughly in on-screen order (header, load-order bar, panes,
-actions column) to make it easy to check against the screen. Update an
-entry whenever the control it describes changes.
+0.6.28 (PLAN.md §11 (g)): every name is a short question - "How do I
+<task>?" or "What ...?" - of at most NAME_MAX characters, so it
+fits the Help rail (240px) on one line; no game name in a name.
+"long" is plain-text paragraphs (blank line between) and list lines
+("1. " steps, "- " items) that help_window.TextBlocks lays out; button and
+menu names are quoted as on screen (a trailing "..." left off).
+
+Plain data, no Qt. The window sorts by name itself (the "How do I" entries
+group together, then the "What" ones); kept here in a getting-going ->
+mods -> playing -> sharing -> trouble order. Update an entry whenever a
+feature it describes changes.
 """
 
-from volt_py.offline_mods import OFFLINE_RUN_TEXT
+NAME_MAX = 28  # the rail's one-line cap (tools/checks/volt_py_help_window.py measures it)
 
 RIMWORLD_HELP_ENTRIES: list[dict] = [
-    # ---- header ----
+    # ---- getting going ----
     {
-        "name": "Settings",
-        "short": "Opens the Settings window, where you tell VOLT where RimWorld and its files live.",
+        "name": "How do I get started?",
+        "short": "Tell VOLT where RimWorld is, make a load order, then press Modded to play.",
         "long": (
-            "General has the game, local mods and config folders (Browse for the game and config ones), "
-            "Autodetect to find a RimWorld install for you, and the Animations setting. Steam lets you choose how "
-            "Workshop mods are downloaded and "
-            "check for Workshop mods that are missing. Troubleshooting opens VOLT's log file (or the one from "
-            "the previous run), which is handy when reporting a problem."
+            "1. Open \"Settings\" and press \"Autodetect paths\" to find RimWorld and its Config folder.\n"
+            "2. Press \"New load order\". While you have none, the empty Active list shows a card with the same "
+            "button.\n"
+            "3. Move the mods you want into the Active list and put them in order.\n"
+            "4. Press \"Save\", then \"Push\" or \"Modded\".\n\n"
+            "Point at any greyed-out button to see why it's greyed out (\"Create a load order first.\", for "
+            "example)."
         ),
     },
     {
-        "name": "Paths: Game folder",
-        "short": "Opens RimWorld's install folder in your file explorer.",
+        "name": "How do I change settings?",
+        "short": "Press Settings at the top of the window.",
         "long": (
-            "This is the \"Game\" link next to \"Paths:\" at the top of the window. It's greyed out until a game "
-            "folder is set in Settings. Hover it to see the full path."
+            "Settings has three tabs:\n"
+            "- \"General\": RimWorld's game, local mods and Config folders (\"Browse\", or \"Autodetect paths\" to "
+            "find them) and Animations (on, off, or follow Windows).\n"
+            "- \"Steam\": how Workshop mods are downloaded. \"Check for missing Workshop mods\" downloads every "
+            "active mod that isn't on your computer yet.\n"
+            "- \"Troubleshooting\": opens VOLT's log, a step-by-step record of what VOLT did.\n\n"
+            "The links next to \"Paths:\" at the top open the Game, Mods, Config and load order folders. They're "
+            "greyed out until that folder is known."
         ),
     },
     {
-        "name": "Paths: Mods folder",
-        "short": "Opens the game's local Mods folder in your file explorer.",
+        "name": "What is a load order?",
+        "short": "A load order is your own saved list of mods for RimWorld, in the order the game loads them.",
         "long": (
-            "This is the \"Mods\" link next to \"Paths:\" at the top of the window. It's the Mods folder inside "
-            "the game folder, where manually installed mods go. Steam Workshop mods live elsewhere, in Steam's "
-            "own Workshop folder."
+            "Mods near the top of the Active list load first, and some mods only work when they load after "
+            "others.\n\n"
+            "You can have as many load orders as you like. Pick one in the drop-down at the top; VOLT asks first "
+            "if the open one has unsaved changes.\n\n"
+            "Each one is saved as its own folder in VOLT's folder. The \"Load order\" link next to \"Paths:\" "
+            "opens it."
         ),
     },
     {
-        "name": "Paths: Config folder",
-        "short": "Opens RimWorld's Config folder in your file explorer.",
+        "name": "How do I make a load order?",
+        "short": "Press New load order and type a name.",
         "long": (
-            "This is the \"Config\" link next to \"Paths:\" at the top of the window. The Config folder holds "
-            "ModsConfig.xml, the file RimWorld reads to decide which mods to load, which is what Push writes to. "
-            "It's greyed out until a config folder is set in Settings."
+            "It starts with Core and your DLC in the Active list and every other mod in Inactive.\n\n"
+            "\"Copy to new\" saves what's on screen right now (unsaved changes included) as a new load order, "
+            "with its own copies of any Offline mods.\n\n"
+            "To delete a load order, right-click the drop-down and choose \"Delete\". Its own game data and "
+            "Offline copies go with it, but your mods aren't touched."
+        ),
+    },
+    # ---- mods ----
+    {
+        "name": "How do I add a mod?",
+        "short": "Subscribe to it on the Steam Workshop, press Rescan, then double-click it in the Inactive list.",
+        "long": (
+            "1. Subscribe to the mod on the Steam Workshop.\n"
+            "2. Press \"Rescan\". VOLT looks through your mod folders again (do this whenever you add, remove or "
+            "update mods while VOLT is open).\n"
+            "3. Double-click the mod in the Inactive list. Double-clicking moves a mod between the Inactive and "
+            "Active lists.\n\n"
+            "You can also paste a Workshop link or ID into \"Import\" > \"From Steam Workshop\".\n\n"
+            "A mod that's in your list but not on your computer shows as pending, with a \"Download\" or "
+            "\"Subscribe\" button on its row. A mod you install by hand goes in the game's Mods folder."
         ),
     },
     {
-        "name": "Paths: Load order folder",
-        "short": "Opens the selected load order's own folder in your file explorer.",
+        "name": "How do I sort my mods?",
+        "short": "Press Sort, or drag mods up and down the Active list.",
         "long": (
-            "This is the \"Load order\" link next to \"Paths:\" at the top of the window. Each load order is "
-            "saved as its own folder inside VOLT's load-orders folder, holding its loadorder.json. It's greyed "
-            "out until a load order is selected, and works even before a game folder is set. Hover it to see "
-            "the full path."
-        ),
-    },
-    # ---- load-order bar ----
-    {
-        "name": "Load order picker",
-        "short": "Switches between your saved load orders.",
-        "long": (
-            "Pick a load order from the dropdown to show its Active and Inactive lists. If the one you're "
-            "leaving has unsaved changes, VOLT asks before discarding them. Right-click the dropdown to turn "
-            "the load order's own game data on or off, or to delete it."
+            "\"Sort\" follows your own rules first, then community rules, each mod's own load-order rules, the "
+            "mods it needs, and finally the alphabet.\n\n"
+            "To add your own rule for a mod, right-click it and choose \"Rules\".\n\n"
+            "Undo (the ↺ while you have unsaved changes, or Ctrl+Z) takes back one change at a time, and "
+            "\"Save\" keeps the new order. Dragging is off while a search is hiding mods."
         ),
     },
     {
-        "name": "New load order",
-        "short": "Starts a new load order under a name you choose, with Core and your DLC active.",
+        "name": "How do I search my mods?",
+        "short": "Type in the search box above the list.",
         "long": (
-            "Core and every installed DLC start out in the Active list, in release order; every other installed "
-            "mod starts in the Inactive list, so you can build the rest of the Active list from there. "
-            "If the current load order has unsaved changes, VOLT asks before discarding them. The new load order "
-            "becomes the one that's open. While none is open, the empty Active list shows a short card with the same "
-            "Create a load order button, and buttons that need one say \"Create a load order first\" when you "
-            "point at them."
+            "It matches a mod's name, author or package ID (the mod's unique name inside RimWorld). The eye at "
+            "the end of the box switches between hiding the mods that don't match and just dimming them.\n\n"
+            "Right-click a mod and choose \"Filter by\" to show only mods by the same author or with the same "
+            "color.\n\n"
+            "\"Mod color\", in the same menu, tags a mod with a color."
         ),
     },
     {
-        "name": "Copy to new",
-        "short": "Saves a copy of the current lists as a new load order.",
+        "name": "How do I save my changes?",
+        "short": "Press Save, which is outlined in yellow while you have unsaved changes.",
         "long": (
-            "The new load order gets exactly what's on screen right now, in the same order, including any "
-            "changes you haven't saved yet. You'll be asked for a name, and the copy becomes the one that's "
-            "open. The original load order stays as it was last saved. Its Offline mods get their own, separate "
-            "copies in the new load order, made in the background right after."
+            "\"Save\" keeps the load order in VOLT.\n\n"
+            "RimWorld doesn't use it until you press \"Push\", or \"Modded\" for a load order with its own game "
+            "data.\n\n"
+            "Saving also clears the undo history."
+        ),
+    },
+    # ---- playing ----
+    {
+        "name": "How do I play with mods?",
+        "short": "Press Push to make RimWorld use your load order, then start the game, or press Modded.",
+        "long": (
+            "\"Push\" saves the load order and writes it into RimWorld's ModsConfig.xml (the file in the Config "
+            "folder that RimWorld reads its mod list from), keeping a backup of the old one.\n\n"
+            "\"Modded\" starts RimWorld with the last pushed list, or with the load order's own list when its "
+            "own game data is on. It never saves or pushes for you and warns about unsaved changes.\n\n"
+            "\"Vanilla\" starts a clean RimWorld with only Core and your DLC, in its own data folder, so your "
+            "usual saves aren't touched.\n\n"
+            "VOLT locks its buttons while the game runs."
         ),
     },
     {
-        "name": "Undo (↺)",
-        "short": "Undoes your last change to the Active list.",
+        "name": "How do I separate saves?",
+        "short": "Right-click the load order drop-down and turn on Own game data.",
         "long": (
-            "The ↺ button only shows while there are unsaved changes; Ctrl+Z does the same as clicking it, "
-            "except in a text box, where it undoes your typing. Each click steps back one change: a "
-            "drag, a mod moved in or out, a Sort, and so on. There's no redo, and changes to the Inactive list "
-            "alone aren't tracked. Saving clears the undo history."
+            "With it on, \"Modded\" keeps that load order's saves, settings and mod settings in its own folder. "
+            "It starts fresh with no saves; your usual ones stay where they are.\n\n"
+            "Turning it off keeps that folder on disk, and deleting the load order deletes it.\n\n"
+            "It's off for new load orders."
         ),
     },
     {
-        "name": "Delete load order",
-        "short": "Right-click the load order picker to delete a saved load order.",
+        "name": "How do I stop mod updates?",
+        "short": "Make it Offline: the load order gets its own frozen copy that Steam updates don't change.",
         "long": (
-            "VOLT asks you to confirm first, because this can't be undone. The saved list is removed, along with "
-            "the load order's own game data (its saves and settings) and its Offline mod copies if it has any; "
-            "your mods themselves aren't touched. If you delete the load order that's open, VOLT switches to another saved one, or shows an "
-            "empty screen if none are left."
+            "1. Turn on the load order's \"Own game data\".\n"
+            "2. Press \"Offline mods\" (under \"Rescan\") and tick the mods to copy, or right-click a mod and "
+            "choose \"Make Offline\".\n\n"
+            "VOLT uses that copy for this load order only, marked with an Offline badge, and tells you when the "
+            "live mod has changed. \"Refresh Offline copy\" (or \"Refresh changed\") copies it again.\n\n"
+            "\"Make live again\" (or \"Delete\" on an Offline mod) deletes the copy.\n\n"
+            "When you press \"Modded\", the Offline mods are linked into the game's Mods folder and removed when "
+            "the game closes."
         ),
     },
-    # ---- panes ----
+    # ---- Steam ----
     {
-        "name": "Search box",
-        "short": "Filters a list to the mods that match what you type.",
+        "name": "How do I use SteamCMD?",
+        "short": "Choose a SteamCMD option in Settings > Steam, then press Download on a mod's row.",
         "long": (
-            "The Inactive and Active lists each have their own search box. It matches a mod's name, author or "
-            "package ID, and updates as you type. Clear the box to see every mod again."
-        ),
-    },
-    {
-        "name": "Search eye icon",
-        "short": "Chooses whether search hides the mods that don't match or just dims them.",
-        "long": (
-            "The eye sits at the right end of each list's search box. By default, mods that don't match are "
-            "hidden. Click the eye to keep every mod visible instead, with non-matches dimmed and matches "
-            "highlighted, which helps you see where a mod sits in the whole list. Click again to switch back."
-        ),
-    },
-    {
-        "name": "Drag to reorder",
-        "short": "Drag mods up and down the Active list to change their load order.",
-        "long": (
-            "Only the Active list can be reordered, and mods near the top load first. Dragging is turned off "
-            "while that list's search is hiding mods; clear the search or switch the eye icon to dimming to "
-            "drag again. To move a mod between Inactive and Active, double-click it."
+            "SteamCMD is Valve's own download tool. VOLT uses it to put Workshop mods straight into the Mods "
+            "folder, without the Steam app.\n\n"
+            "Its progress shows at the bottom of the window, where you can pause and resume it.\n\n"
+            "\"Sync\" then turns those downloads into real Steam subscriptions and removes VOLT's copies once "
+            "Steam has its own (Steam must be running).\n\n"
+            "For a GOG copy of RimWorld, VOLT keeps the downloads in the Mods folder for good, and \"Fetch\" puts "
+            "a missing mod back from VOLT's downloads."
         ),
     },
     {
-        "name": "Mod right-click menu",
+        "name": "How do I remove a mod?",
+        "short": "Right-click the mod and choose Unsubscribe, Delete or Remove completely.",
+        "long": (
+            "- \"Unsubscribe\" removes a Steam subscription.\n"
+            "- \"Delete\" removes a mod VOLT downloaded with SteamCMD.\n"
+            "- \"Remove completely\" lists every copy VOLT can find first, then deletes them and takes the mod out "
+            "of the load order. Tick the box to also delete VOLT's saved download.\n\n"
+            "\"Remove completely\" won't remove Core, your DLC, or a mod Steam still has you subscribed to "
+            "(unsubscribe first)."
+        ),
+    },
+    {
+        "name": "What's the right-click menu?",
         "short": "Right-click any mod in either list for more things you can do with it.",
         "long": (
-            "Open folder shows the mod's files, Open URL goes to a Workshop mod's page, Filter by narrows the list "
-            "to mods by the same author or color, Copy to clipboard copies its URL, package ID or folder path, Mod color tags "
-            "it with a color, Rules creates or shows your own sort rules for it, and Make Offline gives the open load "
-            "order its own frozen copy of the mod when its Own game data is on (Make live again, or Delete on an "
-            "Offline mod, deletes only that copy; Refresh Offline copy re-copies it from the live mod). With Settings > Steam set to "
-            "download with SteamCMD and sync later, Download fetches a missing Workshop mod with SteamCMD (even one "
-            "the list only knows by its package ID, when VOLT can find its Workshop ID), and Subscribe turns a mod "
-            "VOLT downloaded that way into a real Steam subscription, exactly like the Sync button but for that one "
-            "mod (Steam must be running); with the Steam client setting, Subscribe itself subscribes a missing mod on "
-            "Steam; the next item reads Unsubscribe for a Steam subscription or Delete for a SteamCMD download, which "
-            "removes it from the Mods folder; for a GOG install, Fetch puts a missing mod back from VOLT's SteamCMD "
-            "download cache (or downloads it) and Delete removes it. Remove completely deletes a mod's files from "
-            "every place VOLT looks for mods, including a leftover folder Steam isn't subscribed to, and takes it "
-            "out of the load order after listing exactly what it will delete; it keeps the download cache unless "
-            "you tick the box and refuses RimWorld's own Core/DLC and anything Steam still has you subscribed to "
-            "(use Unsubscribe first). Options that don't apply to a mod are greyed out (a row that isn't installed yet "
-            "only shows the ones that can apply to it, such as Download), and the greyed line at the top says where "
-            "the mod comes from (Steam Workshop, SteamCMD copy, Local mod and so on), as the details pane's Source "
-            "row does."
+            "The grey line at the top says where the mod comes from (Steam Workshop, SteamCMD copy, Local mod and "
+            "so on). Options that don't apply are greyed out.\n\n"
+            "- \"Open folder\" shows its files; \"Open URL in browser\" and \"Open URL in Steam\" open its "
+            "Workshop page.\n"
+            "- \"Copy to clipboard\" copies its link, package ID or folder.\n"
+            "- \"Filter by\" and \"Mod color\" are for searching, and \"Rules\" adds your own sort rules.\n"
+            "- \"Make Offline\", \"Make live again\" and \"Refresh Offline copy\" handle Offline copies.\n"
+            "- \"Download\" or \"Subscribe\", \"Unsubscribe\", \"Delete\", \"Fetch\" and \"Remove completely\" get "
+            "or remove the mod's files."
         ),
     },
-    # ---- actions column ----
+    # ---- sharing ----
     {
-        "name": "Import",
-        "short": "Brings a mod list into the Active list from somewhere else.",
+        "name": "How do I share a load order?",
+        "short": "Press Export and choose Rentry, Clipboard or .xml.",
         "long": (
-            "You can import from the clipboard, a RimPy .xml file, a rentry.co page, a save file's mod list, or "
-            "the Steam Workshop. A Workshop link or ID adds that mod to your list; a Workshop collection asks "
-            "whether to add to your list, replace it, or start a new load order. If an import would replace "
-            "your list and you have unsaved changes, VOLT asks before discarding them. Import needs an open load "
-            "order, so it stays greyed out until you create one."
+            "- \"Rentry (share link)\" puts your list on a rentry.co page and copies its link for you to send.\n"
+            "- \"Clipboard (RimSort)\" copies the list as text in RimSort's format.\n"
+            "- \".xml (RimPy)\" saves a file RimPy can open.\n\n"
+            "\"Export\" is greyed out while the Active list is empty."
         ),
     },
     {
-        "name": "Export",
-        "short": "Sends your current mod list somewhere else to share or back up.",
+        "name": "How do I import a mod list?",
+        "short": "Press Import and choose where the list comes from.",
         "long": (
-            "Rentry makes a rentry.co share link you can send to others. Clipboard copies the list as text in "
-            "RimSort's format. .xml saves a file RimPy can open. Export is greyed out while the Active list is "
-            "empty."
+            "You can import from the clipboard, a RimPy .xml file, a rentry.co page, a save file's mod list "
+            "(\"Read from save\"), or the Steam Workshop.\n\n"
+            "A Workshop collection asks whether to add to your list, replace it, or start a new load order.\n\n"
+            "Import fills the Active list of the open load order, so it needs one open. VOLT asks before "
+            "replacing unsaved changes."
+        ),
+    },
+    # ---- trouble ----
+    {
+        "name": "How do I fix a broken mod?",
+        "short": "Check the warnings button, press Sort, and test with fewer mods until the problem goes away.",
+        "long": (
+            "The ⚠ / ✕ button lists mods in the wrong order (warnings, which \"Sort\" usually fixes) and mods "
+            "that are missing a mod they need or clash with another (errors).\n\n"
+            "To find the mod causing it:\n"
+            "1. Move half of your mods to Inactive.\n"
+            "2. Press \"Save\", then \"Push\", and test the game.\n"
+            "3. Bring mods back in smaller groups until you find the one.\n\n"
+            "\"Vanilla\" checks whether RimWorld itself works without any mods."
         ),
     },
     {
-        "name": "Rescan",
-        "short": "Checks your mod folders again for mods you've added, removed or updated.",
+        "name": "What are scan issues?",
+        "short": "Mod folders VOLT couldn't read as mods; the button only shows when there are some.",
         "long": (
-            "Use this after installing or deleting mods while VOLT is open. Your Active list stays as it is, "
-            "including unsaved changes and undo history; the Inactive list is rebuilt from what's on disk now."
+            "The button says how many, like \"2 scan issues\".\n\n"
+            "Its window explains each one: a missing folder, a folder with no About.xml (the file that describes "
+            "a mod), an About.xml that can't be read, or two mods with the same package ID.\n\n"
+            "From there you can open the folder, or ignore the issue so it stops showing."
         ),
     },
     {
-        "name": "Sort",
-        "short": "Automatically puts the Active list in a sensible load order.",
+        "name": "How do I get help?",
+        "short": "Press Report a problem at the top of this window and send the file it saves to whoever is helping you.",
         "long": (
-            "Sort follows, in order of priority: your own rules, community rules, each mod's own load-order "
-            "rules from its About.xml, then dependencies, and finally alphabetical order. It only changes the "
-            "list on screen, like a manual reorder: click Save to keep it, or Undo to go back."
-        ),
-    },
-    {
-        "name": "Save",
-        "short": "Saves the Active and Inactive lists to the open load order.",
-        "long": (
-            "This only saves VOLT's own copy of the load order; RimWorld won't use it until you Push, or until "
-            "you click Modded for a load order with its own game data. The Save button is outlined in yellow while "
-            "there are unsaved changes, and saving also clears the undo history."
-        ),
-    },
-    {
-        "name": "Sync",
-        "short": "Turns Workshop mods VOLT downloaded itself into real Steam subscriptions.",
-        "long": (
-            "Mods downloaded through VOLT's own downloader get subscribed on Steam, and VOLT's copy is removed "
-            "once Steam has finished downloading its own. This needs Steam running and can take a little while; "
-            "Steam may show RimWorld as running during it. If every Workshop mod is already subscribed, there's "
-            "nothing to do."
-        ),
-    },
-    {
-        "name": "Scan issues",
-        "short": "Lists mod folders VOLT couldn't read as mods.",
-        "long": (
-            "This button only shows when there's a problem, labeled with how many (\"2 scan issues\"). The "
-            "window explains each one: a missing folder, a folder with no About.xml, an About.xml that can't be "
-            "read, or two mods sharing the same package ID. From there you can open the folder or ignore the "
-            "issue so it stops showing."
-        ),
-    },
-    {
-        "name": "Warnings & errors",
-        "short": "Shows problems with your Active list, grouped by mod.",
-        "long": (
-            "This button only shows when there's something to report, as \"⚠ warnings · ✕ errors\". Warnings "
-            "are mods loading in the wrong order for their rules. Errors are missing dependencies or mods that "
-            "conflict with each other. Sort fixes most warnings; errors usually mean adding or removing a mod."
-        ),
-    },
-    {
-        "name": "Push",
-        "short": "Saves your load order and makes RimWorld use it next time it starts.",
-        "long": (
-            "Push saves the load order in VOLT, then writes the Active list to RimWorld's ModsConfig.xml in the "
-            "Config folder, keeping a backup of the old file. If there are unsaved changes, VOLT confirms before "
-            "saving them. It needs the Config folder set in Settings. A load order with its own game data doesn't "
-            "need a Push to play it with Modded."
-        ),
-    },
-    {
-        "name": "Modded",
-        "short": "Starts RimWorld with the open load order.",
-        "long": (
-            "Modded never saves or pushes for you. With the load order's own game data on, RimWorld starts with "
-            "its saved mod list and its own saves and settings; with it off, RimWorld uses its usual data "
-            "folder and whatever mod list was last pushed, so Push first. If you have unsaved changes, VOLT warns "
-            "you first, and while the game runs VOLT keeps Modded, Vanilla, Games and Settings locked. With own game data "
-            "on, the load order's active Offline mods are linked into the game's Mods folder for the run and removed "
-            "again when the game closes (even after a crash, the next time VOLT starts)."
-        ),
-    },
-    {
-        "name": "Vanilla",
-        "short": "Starts a clean RimWorld: only Core and your DLCs, no mods of any kind.",
-        "long": (
-            "Vanilla uses its own data folder, vanilla-data in VOLT's folder, so it has its own saves and settings "
-            "and never touches your normal RimWorld data folder (your usual saves don't show up there). Before "
-            "every start VOLT resets its mod list to Core plus your installed DLCs, so a mod switched on in-game "
-            "last time doesn't stay on. It doesn't need a load order open, and like Modded it keeps VOLT locked "
-            "until the game exits."
-        ),
-    },
-    {
-        "name": "Own game data",
-        "short": "Gives a load order its own saves, settings and mod config.",
-        "long": (
-            "Right-click the load order picker and choose Own game data to turn it on or off; it's off for new "
-            "load orders. When it's on, Modded runs keep their saves, settings and mod config in the load "
-            "order's own data folder, starting fresh with default settings and no saves, while your existing "
-            "ones stay with the normal RimWorld folder (Vanilla has its own separate data folder too, and never "
-            "touches either). Turning it off keeps that folder on disk, and deleting the load order deletes it."
-        ),
-    },
-    {
-        "name": "Offline mods",
-        "short": "Gives a load order its own frozen copy of chosen mods, which Steam updates no longer change.",
-        "long": (
-            "With the load order's Own game data on, click Offline mods (right under Rescan) to tick the mods to "
-            "copy into the load order, or right-click a single mod and choose Make Offline; Make live again (or "
-            "Delete on an Offline mod) deletes the copy, and works even with Own game data off. For that load "
-            "order only, VOLT uses the copy instead of the live mod, and an Offline badge marks it; when the live "
-            "mod changes later, the row's tooltip, the details pane and the dialog's Live column say so, and "
-            "Refresh Offline copy (or Refresh changed) copies it afresh. " + OFFLINE_RUN_TEXT
+            "The file is a .zip with VOLT's log for RimWorld (a step-by-step record of what VOLT did) and a short "
+            "note with VOLT's version, your Windows version and the load order's name.\n\n"
+            "When something fails, the message has a \"Copy details\" button that copies the technical details to "
+            "paste into a message.\n\n"
+            "Settings > Troubleshooting can also open the log."
         ),
     },
 ]

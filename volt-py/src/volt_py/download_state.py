@@ -7,6 +7,11 @@ flight merges into it (`active` counts the calls, not the items), so two
 downloads started close together show as one row with one Pause, exactly
 as the Electron app's single `dl` object does. None = no row shown.
 
+The Thunderstore managers' footer bar (0.6.25, screens/bepinex_main_screen.py)
+reuses the same state with Thunderstore full_names ("Team-Package") as the
+ids: seed_packages / apply_package_event / package_label at the end - mods,
+not bytes, no pause, no speed.
+
 Every function here returns a new state (the JS `setDl((d) => ...)`
 updates); nothing is mutated, so the screen's own reference stays valid
 across a queued-signal delivery.
@@ -193,3 +198,36 @@ def failure_summary(d: DownloadState) -> str:
     """The warning icon's aria-label: "N download(s) failed"."""
     n = len(d.failed)
     return f"{n} download{'' if n == 1 else 's'} failed"
+
+
+# ---- Thunderstore managers (0.6.25): one row per job, ids = full_names ----
+def seed_packages(ids) -> DownloadState:
+    """A download job starts: the mods it is known to fetch (the pre-pass's
+    "plan" adds the rest up front; anything it missed still joins on its
+    "start" - apply_package_event)."""
+    return DownloadState(wids=_uniq(ids), active=1)
+
+
+def apply_package_event(d: DownloadState | None, ev: dict | None) -> DownloadState | None:
+    """bepinex_load_orders.package_progress's events: "plan" (plan_downloads'
+    pre-pass) adds every mod it names to the total; "start" adds the mod to
+    the total (if new) and makes it the current one; "item-done" is
+    apply_download_event's (done, failed / un-failed on a later success),
+    except the finished mod stays `cur` so the label doesn't flicker to
+    "Downloading..." between two mods (percent_of ignores a done `cur`)."""
+    if d is None or not ev:
+        return d
+    if ev.get("type") == "plan":  # the pre-pass (0.6.26): the job's whole list, before the first download
+        return replace(d, wids=_uniq(d.wids, tuple(ev.get("ids") or ())))
+    if ev.get("type") == "start":
+        return replace(d, wids=_uniq(d.wids, (ev["id"],)), cur=Current(ev["id"], 0.0, None))
+    after = apply_download_event(d, ev)
+    return after if after is d else replace(after, cur=d.cur)
+
+
+def package_label(d: DownloadState, titles: dict[str, str]) -> str:
+    """"Downloading: <mod name>" (the current / last mod's title, else its
+    id), or "Downloading..." before the first one starts."""
+    if d.cur is None:
+        return "Downloading..."
+    return f"Downloading: {titles.get(d.cur.id) or d.cur.id}"

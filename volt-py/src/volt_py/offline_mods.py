@@ -49,7 +49,7 @@ DEL_PREFIX = ".del-"  # a copy moved aside to be deleted (Make live again)
 OLD_PREFIX = ".old-"  # the previous copy during a Refresh, until the new one is in place (0.6.18)
 # What a Run does with them (0.6.17): the dialog footer, the Make Offline confirm, Help.
 OFFLINE_RUN_TEXT = (
-    "At Modded Run, the active Offline mods are linked into the game's Mods folder and removed again when the "
+    "When you press Modded, the active Offline mods are linked into the game's Mods folder and removed again when the "
     "game closes (load orders with Own game data on)."
 )
 # The row tooltip's note (mod_decorations.row_tooltip) and a missing copy's "!" warning.

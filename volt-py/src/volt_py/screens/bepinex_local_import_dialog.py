@@ -29,15 +29,15 @@ from volt_py.screens.collection_dialog import WIDTH, CollectionDialog, _button, 
 
 TITLE = "Import local mod"
 INTRO = (
-    "Install a mod from a Thunderstore package zip on this computer (manifest.json at its root) into the open "
-    "profile. It joins the Active list like a download, and any dependency it lists that isn't installed "
-    "comes from Thunderstore. VOLT never checks a local package for updates."
+    "Install a mod from a Thunderstore mod .zip on this computer (one with a manifest.json, the mod's description "
+    "file, inside) into the open profile. It joins the Active list like a download, and any mod it needs that "
+    "isn't installed comes from Thunderstore. VOLT never checks a local mod for updates."
 )
 PLACEHOLDER = "No file chosen"
-FILE_FILTER = "Mod packages (*.zip);;All files (*)"
+FILE_FILTER = "Mod files (*.zip);;All files (*)"
 OWNER_NOTES = {
-    "author": "Owner taken from manifest.json's author field.",
-    "fallback": ("The file name isn't Thunderstore's Owner-Name-Version.zip and manifest.json names no author, "
+    "author": "Author taken from the mod's manifest.json.",
+    "fallback": ("The file name isn't in Thunderstore's Author-ModName-Version.zip form and the mod names no author, "
                  "so it's installed as {full_name}."),
 }
 
@@ -47,7 +47,7 @@ def preview_texts(info: dict) -> tuple[str, str, str]:
     """(title, detail line, notes) for an inspect_local_package() result."""
     ref, m = info["ref"], info["manifest"]
     n = len(m["dependencies"])
-    detail = f"{ref.full_name}  ·  by {ref.namespace}  ·  {n} dependenc{'y' if n == 1 else 'ies'}"
+    detail = f"{ref.full_name}  ·  by {ref.namespace}  ·  needs {n} other mod{'' if n == 1 else 's'}"
     notes = [m["description"]] if m["description"] else []
     if info["owner_source"] in OWNER_NOTES:
         notes.append(OWNER_NOTES[info["owner_source"]].format(full_name=ref.full_name))
@@ -125,7 +125,7 @@ class LocalModDialog(QDialog):
 
     def _choose(self) -> None:
         start = str(self._path.parent if self._path else self._start_dir or "")
-        picked, _ = QFileDialog.getOpenFileName(self, "Choose a mod package", start, FILE_FILTER)
+        picked, _ = QFileDialog.getOpenFileName(self, "Choose a mod .zip", start, FILE_FILTER)
         if not picked:
             log("import local mod: file picker cancelled")
             return

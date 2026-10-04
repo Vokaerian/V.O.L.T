@@ -40,6 +40,18 @@ drag-reorder preview/animation are all inherited unchanged. What differs:
     controls_enabled() says it's busy; an update in flight (RowInfo.busy)
     disables just that row's button.
 
+  - The mod's icon (0.6.26, PLAN.md §11 (b); DESIGN.md §37): a ROW_ICON_PX
+    square tile at the card's left (ROW_PAD in, vertically centered) - the
+    package's icon, pre-rounded by the screen (RowInfo.icon), or a plain
+    --well tile while there is none (not loaded yet, no icon.png). The two
+    text lines (and the status pills) start ROW_ICON_PX + ROW_PAD further
+    right than before; nothing else moved, and the icon is never a control.
+  - "Files missing" (0.6.27, PLAN.md §11 (f); DESIGN.md §38): a third status
+    pill in --warn, after Disabled / Deprecated, on a mod some of whose
+    files are gone from the profile folder (RowInfo.files_missing; the row's
+    tooltip says what and how to fix it). The same pill family and box as
+    the other two; on any other row nothing changes.
+
 The screen supplies everything per row through `row_info` (mod id ->
 RowInfo) at paint / hit-test time - nothing is stored here, as with
 mod_list.py's `decor` callable - and takes the clicks through `on_update`
@@ -82,6 +94,10 @@ TOGGLE_W, TOGGLE_H = 34, 18  # .vh-toggle
 KNOB = 14  # .vh-toggle-knob; 1px inside the 1px border: 2px from the pill's edge
 UPDATE_SIZE = 24  # .vh-update-btn
 TAG_FONT_PX = 11  # .tag font-size ("Pinned")
+# The icon tile (0.6.26): the Browse Mods card's icon size and corner (bepinex_browse_window
+# ICON_PX / ICON_RADIUS), without its mat - 7px above and below it in the 54px card.
+ROW_ICON_PX = 40
+ROW_ICON_RADIUS = 3
 
 UPDATE = "update"
 TOGGLE = "toggle"
@@ -95,6 +111,7 @@ UPDATE_GLYPH = "↑"
 PINNED_TEXT = "Pinned"
 DISABLED_TEXT = "Disabled"  # the status pills before the name (RowInfo.disabled / .deprecated)
 DEPRECATED_TEXT = "Deprecated"
+FILES_MISSING_TEXT = "Files missing"
 # The toggle slide (phase 4 M4, memory/DESIGN.md §27-29): a single clicked
 # toggle's knob slides over theme.MOTION_FAST, css_ease; frames every
 # TOGGLE_FRAME_MS, repainting only the sliding toggles.
@@ -117,6 +134,8 @@ class RowInfo(NamedTuple):
     update_tip: str = ""  # the update button's tooltip ("Update Jotunn to 2.31.0")
     disabled: bool = False  # "Disabled" pill + muted struck-through name (an Active row toggled off)
     deprecated: bool = False  # "Deprecated" pill (Thunderstore marks the package deprecated)
+    icon: object = None  # QPixmap, ROW_ICON_PX square, pre-rounded (rounded_pixmap); None = the placeholder tile
+    files_missing: bool = False  # "Files missing" pill (some of the mod's files are gone from the profile folder)
 
 
 def card_rect(rect, viewport, view) -> QRect:
@@ -177,6 +196,26 @@ def layout_row(info: RowInfo, rect, viewport, widget: QWidget) -> dict[str, QRec
     return out
 
 
+def icon_rect(card: QRect) -> QRect:
+    """The icon tile's rect inside card rect `card`: ROW_PAD in from the
+    left, vertically centered."""
+    return QRect(card.left() + ROW_PAD, card.top() + (card.height() - ROW_ICON_PX) // 2, ROW_ICON_PX, ROW_ICON_PX)
+
+
+def paint_row_icon(painter: QPainter, rect: QRect, icon, dpr: float) -> None:
+    """The icon (a pixmap at the screen's DPR) or the --well placeholder
+    tile, its corner snapped to a device pixel (crisp at 125%). The caller
+    saves/restores."""
+    x, y = round(rect.left() * dpr) / dpr, round(rect.top() * dpr) / dpr
+    if icon is not None and not icon.isNull():
+        painter.drawPixmap(QPointF(x, y), icon)
+        return
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(theme.WELL))
+    painter.drawRoundedRect(QRectF(x, y, ROW_ICON_PX, ROW_ICON_PX), ROW_ICON_RADIUS, ROW_ICON_RADIUS)
+
+
 def paint_update_button(painter: QPainter, rect, widget: QWidget, hover: bool, enabled: bool) -> None:
     """.vh-update-btn: --panel-2 fill, 1px --warn border (--muted while
     hovered: button:hover:not(:disabled)), --radius corners, a bold "↑" in
@@ -233,15 +272,21 @@ def paint_row_content(painter: QPainter, rect, info: RowInfo, view: "BepInExModL
                       hover: str | None, enabled: bool, toggle_t: float | None = None) -> None:
     """The two text lines and the right-end pieces of a row painted at item
     rect `rect` (the card itself is already there, from the base paint).
-    The text block takes the card's width less ROW_PAD each side and the
-    pieces at the right (ROW_PAD before them); the name is elided before
+    The icon tile sits at the left (icon_rect); the text block takes the
+    card's width from ROW_PAD past the tile to ROW_PAD before the pieces at
+    the right; the name is elided before
     its marks, the marks never shrink (.vh-row-name: the spans are
     flex: none, the name has the ellipsis). `toggle_t`: the toggle's knob
     mid-slide (paint_toggle's t). The caller saves/restores."""
     viewport = view.viewport().rect()
     card = card_rect(rect, viewport, view)
     pieces = layout_row(info, rect, viewport, view)
-    left = card.left() + ROW_PAD
+    dpr = view.devicePixelRatioF()
+    tile = icon_rect(card)
+    painter.save()
+    paint_row_icon(painter, tile, info.icon, dpr)
+    painter.restore()
+    left = tile.right() + 1 + ROW_PAD  # the text block, right of the icon (was card.left() + ROW_PAD)
     right = card.right() - ROW_PAD
     if pieces:
         right = min(r.left() for r in pieces.values()) - 1 - ROW_PAD
@@ -261,11 +306,14 @@ def paint_row_content(painter: QPainter, rect, info: RowInfo, view: "BepInExModL
         marks.append((ERROR_MARK, theme.DANGER))
     marks_w = len(marks) * (MARK_PX + NAME_GAP)
     pills = [(t, c) for t, c, on in ((DISABLED_TEXT, theme.WARN, info.disabled),
-                                     (DEPRECATED_TEXT, theme.DANGER, info.deprecated)) if on]
+                                     (DEPRECATED_TEXT, theme.DANGER, info.deprecated),
+                                     (FILES_MISSING_TEXT, theme.WARN, info.files_missing)) if on]
     bfont = badge_font(view)
     x = left
     for text, color in pills:  # before the name, never shrunk (like the marks)
         w = badge_width(bfont, text)
+        if x + w > left + width:  # 0.6.27: a pill that doesn't fit is left out, never painted over the controls
+            break
         paint_row_badge(painter, QRectF(x, top + (nm.height() - BADGE_HEIGHT) / 2, w, BADGE_HEIGHT), bfont, text, color)
         x += w + NAME_GAP
     name_w = max(0, left + width - x - marks_w)
@@ -277,7 +325,6 @@ def paint_row_content(painter: QPainter, rect, info: RowInfo, view: "BepInExModL
     line1 = QRect(x, top, name_w, nm.height())
     painter.drawText(line1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
     x += nm.horizontalAdvance(name) + NAME_GAP
-    dpr = view.devicePixelRatioF()
     for mark, color in marks:
         painter.drawPixmap(QPointF(x, top + (nm.height() - MARK_PX) // 2), icons.pixmap(mark, color, MARK_PX, dpr))
         x += MARK_PX + NAME_GAP

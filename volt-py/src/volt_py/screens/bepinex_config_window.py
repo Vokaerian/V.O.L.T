@@ -88,6 +88,7 @@ from PySide6.QtWidgets import (
 from volt_py import bepinex_config as bc
 from volt_py import theme
 from volt_py.applog import log
+from volt_py.screens.error_box import show_error
 
 WINDOW_SIZE = (1000, 680)  # the mockup's artboard
 RAIL_WIDTH = 300
@@ -114,15 +115,15 @@ SEARCH_DEBOUNCE_MS = 150
 SCROLL_MS = 150
 SCROLL_LEAD = 4  # px above the target the scroll lands at (the mockup's offsetTop - 4)
 
-NO_FILES = "No config files."
-NEVER_RUN = ("Only BepInEx's own config exists so far.\n\nBepInEx writes each mod's default config file "
-             "the first time the game runs with the mod installed - run this profile once to generate "
-             "them. BepInEx.cfg is listed on the left if you want to edit it.")
+NO_FILES = "No mod settings files yet."
+NEVER_RUN = ("Only the mod loader's own settings file (BepInEx.cfg) exists so far.\n\nEach mod writes its "
+             "settings file the first time the game runs with it installed - start this profile once with Modded "
+             "to create them. BepInEx.cfg is listed on the left if you want to edit it.")
 NO_TEXT_FILES = "Only non-text files here. \"Show all files\" lists them."
 NO_MATCHES = "No matches"
-PICK_A_FILE = "Select a config file on the left."
-RAW_BANNER = "No BepInEx setting metadata found in this file - showing raw text instead of a parsed form."
-BINARY_BANNER = "This file isn't text (or isn't UTF-8), so it can't be shown here. Open externally to view it."
+PICK_A_FILE = "Pick a settings file on the left."
+RAW_BANNER = "This file has no setting descriptions VOLT can read, so it's shown as plain text."
+BINARY_BANNER = "This file isn't plain text, so it can't be shown here. Open externally to view it."
 NO_SETTINGS_MATCH = 'No settings match "{query}" in this file.'
 NO_SECTIONS_MATCH = "No sections match."
 FILTER_TIP = "Off: highlight matches and step through them. On: hide settings that do not match."
@@ -612,7 +613,7 @@ class BepInExConfigWindow(QDialog):
         column.setContentsMargins(10, 10, 10, 10)
         column.setSpacing(8)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search config files…")
+        self.search.setPlaceholderText("Search settings files…")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(lambda _text: self._rebuild_list())
         column.addWidget(self.search)
@@ -1038,7 +1039,10 @@ class BepInExConfigWindow(QDialog):
                 self._text = bc.read_text(f.path)
             except OSError as err:
                 log(f"edit config: read {f.path} failed: {err}")
-                self._warn("Couldn't read the file", f"{f.rel}\n\n{err}")
+                self._warn("Couldn't read the file", f"VOLT couldn't open {f.rel}.",
+                           means="Nothing was changed. It's shown empty and read-only.",
+                           tryit="Close the game if it's running, then pick the file again.",
+                           details=f"{f.path}\n{err}")
                 self._text = None
             if self._text is None:
                 self.raw_edit.setPlainText("")
@@ -1314,9 +1318,8 @@ class BepInExConfigWindow(QDialog):
         log(f"edit config: discard prompt for {self._current.rel} -> {'discard' if confirmed else 'cancel'}")
         return confirmed
 
-    def _warn(self, title: str, message: str) -> None:
-        log(f"edit config: warning shown: {title}: {message}")
-        QMessageBox.warning(self, title, message)
+    def _warn(self, title: str, what: str, *, means: str = "", tryit: str = "", details: str = "") -> None:
+        show_error(self, title, what, means=means, tryit=tryit, details=details, log_prefix="edit config: ")
 
     def reject(self) -> None:  # Close, Esc and the title-bar X all land here
         if self._confirm_discard():
@@ -1343,7 +1346,10 @@ class BepInExConfigWindow(QDialog):
             bc.write_text(f.path, text)
         except OSError as err:
             log(f"edit config: save {f.path} failed: {err}")
-            self._warn("Couldn't save", f"{f.rel}\n\n{err}")
+            self._warn("Couldn't save", f"Couldn't save {f.rel}.",
+                       means="Your edits are still on screen but weren't written to the file.",
+                       tryit="Close the game (it may be using the file), then press Save again.",
+                       details=f"{f.path}\n{err}")
             return
         log(f"edit config: saved {f.rel}: {what}")
         self._show_file(f)  # re-read from disk: what the form shows is what was written
@@ -1373,7 +1379,10 @@ class BepInExConfigWindow(QDialog):
             f.path.unlink()
         except OSError as err:
             log(f"edit config: delete {f.path} failed: {err}")
-            self._warn("Couldn't delete", f"{f.rel}\n\n{err}")
+            self._warn("Couldn't delete", f"Couldn't delete {f.rel}.",
+                       means="The file is still there.",
+                       tryit="Close the game (it may be using the file), then try again.",
+                       details=f"{f.path}\n{err}")
             return
         log(f"edit config: deleted {f.rel}")
         self._current = None

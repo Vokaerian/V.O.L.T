@@ -164,6 +164,7 @@ from volt_py.mod_decorations import RowDecor
 from volt_py.screens.collection_dialog import CollectionDialog
 from volt_py.screens.details_panel import DetailsPanel
 from volt_py.screens.download_bar import DownloadBar
+from volt_py.screens.error_box import show_error
 from volt_py.screens.first_run_widgets import EmptyStateCard
 from volt_py.screens.help_window import HelpWindow
 from volt_py.screens.mod_list import ModListView, mod_matches
@@ -292,8 +293,9 @@ MODDED_OFFLINE_OFF_NOTE = ("This load order's Offline mods aren't linked in: tha
                            "the load order picker).")
 VANILLA_TOOLTIP = ("Launch a clean RimWorld: only Core and your DLCs, no mods, with its own saves and settings in "
                    "VOLT's vanilla-data folder. Your normal RimWorld data folder isn't touched.")
-PUSH_TOOLTIP = "Save this load order, then write its active list to the game's ModsConfig.xml."
-PUSH_OWN_DATA_NOTE = "Modded Run for this load order doesn't need a Push: it uses its own game data."
+PUSH_TOOLTIP = ("Save this load order, then write its active list to ModsConfig.xml, the file RimWorld reads its "
+                "mod list from.")
+PUSH_OWN_DATA_NOTE = "Modded doesn't need a Push for this load order: it uses its own game data."
 # The actions column's Offline mods... button (0.6.16; shown only with the load order's own game data on).
 OFFLINE_TOOLTIP = "Choose which mods get this load order's own frozen copy, not updated by Steam."
 
@@ -1006,9 +1008,13 @@ class RimWorldMainScreen(QWidget):
             if not game_dir:
                 self._warn(
                     "Couldn't set game folder",
-                    f'"{picked}" doesn\'t look like a RimWorld install folder '
-                    "(expected Data/Core or the RimWorld executable inside it).",
-                    parent,
+                    "That folder doesn't look like where RimWorld is installed.",
+                    means="VOLT looks for Data/Core or RimWorld's .exe inside the folder you pick. The game folder "
+                          "wasn't changed.",
+                    tryit="Pick the folder that holds RimWorld's .exe, or press Autodetect. In Steam: right-click "
+                          "RimWorld > Manage > Browse local files shows it.",
+                    details=f"Picked: {picked}",
+                    parent=parent,
                 )
                 return
             patch = {"game_dir": str(game_dir), "game_source": "manual"}
@@ -1016,16 +1022,23 @@ class RimWorldMainScreen(QWidget):
             if not (Path(picked).name.lower() == "config" or mods_config.mods_config_path(picked).exists()):
                 self._warn(
                     "Couldn't set config folder",
-                    f'"{picked}" doesn\'t look like RimWorld\'s Config folder '
-                    "(expected a folder named Config, or one containing ModsConfig.xml).",
-                    parent,
+                    "That folder doesn't look like RimWorld's Config folder.",
+                    means="It should be named Config, or hold ModsConfig.xml (the file RimWorld reads its mod list "
+                          "from). The config folder wasn't changed.",
+                    tryit="Press Autodetect, or pick the Config folder inside RimWorld's save data folder "
+                          "(usually AppData\\LocalLow\\Ludeon Studios\\RimWorld by Ludeon Studios).",
+                    details=f"Picked: {picked}",
+                    parent=parent,
                 )
                 return
             patch = {"config_dir": picked}
         try:
             self._settings.update(patch)
         except OSError as err:
-            self._warn("Couldn't save settings", str(err), parent)
+            self._warn("Couldn't save settings", "VOLT couldn't save your settings.",
+                       means="The change you made won't be remembered next time VOLT starts.",
+                       tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                       details=str(err), parent=parent)
             return
         log(f"browse {kind} folder: picked {picked}, saved {patch}")
         self._reload_for_paths()
@@ -1053,7 +1066,10 @@ class RimWorldMainScreen(QWidget):
             try:
                 self._settings.update(patch)
             except OSError as err:
-                self._warn("Couldn't save settings", str(err), parent)
+                self._warn("Couldn't save settings", "VOLT couldn't save your settings.",
+                           means="The change you made won't be remembered next time VOLT starts.",
+                           tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                           details=str(err), parent=parent)
                 return
         self._reload_for_paths()
         game = found["game"]
@@ -1063,7 +1079,11 @@ class RimWorldMainScreen(QWidget):
         else:
             # ponytail: a warning box - App.jsx says this in the status bar
             # (kind 'warn'), which this port doesn't have yet.
-            self._warn("Autodetect", "Autodetect didn't find a RimWorld install. Please locate it manually.", parent)
+            self._warn("Autodetect", "VOLT couldn't find RimWorld on this computer.",
+                       means="Autodetect looks in Steam's and GOG's usual install folders.",
+                       tryit="Use Browse to pick the folder RimWorld is installed in. In Steam: right-click RimWorld > "
+                             "Manage > Browse local files shows it.",
+                       details=f"Looked in: {clip(found['tried'])}", parent=parent)
 
     def _show_settings(self) -> None:
         log("settings window opened")
@@ -1075,7 +1095,11 @@ class RimWorldMainScreen(QWidget):
 
     def _show_help(self) -> None:
         log("help window opened")
-        HelpWindow(RIMWORLD_HELP_ENTRIES, parent=self).exec()
+        HelpWindow(RIMWORLD_HELP_ENTRIES, parent=self, report={
+            "game": "RimWorld", "slug": GAME_SLUG, "game_dir": self.game_dir, "profile_label": "Load order",
+            "profile": self.load_order_picker.currentText() if self.current_load_order else None,
+            "log_path": self._log_path,
+        }).exec()
         log("help window closed")
 
     def _apply_paths(self) -> None:
@@ -1396,12 +1420,14 @@ class RimWorldMainScreen(QWidget):
     def _pane_name(self, pane: ModListView) -> str:
         return "Active" if pane is self.active_list else "Inactive"
 
-    def _warn(self, title: str, message: str, parent: QWidget | None = None) -> None:
-        """QMessageBox.warning, logged too - so a failure nobody saw on screen
-        still shows up in volt.log. parent: a dialog showing the failure (the
-        Rules window), so the box sits over it; else this screen."""
-        log(f"warning shown: {title}: {message}")
-        QMessageBox.warning(parent if parent is not None else self, title, message)
+    def _warn(self, title: str, what: str, *, means: str = "", tryit: str = "", details: str = "",
+              parent: QWidget | None = None) -> None:
+        """The friendly error box (screens/error_box.py, 0.6.24): what happened /
+        what it means / what to try, plus Copy details for the raw detail;
+        logged there with every part, so a failure nobody saw on screen still
+        shows up in volt.log. parent: a dialog showing the failure (the Rules
+        window), so the box sits over it; else this screen."""
+        show_error(parent if parent is not None else self, title, what, means=means, tryit=tryit, details=details)
 
     def _notice(self, title: str, message: str) -> None:
         """A success notice (_Notice): non-modal, silent, closes itself after
@@ -1575,7 +1601,10 @@ class RimWorldMainScreen(QWidget):
         try:
             result = mods.scan_mod_roots(roots)
         except OSError as err:  # an unreadable root (scan_dir re-raises)
-            self._warn("Rescan failed", str(err))
+            self._warn("Rescan failed", "VOLT couldn't read your mod folders.",
+                       means="The mod lists on screen weren't updated.",
+                       tryit="Check the game folder in Settings, close RimWorld if it's running, then press Rescan.",
+                       details=str(err))
             return False
         log(f"rescan: {len(result['mods'])} mods, {len(result['problems'])} scan problems")
         for problem in result["problems"]:
@@ -1719,7 +1748,10 @@ class RimWorldMainScreen(QWidget):
             try:
                 active = load_orders.load_load_order(self.app_root, self.current_load_order)["active"]
             except (OSError, ValueError) as err:
-                self._warn("Couldn't load load order", str(err))
+                self._warn("Couldn't open load order", "VOLT couldn't read this load order's saved list.",
+                           means="Its file may be damaged, or made by a newer VOLT. Nothing was changed.",
+                           tryit="Pick another load order, or delete this one and create it again.",
+                           details=str(err))
         if self.current_load_order and self._offline_job is None:
             offline_mods.sweep(self._load_order_dir())  # stale .tmp- / .del- leftovers (never mid-job)
         self._fp_cache.clear()  # opening a load order walks its Offline mods' live sources afresh (0.6.18)
@@ -1866,12 +1898,12 @@ class RimWorldMainScreen(QWidget):
             lines.append(f"{o} About.xml rule{'' if o == 1 else 's'} overridden by community sorting rules.")
         if uo:
             lines.append(
-                f"{uo} community, About.xml or dependency rule{'' if uo == 1 else 's'} "
+                f"{uo} community, About.xml or required-mod rule{'' if uo == 1 else 's'} "
                 "overridden by your own sorting rules."
             )
         if d:
             lines.append(
-                f"{d} dependency ordering{'' if d == 1 else 's'} not applied: "
+                f"{d} required-mod ordering{'' if d == 1 else 's'} not applied: "
                 "a community or About.xml load order rule says the opposite."
             )
         return "\n".join(lines)
@@ -1926,7 +1958,10 @@ class RimWorldMainScreen(QWidget):
             raw = self._busy(read)
         except (OSError, ValueError) as err:
             log(f"import from {source} failed: {err!r}")
-            self._warn("Import failed", str(err))
+            self._warn("Import failed", f"Couldn't import from {source}.",
+                       means=f"{err} Your lists are unchanged.",
+                       tryit="Check what you're importing (and your internet connection for a link), then try again.",
+                       details=f"{source}: {err!r}")
             return False
         self._apply_import(raw, source)
         return True
@@ -1960,8 +1995,9 @@ class RimWorldMainScreen(QWidget):
         if len(ids) == len(official):
             self._warn(
                 "Import",
-                f"None of the {skipped} Workshop mods on the page are installed, so nothing was imported. "
-                "Subscribe to them on Steam, rescan, then re-import.",
+                f"None of the {skipped} Workshop mods on the page are installed, so nothing was imported.",
+                means="VOLT can only add mods that are on your computer.",
+                tryit="Subscribe to them on Steam, press Rescan, then import again.",
             )
             return None
         self._history.append(self.active_list.mod_ids())
@@ -1986,13 +2022,12 @@ class RimWorldMainScreen(QWidget):
                 if pending else ""
             )
             + (
-                f" {skipped} Workshop mods on the page aren't installed and were skipped; "
-                "subscribe to them on Steam, rescan, then re-import."
+                f" {skipped} Workshop mods on the page aren't installed and were skipped."
                 if skipped else ""
             )
         )
         if skipped:
-            self._warn("Import", message)
+            self._warn("Import", message, tryit="Subscribe to the skipped mods on Steam, press Rescan, then import again.")
         else:
             self._notice("Import", message)
         return ids
@@ -2225,7 +2260,10 @@ class RimWorldMainScreen(QWidget):
             url = self._busy(lambda: mod_list_io.publish_rentry(text, app_version))
         except (OSError, ValueError) as err:
             log(f"export to rentry.co failed: {err!r}")
-            self._warn("Export failed", str(err))
+            self._warn("Export failed", "Couldn't publish your list to rentry.co.",
+                       means=f"{err} Nothing was published.",
+                       tryit="Check your internet connection and try again in a minute, or export to the clipboard instead.",
+                       details=repr(err))
             return
         QGuiApplication.clipboard().setText(url)
         log(f"export: published to {url}, URL copied to clipboard")
@@ -2254,7 +2292,10 @@ class RimWorldMainScreen(QWidget):
             write_text_atomic(path, mods_config.fresh_mods_config(ids, self._game_version, eol))
         except OSError as err:
             log(f"export to RimPy .xml {path} failed: {err!r}")
-            self._warn("Export failed", str(err))
+            self._warn("Export failed", "Couldn't save the .xml file.",
+                       means="Nothing was written.",
+                       tryit="Pick a different place to save it (one you can write to) and try again.",
+                       details=f"{path}\n{err}")
             return
         log(f"export: wrote {len(ids)} mods to {path}")
         self._notice("Export", f"Exported {len(ids)} mods to {path}.")
@@ -2357,7 +2398,10 @@ class RimWorldMainScreen(QWidget):
             load_orders.set_own_data(self.app_root, slug, on)
         except (OSError, ValueError) as err:
             log(f"own game data {'on' if on else 'off'} for {slug} ({name!r}) failed: {err!r}")
-            self._warn("Couldn't change own game data", str(err))
+            self._warn("Couldn't change own game data", "VOLT couldn't change this setting.",
+                       means="The load order still uses the game data it used before.",
+                       tryit="Close RimWorld if it's running, then try again.",
+                       details=str(err))
             return
         self._lo_own_data[slug] = on
         log(f"own game data {'on' if on else 'off'} for {slug} ({name!r}), data folder {data}")
@@ -2391,7 +2435,10 @@ class RimWorldMainScreen(QWidget):
             log(f"deleted load order {slug} ({name!r})")
         except (OSError, ValueError) as err:  # e.g. a locked file: part of the folder may be gone
             log(f"delete load order {slug} ({name!r}) failed: {err!r}")
-            self._warn("Couldn't delete load order", str(err))
+            self._warn("Couldn't delete load order", f'Couldn\'t fully delete "{name}".',
+                       means="Part of its folder may be left; another program (often the game) is probably using it.",
+                       tryit="Close RimWorld and anything showing that folder, then delete it again.",
+                       details=str(err))
         # Reload either way, so the picker matches what's actually left on disk.
         old = self.current_load_order
         self._reload_load_order_picker(select_slug=old)
@@ -2419,7 +2466,10 @@ class RimWorldMainScreen(QWidget):
             manifest = load_orders.create_load_order(self.app_root, name, active=active, inactive=inactive)
         except (OSError, ValueError) as err:
             log(f"{title}: create {name!r} ({counts}){note} failed")
-            self._warn("Couldn't create load order", str(err))
+            self._warn("Couldn't create load order", f'Couldn\'t create "{name.strip()}".',
+                       means="No load order was made.",
+                       tryit="Try a different name, and make sure VOLT's folder isn't read-only or full.",
+                       details=str(err))
             return False
         log(f"{title}: created {name!r} as slug {manifest['slug']} ({counts}){note}")
         self._settings.update({"last_load_order": manifest["slug"]})
@@ -2449,8 +2499,9 @@ class RimWorldMainScreen(QWidget):
         src_slug, src_dir = self.current_load_order, self._load_order_dir()
         entries = self._offline_entries(src_slug)
         if entries and self._offline_job is not None:
-            self._warn("Copy to new load order", "Offline mods are being copied right now. Wait for that to finish "
-                       "(or cancel it), then Copy to new again.")
+            self._warn("Copy to new load order", "Offline mods are being copied right now.",
+                       means="A copy can't start in the middle of that.",
+                       tryit="Wait for it to finish (or cancel it), then press Copy to new again.")
             return
         if not self._create_load_order(
             "Copy to new load order",
@@ -2476,7 +2527,10 @@ class RimWorldMainScreen(QWidget):
             )
         except (OSError, ValueError) as err:
             log(f"save load order {self.current_load_order} ({counts}) failed")
-            self._warn("Save failed", str(err))
+            self._warn("Save failed", "Couldn't save your changes.",
+                       means="Your changes are still on screen, but weren't saved.",
+                       tryit="Make sure VOLT's folder isn't read-only or full, then press Save again.",
+                       details=str(err))
             return
         log(f"saved load order {self.current_load_order} ({counts})")
         self._reset_baseline()
@@ -2485,7 +2539,10 @@ class RimWorldMainScreen(QWidget):
         """Saves the panes into the current load order, then writes ModsConfig.xml."""
         if self.config_dir is None:
             log("push aborted: no config folder set")
-            self._warn("Can't push", "No config folder set — can't write ModsConfig.xml.")
+            self._warn("Can't push", "VOLT doesn't know where RimWorld's Config folder is.",
+                       means="Push writes your list into ModsConfig.xml in that folder, the file RimWorld reads its "
+                             "mod list from.",
+                       tryit="Open Settings and press Autodetect, or Browse to the Config folder.")
             return
         active_ids = self._pane_ids(self.active_list)
         inactive_ids = self._pane_ids(self.inactive_list)
@@ -2518,7 +2575,10 @@ class RimWorldMainScreen(QWidget):
             )
         except (OSError, ValueError) as err:
             log(f"push failed during save/write of load order {self.current_load_order}")
-            self._warn("Push failed", str(err))
+            self._warn("Push failed", "Couldn't push your load order to RimWorld.",
+                       means="Your load order is saved in VOLT, but RimWorld will start with its old mod list.",
+                       tryit="Close RimWorld if it's running, check the Config folder in Settings, then Push again.",
+                       details=f"Config folder: {self.config_dir}\n{err}")
             return
         log(
             f"push: wrote {result['count']} mods to {result['path']} "
@@ -2526,7 +2586,7 @@ class RimWorldMainScreen(QWidget):
         )
         self.status_text.set_status_text(
             f"Pushed {result['count']} active mods to {result['path']}."
-            + (f" Skipped {result['skipped']} without a packageId." if result["skipped"] else "")
+            + (f" Skipped {result['skipped']} without a package ID." if result["skipped"] else "")
         )
 
     # ---- scan issues ----
@@ -2564,7 +2624,10 @@ class RimWorldMainScreen(QWidget):
             self._settings.set_scan_issue_ignored(path, True)
         except (OSError, ValueError) as err:
             log(f"scan issues: ignore {path} ({', '.join(map(str, kinds))}) FAILED: {err!r}")
-            self._warn("Couldn't ignore scan issue", str(err))
+            self._warn("Couldn't ignore scan issue", "VOLT couldn't remember to ignore this issue.",
+                       means="It will keep showing.",
+                       tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                       details=str(err))
             return None
         self._scan_problems = [p for p in self._scan_problems if str(p["path"]) != path]
         log(
@@ -2608,20 +2671,28 @@ class RimWorldMainScreen(QWidget):
         reason = rl.platform_error()
         if reason:
             log(f"run: preflight failed (platform): {reason}")
-            self._warn("Run failed", reason)
+            self._warn("Run failed", "VOLT can't start RimWorld on this system.",
+                       means="Starting the game from VOLT only works on Windows for now.",
+                       tryit="Start the game from Steam or GOG instead.",
+                       details=reason)
             return
         slug, name = self.current_load_order, self.load_order_picker.currentText()
         manifest = None
         if modded:
             if slug is None:
                 log("run: preflight failed (load order): none open")
-                self._warn("Run failed", "Open a load order first.")
+                self._warn("Run failed", "No load order is open.",
+                           means="Modded starts the game with a load order's mods, so it needs one.",
+                           tryit="Pick a load order at the top, or make one with New load order. Vanilla works without one.")
                 return
             try:
                 manifest = load_orders.load_load_order(self.app_root, slug)
             except (OSError, ValueError) as err:
                 log(f"run: preflight failed (load order {slug}): {err!r}")
-                self._warn("Run failed", f"Couldn't read the load order: {err}")
+                self._warn("Run failed", "VOLT couldn't read this load order.",
+                           means="Its file may be damaged. The game wasn't started.",
+                           tryit="Pick another load order, or create this one again.",
+                           details=str(err))
                 return
         own = bool(manifest and manifest["own_data"])
         log(f"run: preflight ({'modded' if modded else 'vanilla'}): game_dir={self.game_dir}, load order={slug} "
@@ -2629,9 +2700,9 @@ class RimWorldMainScreen(QWidget):
             f"unsaved changes={'yes' if self._dirty() else 'none'}")
         if modded and self._dirty() and not self._confirm(
             "Unsaved load order changes",
-            ("The active list has unsaved changes. Run doesn't save them: RimWorld starts with this load order's "
+            ("You have unsaved changes. Modded doesn't save them: RimWorld starts with this load order's "
              "SAVED mod list (in its own game data). Save first to play with your changes.") if own else
-            ("The active list has unsaved changes. Run doesn't save or push them: "
+            ("You have unsaved changes. Modded doesn't save or push them: "
              "RimWorld starts with the mod list last pushed to its ModsConfig.xml."),
             confirm_label="Run without saving",
         ):
@@ -2649,7 +2720,10 @@ class RimWorldMainScreen(QWidget):
                            official_ids=sort.official_ids(self._live_mods))  # Vanilla: Core + DLCs only (0.6.18)
         except (rl.LaunchError, OSError) as err:
             log(f"run: failed: {err!r}")
-            self._warn("Run failed", str(err))
+            self._warn("Run failed", "Couldn't start RimWorld.",
+                       means=str(err),
+                       tryit="Make sure RimWorld isn't already open (and Steam is running for a Steam copy), then try again.",
+                       details=repr(err))
             return
         n = res.get("linked") or 0
         offline = f", {n} Offline mod{'' if n == 1 else 's'}" if n else ""
@@ -2701,7 +2775,10 @@ class RimWorldMainScreen(QWidget):
             rec = rl.recover(self.app_root)
         except OSError as err:
             log(f"run: recovery failed: {err!r}")
-            self._warn("Couldn't check the last run", str(err))
+            self._warn("Couldn't check the last run", "VOLT couldn't check how the last game session ended.",
+                       means="Some files from that run may still be in the game's Mods folder.",
+                       tryit="Press Modded or Vanilla; VOLT tidies up before every start.",
+                       details=str(err))
             return
         state = rec["state"]
         if state == "none":
@@ -2718,8 +2795,11 @@ class RimWorldMainScreen(QWidget):
         failed, left = result.get("failed") or [], result.get("left") or []
         if failed or left:
             lines = [f"{p}: {why}" for p, why in failed + left]
-            self._warn("Offline mods", f"After {after}, not everything could be put back in the game's Mods folder"
-                       + (" (VOLT retries at the next start)" if failed else "") + ":\n" + "\n".join(lines))
+            self._warn("Offline mods", f"After {after}, not everything could be put back in the game's Mods folder.",
+                       means="Some Offline mod links are left in the Mods folder"
+                             + (" (VOLT retries at the next start)." if failed else "."),
+                       tryit="Close RimWorld fully, then restart VOLT.",
+                       details="\n".join(lines))
             self.status_text.set_status_text(f"Offline mods: {len(failed) + len(left)} item(s) left after {after}.", "warn")
         elif result.get("unlinked") or result.get("restored"):
             self.status_text.set_status_text(f"Removed this run's Offline mods from the Mods folder ({after}).")
@@ -2791,8 +2871,10 @@ class RimWorldMainScreen(QWidget):
         self.status_text.set_status_text(text, kind)
         self._apply_load_order_state()
         if "error" in payload:
-            self._warn("Offline mods", f"Couldn't remove this run's Offline mods from the Mods folder "
-                       f"({payload['error']}). VOLT retries at the next start.")
+            self._warn("Offline mods", "Couldn't remove this run's Offline mods from the Mods folder.",
+                       means="VOLT retries at the next start.",
+                       tryit="Close RimWorld fully, then restart VOLT.",
+                       details=payload["error"])
             return
         self._report_cleanup(payload["result"], after="this run")
 
@@ -3033,7 +3115,9 @@ class RimWorldMainScreen(QWidget):
         if not rows:
             return
         if self.game_dir is None:  # a pending row can't be on screen without a game, but never trust the caller
-            self._warn("Subscribe", "RimWorld install folder is not set.")
+            self._warn("Subscribe", "VOLT doesn't know where RimWorld is installed yet.",
+                       means="This needs RimWorld's game folder.",
+                       tryit="Open Settings and press Autodetect, or Browse to the folder RimWorld is installed in.")
             return
         available, reason = self._refresh_steam()
         if not available:
@@ -3041,10 +3125,12 @@ class RimWorldMainScreen(QWidget):
             log(f"steam subscribe batch: {n} row(s) left pending - Steam isn't available ({reason})")
             self._warn(
                 "Subscribe",
-                f"{n} Workshop mod{' isn' if n == 1 else 's aren'}'t installed and stay{'s' if n == 1 else ''} pending: "
-                "Steam isn't available (not a Steam install, or the Steamworks library isn't installed). Switch "
-                f"Settings > Steam to a SteamCMD option to download {'it' if n == 1 else 'them'} without Steam."
-                + (f"\n\n{reason}" if reason else ""),
+                f"{n} Workshop mod{' isn' if n == 1 else 's aren'}'t installed and stay{'s' if n == 1 else ''} pending.",
+                means="Steam isn't available: this isn't a Steam copy of RimWorld, or Steam's helper library "
+                      "isn't installed.",
+                tryit=f"Switch Settings > Steam to a SteamCMD option (VOLT's own downloader) to download "
+                      f"{'it' if n == 1 else 'them'} without Steam.",
+                details=reason or "",
             )
             return
         rows_by_wid: dict[str, list[str]] = {}
@@ -3105,7 +3191,8 @@ class RimWorldMainScreen(QWidget):
         self.rescan()  # _scan + _show_lists(on-screen Active) + load-order state; warns itself if the scan fails
         self._refresh_workshop_rows()  # the downloading look is gone even if the scan failed
         if failure:
-            self._warn("Subscribe", failure)
+            self._warn("Subscribe", "Couldn't subscribe on Steam.", means=failure,
+                       tryit="Make sure Steam is running and you're signed in, then try again.")
             return
         total = len(wids)
         ok = total - len(failed)
@@ -3119,14 +3206,19 @@ class RimWorldMainScreen(QWidget):
         elif total == 1:
             self._warn(
                 "Subscribe",
-                f"Couldn't subscribe to Workshop item {wids[0]}: {failed[0]['error']}. You can open its Workshop page in "
-                f"Steam instead: {steam_ops.workshop_page(wids[0])}",
+                f"Couldn't subscribe to Workshop item {wids[0]}.",
+                means=f"{str(failed[0]['error']).rstrip('.')}. It stays pending.",
+                tryit=f"Press Subscribe on its row to try again, or open its Workshop page in Steam: "
+                      f"{steam_ops.workshop_page(wids[0])}",
+                details=str(failed[0]['error']),
             )
         else:
             self._warn(
                 "Subscribe",
-                f"Subscribed to {ok} of {total} Workshop items on Steam; {len(failed)} couldn't be ({failed[0]['error']}) "
-                "and stay pending (Subscribe on a row retries it; the log has each one's reason).",
+                f"Subscribed to {ok} of {total} Workshop items on Steam; {len(failed)} couldn't be.",
+                means=f"Those stay pending. The first reason: {failed[0]['error']}",
+                tryit="Press Subscribe on a pending row to try it again.",
+                details="\n".join(f"{f.get('wid', '?')}: {f.get('error', '')}" for f in failed),
             )
 
     def _download_via_steamcmd(self, row_ids: list[str], start_text: str | None = None) -> None:
@@ -3157,7 +3249,9 @@ class RimWorldMainScreen(QWidget):
             return
         title = steam_ops.fetch_label("steamcmd")  # the SteamCMD fetch's word ("Download"), 0.6.14
         if self.game_dir is None:  # a pending row can't be on screen without a game, but never trust the caller
-            self._warn(title, "RimWorld install folder is not set.")
+            self._warn(title, "VOLT doesn't know where RimWorld is installed yet.",
+                       means="This needs RimWorld's game folder.",
+                       tryit="Open Settings and press Autodetect, or Browse to the folder RimWorld is installed in.")
             return
         wids = list(dict.fromkeys(mod_list_io.not_found_workshop_id(i, self._mods) for i in rows))
         via = effective_acquire_via(self._settings.get()["steam_acquire_via"], self._game_source)
@@ -3255,9 +3349,10 @@ class RimWorldMainScreen(QWidget):
                     f"downloaded and stay pending ({title} on a row retries it)")
         text += f" ({why})" if why else ""
         text += "."
-        if len(wids) == 1:
-            text += f" You can open its Workshop page in Steam instead: https://steamcommunity.com/sharedfiles/filedetails/?id={wids[0]}"
-        self._warn(title, text)
+        self._warn(title, text,
+                   tryit=f"Open its Workshop page in Steam instead: https://steamcommunity.com/sharedfiles/filedetails/?id={wids[0]}"
+                   if len(wids) == 1 else f"Press {title} on a pending row to try it again.",
+                   details=str(why or ""))
         return False
 
     @Slot(object)
@@ -3323,7 +3418,9 @@ class RimWorldMainScreen(QWidget):
             if self._dl is not None:
                 self._dl = replace(self._dl, pausing=False)
                 self._render_download_bar()
-            self._warn("Pause download", str(err) or repr(err))
+            self._warn("Pause download", "Couldn't pause the download.",
+                       means="It may still be running.", tryit="Wait for it to finish, or restart VOLT.",
+                       details=str(err) or repr(err))
             return
         log(f"steamcmd download: cancel {'sent' if stopped else 'found nothing running'}")
         if not stopped and self._dl is not None:
@@ -3384,12 +3481,15 @@ class RimWorldMainScreen(QWidget):
         ):
             return
         if self.game_dir is None:  # a scanned mod can't be on screen without a game, but never trust the caller
-            self._warn("Unsubscribe", "RimWorld install folder is not set.")
+            self._warn("Unsubscribe", "VOLT doesn't know where RimWorld is installed yet.",
+                       means="This needs RimWorld's game folder.",
+                       tryit="Open Settings and press Autodetect, or Browse to the folder RimWorld is installed in.")
             return
         available, reason = self._refresh_steam()
         if not available:
             log(f"unsubscribe {wid} ({name}): refused - Steam isn't available ({reason})")
-            self._warn("Unsubscribe", reason)
+            self._warn("Unsubscribe", "Couldn't unsubscribe: Steam isn't available.", means=reason,
+                       tryit="Start Steam and sign in, then try again.")
             return
         self._unsubscribing.add(mod_id)
         self._notice("Unsubscribe", f"Unsubscribing from {name}...")
@@ -3417,7 +3517,9 @@ class RimWorldMainScreen(QWidget):
             r = self._busy(lambda: steam_cmd.delete_item(self.game_dir / "Mods" if self.game_dir else None, path))
         except (ValueError, OSError) as err:  # not a SteamCMD folder directly under Mods (a stale scan), or the marker read
             log(f"remove download {path} ({name}): FAILED - {err}")
-            self._warn("Remove", str(err))
+            self._warn("Remove", f"Couldn't remove {name}'s download.",
+                       means="Its files weren't touched. The mod list may be out of date.",
+                       tryit="Press Rescan, then try again.", details=str(err))
             return
         left = len(r["skipped"])
         if r["gone"]:
@@ -3440,8 +3542,10 @@ class RimWorldMainScreen(QWidget):
                    else "its folder couldn't be deleted")
             self._warn(
                 "Remove",
-                f"Couldn't fully remove {name}'s SteamCMD download: {why}, so it's still in {r['path']}. Close whatever "
-                "is using it (the game, say) and remove it again.",
+                f"Couldn't fully remove {name}'s SteamCMD download: {why}.",
+                means="Its folder is still there.",
+                tryit="Close whatever is using it (the game, say) and remove it again.",
+                details=str(r["path"]),
             )
 
     @Slot(object)
@@ -3459,7 +3563,7 @@ class RimWorldMainScreen(QWidget):
         self._apply_games_button()
         wid, name, r, failure = result["wid"], result["name"], result["result"], result["failure"]
         if failure:
-            self._warn("Unsubscribe", failure)
+            self._warn("Unsubscribe", f"Couldn't unsubscribe from {name}.", means=failure)  # failure says what to try
             return
         left = len(r["skipped"])
         log(f"unsubscribe {wid}: verified; Workshop folder {r['path']} "
@@ -3471,7 +3575,8 @@ class RimWorldMainScreen(QWidget):
             else "."
         )
         if left:
-            self._warn("Unsubscribe", text)
+            self._warn("Unsubscribe", text, tryit="Close whatever is using those files (the game, say), then delete "
+                                                  "the folder by hand.", details=str(r["path"]))
         else:
             self._notice("Unsubscribe", text)
 
@@ -3492,10 +3597,14 @@ class RimWorldMainScreen(QWidget):
                 log(f"fetch: {mod_id} has no library copy - downloading it with SteamCMD instead")
                 self._subscribe(mod_id)
                 return
-            self._warn("Fetch", f"The SteamCMD library has no copy of {mod_id}, so there's nothing to fetch.")
+            self._warn("Fetch", f"VOLT has no downloaded copy of {mod_id}.",
+                       means="Fetch only puts back mods VOLT downloaded before (its SteamCMD library).",
+                       tryit="Download it again from the mod's row or menu.")
             return
         if self.game_dir is None:
-            self._warn("Fetch", "RimWorld install folder is not set.")
+            self._warn("Fetch", "VOLT doesn't know where RimWorld is installed yet.",
+                       means="This needs RimWorld's game folder.",
+                       tryit="Open Settings and press Autodetect, or Browse to the folder RimWorld is installed in.")
             return
         wid = lib[0]
         try:
@@ -3505,7 +3614,8 @@ class RimWorldMainScreen(QWidget):
             if (self.game_dir / "Mods" / wid).exists():
                 self._notice("Fetch", str(err))  # already installed: not an error
             else:
-                self._warn("Fetch", str(err))
+                self._warn("Fetch", f"Couldn't fetch {self._mod_display_name(mod_id)}.", means=str(err),
+                           tryit="Close RimWorld if it's running, then try again.", details=repr(err))
             return
         log(f"fetch: {mod_id} ({wid}) copied into {dest}, rescanning")
         self.rescan()
@@ -3529,7 +3639,9 @@ class RimWorldMainScreen(QWidget):
         and reported; the row is dropped either way (a leftover then shows
         in Inactive)."""
         if self.game_dir is None:
-            self._warn("Remove completely", "RimWorld install folder is not set.")
+            self._warn("Remove completely", "VOLT doesn't know where RimWorld is installed yet.",
+                       means="This needs RimWorld's game folder.",
+                       tryit="Open Settings and press Autodetect, or Browse to the folder RimWorld is installed in.")
             return
         mod = self._mods.get(mod_id)
         name = self._mod_display_name(mod_id)
@@ -3537,12 +3649,14 @@ class RimWorldMainScreen(QWidget):
             plan = self._busy(lambda: mod_removal.plan_removal(self.game_dir, self.app_root, mod_id, mod))
         except OSError as err:
             log(f"remove completely: {mod_id} - scanning FAILED: {err}")
-            self._warn("Remove completely", str(err))
+            self._warn("Remove completely", f"VOLT couldn't check {name}'s files.", means="Nothing was removed.",
+                       tryit="Press Rescan, then try again.", details=str(err))
             return
         log(f"remove completely: {mod_id} ({name}) plan: {clip(plan)}")
         if plan["refuse"]:
             log(f"remove completely: {mod_id} refused - {plan['refuse']}")
-            self._warn("Remove completely", plan["refuse"])
+            self._warn("Remove completely", "Nothing was removed.", means=plan["refuse"],
+                       tryit="See the reason above; Unsubscribe first for a mod Steam still has you subscribed to.")
             return
         wids = mod_removal.workshop_ids(plan)
         if not wids:
@@ -3553,7 +3667,7 @@ class RimWorldMainScreen(QWidget):
             text = (f"{name} has a folder in Steam's Workshop folder ({', '.join(map(str, plan['workshop']))}), and "
                     f"VOLT can't ask Steam whether you're subscribed to it ({reason}), so nothing was removed.")
             log(f"remove completely: {mod_id} refused - Steam isn't available to check {wids} ({reason})")
-            self._warn("Remove completely", text)
+            self._warn("Remove completely", text, tryit="Start Steam and sign in, then try again.", details=reason or "")
             return
         self._unsubscribing.add(mod_id)  # its menu entries grey out meanwhile
         self._notice("Remove completely", f"Asking Steam whether you're subscribed to {name}...")
@@ -3584,13 +3698,15 @@ class RimWorldMainScreen(QWidget):
         self._apply_games_button()
         if result["failure"]:
             log(f"remove completely: {mod_id} refused - Steam couldn't be asked: {result['failure']}")
-            self._warn("Remove completely", f"VOLT couldn't ask Steam whether you're subscribed to {name} "
-                                            f"({result['failure']}), so nothing was removed.")
+            self._warn("Remove completely", f"VOLT couldn't ask Steam whether you're subscribed to {name}.",
+                       means="So nothing was removed.", tryit="Make sure Steam is running, then try again.",
+                       details=str(result["failure"]))
             return
         subscribed = [w for w, sub in result["subscribed"].items() if sub]
         if subscribed:
             log(f"remove completely: {mod_id} refused - Steam reports {subscribed} subscribed")
-            self._warn("Remove completely", mod_removal.subscribed_refusal(name, subscribed))
+            self._warn("Remove completely", mod_removal.subscribed_refusal(name, subscribed),
+                       tryit="Use Unsubscribe on the mod first, then Remove completely.")
             return
         log(f"remove completely: {mod_id} - Steam reports {list(result['subscribed'])} NOT subscribed: leftovers")
         self._remove_completely_confirm(mod_id, name, {**plan, "workshop_not_subscribed": True})
@@ -3637,9 +3753,10 @@ class RimWorldMainScreen(QWidget):
         self._drop_from_load_order(mod_id)
         self.rescan()
         if left:
-            self._warn("Remove completely", f"Removed {name} from the load order, but some files couldn't be deleted:"
-                       + "".join(f"\n\u2022 {x}" for x in left) + "\n\nClose whatever is using them (the game, say) "
-                       "and try again.")
+            self._warn("Remove completely", f"Removed {name} from the load order, but some files couldn't be deleted.",
+                       means="Another program (the game, say) is probably still using them.",
+                       tryit="Close whatever is using them and try again.",
+                       details="\n".join(str(x) for x in left))
         elif results:
             self._notice("Remove completely", f"Removed {name} completely.")
         else:
@@ -3662,7 +3779,8 @@ class RimWorldMainScreen(QWidget):
                                         inactive=[i for i in saved["inactive"] if i != mod_id])
         except (OSError, ValueError) as err:
             log(f"remove completely: dropping {mod_id} from saved load order {self.current_load_order} FAILED: {err}")
-            self._warn("Remove completely", f"Couldn't update the saved load order: {err}")
+            self._warn("Remove completely", "The mod's files were removed, but the saved load order couldn't be updated.",
+                       means="It still lists the mod until you save.", tryit="Press Save.", details=str(err))
             return
         log(f"remove completely: {mod_id} dropped from load order {self.current_load_order} (saved file and screen)")
 
@@ -3690,7 +3808,9 @@ class RimWorldMainScreen(QWidget):
             self._notice("Sync to Steam", "A Sync to Steam is already running.")
             return
         if self.game_dir is None:
-            self._warn("Sync to Steam", "RimWorld install folder is not set.")
+            self._warn("Sync to Steam", "VOLT doesn't know where RimWorld is installed yet.",
+                       means="This needs RimWorld's game folder.",
+                       tryit="Open Settings and press Autodetect, or Browse to the folder RimWorld is installed in.")
             return
         live = self._live_mods  # the real Mods folder's copies, not the load order's Offline overlay
         snapshot = {only: live[only]} if only and only in live else ({} if only else dict(live))
@@ -3700,8 +3820,11 @@ class RimWorldMainScreen(QWidget):
             log(f"{what}: refused - Steam isn't available ({reason}); {count} SteamCMD mod(s) would have been synced")
             self._warn(
                 "Sync to Steam",
-                "Steam isn't available (not a Steam install, or the Steamworks library isn't installed), so nothing "
-                "was synced." + (f"\n\n{reason}" if reason else ""),
+                "Nothing was synced.",
+                means="Steam isn't available: this isn't a Steam copy of RimWorld, or Steam's helper library "
+                      "isn't installed.",
+                tryit="Start Steam and sign in, then try again.",
+                details=reason or "",
             )
             return
         if not count:
@@ -3755,7 +3878,8 @@ class RimWorldMainScreen(QWidget):
         self._apply_load_order_state()
         r, failure = result["result"], result["failure"]
         if failure:
-            self._warn("Sync to Steam", failure)
+            self._warn("Sync to Steam", "Couldn't sync with Steam.", means=failure,
+                       tryit="Make sure Steam is running and you're signed in, then try again.")
             return
         n, pending, failed, total = len(r["synced"]), len(r["pending"]), len(r["failed"]), r["total"]
         if n or pending:
@@ -3792,7 +3916,8 @@ class RimWorldMainScreen(QWidget):
             text += (f" {failed} couldn't be subscribed ({r['failed'][0]['error']}) and stay as SteamCMD downloads until "
                      "the next sync.")
         if failed or pending:
-            self._warn("Sync to Steam", text)
+            self._warn("Sync to Steam", text,  # the summary already says what to do next
+                       details="\n".join(f"{f.get('wid', '?')}: {f.get('error', '')}" for f in r["failed"]))
         else:
             self._notice("Sync to Steam", text)
 
@@ -3811,7 +3936,7 @@ class RimWorldMainScreen(QWidget):
             return "Download this mod with SteamCMD"
         if self._steam_available:
             return "Subscribe on Steam and download this mod"
-        return "Steam isn't available (not a Steam install, or the Steamworks library didn't load)"
+        return "Steam isn't available (not a Steam copy of RimWorld, or Steam's helper library didn't load)"
 
     def _check_missing_workshop(self, parent: QWidget | None = None) -> None:
         """Settings > Steam > Check for missing Workshop mods (App.jsx
@@ -4097,7 +4222,10 @@ class RimWorldMainScreen(QWidget):
                 fn()
             except Exception as err:  # noqa: BLE001 - logged and shown, the app carries on
                 log(f"context menu: {label} on {mod_id} FAILED:\n{traceback.format_exc()}")
-                self._warn(label.rstrip("."), f"Something went wrong: {err!r}. The details are in volt.log.")
+                self._warn(label.rstrip("."), "Something went wrong.",
+                           means="That didn't finish. It's a problem in VOLT, not something you did.",
+                           tryit="Try again. If it keeps happening, use Help > Report a problem.",
+                           details=traceback.format_exc())
 
         item(menu, "Open folder", mod, lambda: self._open_folder(mod["path"]))
         item(menu, "Open URL in browser", urls, lambda: self._open_url(urls["web"]))
@@ -4313,7 +4441,7 @@ class RimWorldMainScreen(QWidget):
         entries = self._offline_entries(slug)
         why = offline_mods.refusal(mod_id, mod, entries) if slug else "Open or create a load order first."
         if why:
-            self._warn("Make Offline", why)
+            self._warn("Make Offline", "This mod can't be made Offline.", means=why)
             return
         # ponytail: one folder measured on the GUI thread for this confirm (a short walk for a normal mod); move it
         # to a worker like the dialog's sizes if a huge mod makes the menu stutter.
@@ -4379,7 +4507,7 @@ class RimWorldMainScreen(QWidget):
         view and reports. One job at a time (_run_block blocks the entry
         points, Modded / Vanilla and the Games button meanwhile)."""
         if self._offline_job is not None:
-            self._warn(what, "Offline mods are already being copied - wait for that to finish.")
+            self._warn(what, "Offline mods are already being copied.", tryit="Wait for that to finish, then try again.")
             return
         lo_dir = load_orders.load_orders_root(self.app_root) / slug
         offline_mods.sweep(lo_dir)
@@ -4497,7 +4625,7 @@ class RimWorldMainScreen(QWidget):
             lines = "\n".join(f"{names.get(pid, pid)}: {why}" for pid, why in failed.items())
             lead = ('The load order was created, but these mods couldn\'t be copied and aren\'t Offline in it:'
                     if what == "Copy to new load order" else "These couldn't be changed:")
-            self._warn(what, f"{summary}\n\n{lead}\n{lines}")
+            self._warn(what, summary, means=lead, tryit="Close RimWorld, then try those mods again.", details=lines)
         elif result.get("cancelled"):
             self._notice(what, "Cancelled: " + (", ".join(done) + "; the rest is unchanged." if done else "nothing changed."))
         else:
@@ -4535,7 +4663,9 @@ class RimWorldMainScreen(QWidget):
             entry = self._settings.add_user_rule(mod=pkg)
         except (OSError, ValueError) as err:
             log(f"rules: create rule for {pkg} FAILED: {err!r}")
-            self._warn("Couldn't create rule", str(err))
+            self._warn("Couldn't create rule", "VOLT couldn't save the new rule.",
+                       means="No rule was added.", tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                       details=str(err))
             return
         log(f"rules: created rule {entry['id']} for {pkg} (saved to settings)")
         self._show_rules(select_id=entry["id"])
@@ -4556,7 +4686,9 @@ class RimWorldMainScreen(QWidget):
             paths.open_path(url)
         except OSError as err:
             log(f"open url {url}: the OS refused: {err!r}")
-            self._warn("Couldn't open URL", str(err))
+            self._warn("Couldn't open URL", "Windows couldn't open that link.",
+                       means="No browser (or Steam) answered.", tryit="Copy the link from the mod's menu and paste it into your browser.",
+                       details=f"{url}\n{err}")
             return
         log(f"open url {url}: opened")
 
@@ -4591,7 +4723,9 @@ class RimWorldMainScreen(QWidget):
             self._settings.set_mod_color(mod_id, color)
         except (OSError, ValueError) as err:
             log(f"mod color for {mod_id} -> {color}: FAILED: {err!r}")
-            self._warn("Couldn't save mod color", str(err))
+            self._warn("Couldn't save mod color", "VOLT couldn't save the color.",
+                       means="It won't be remembered.", tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                       details=str(err))
             return
         log(f"mod color for {mod_id}: {color or 'cleared'} (saved to settings)")
         for pane in (self.inactive_list, self.active_list):

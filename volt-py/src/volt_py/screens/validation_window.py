@@ -40,10 +40,10 @@ from volt_py.screens.details_panel import DetailsPanel
 LABEL = {
     "order-before": "Should be loaded before:",
     "order-after": "Should be loaded after:",
-    "order-dependency": "Should be loaded after (dependencies):",
-    "order-dependency-conflict": "Should be loaded after (dependencies, blocked by a load order rule):",
-    "inactive": "Missing dependencies (inactive):",
-    "not-found": "Missing dependencies (not installed):",
+    "order-dependency": "Should be loaded after (mods it needs):",
+    "order-dependency-conflict": "Should be loaded after (mods it needs, blocked by a load order rule):",
+    "inactive": "Missing required mods (inactive):",
+    "not-found": "Missing required mods (not installed):",
     "conflict": "Incompatible with:",
 }
 
@@ -53,8 +53,8 @@ RAIL_LABEL = {
     "order-after": "Load order",
     "order-dependency": "Load order",
     "order-dependency-conflict": "Load order",
-    "inactive": "Missing dependencies",
-    "not-found": "Missing dependencies",
+    "inactive": "Missing required mods",
+    "not-found": "Missing required mods",
     "conflict": "Conflict",
 }
 
@@ -108,7 +108,7 @@ def detail_text(issue: dict, mods: dict) -> str:
     if kind == "order-dependency":
         return (
             f"{name} requires these mods (modDependencies in About.xml), and they are active but currently load "
-            f"after it. A dependency should load before the mods that need it - move {name} below them, or use "
+            f"after it. A mod it needs should load before it - move {name} below them, or use "
             "Sort."
         )
     if kind == "order-dependency-conflict":

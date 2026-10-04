@@ -19,7 +19,9 @@ Top to bottom (the mockup):
   load-order bar Load order [picker] New.. Copy.. [Unsaved changes ↺] ... [⚠ N updates · Update all]
   checklist      GET STARTED 1. .. 2. .. 3. .. 4. .. ... Hide   (0.6.23, until done / hidden)
   content row    [details | inactive | active] (1.2 : 1 : 1) + actions column (150px)
-  footer         divider; [status text]
+  footer         divider; [status text] ... [Downloading: <mod>  done / total  [pill]] (0.6.25, while a job downloads;
+                 0.6.26: the same bar also in Browse Mods' footer + detail card, _extra_dl_bars;
+                 a job's whole total is known up front: bepinex_load_orders.plan_downloads)
 
 Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
   - Active / Inactive are separate lists, drag-reorder within Active, but
@@ -31,7 +33,9 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
   - No Sync, no Push: one Save (bepinex_load_orders.save_load_order)
     materializes the Active list + every toggle into the load order's real
     tree (enabled = plain file names, everything else .disabled).
-  - Rows are two lines (screens/bepinex_mod_list.py): name, then version ·
+  - Rows are two lines (screens/bepinex_mod_list.py) right of the mod's
+    icon tile (0.6.26: the package's icon.png via mod_icons.py, loaded off
+    the GUI thread on first paint; a plain tile meanwhile / without one): name, then version ·
     last-updated from the Thunderstore metadata cache; per-mod on/off
     toggle on every Active row but the framework's (an unsaved edit, like a
     move: history / dirty / undo cover it, Save materializes it); per-mod
@@ -127,9 +131,18 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     load order or not); the Vanilla button is theme.py's neutral
     "vanilla" variant (a step lighter than Save), Modded stays primary.
   - Row right-click: Open folder (BepInEx/plugins/<Team-Package>), Open on
-    Thunderstore, Open website, Copy package name, Edit config..., Update
-    (when one is available), Uninstall... (remove_mod, confirmed; not the
-    framework).
+    Thunderstore, Open website, Copy Thunderstore name, Edit config..., Update
+    (when one is available), Reinstall (0.6.27), Uninstall... (remove_mod,
+    confirmed; not the framework).
+  - Files missing (0.6.27, PLAN.md §11 (f)): every manifest read
+    (_take_manifest: open, switch, Rescan, after any change) runs
+    bepinex_load_orders.missing_files - one walk of the tree's BepInEx/
+    folder - so a mod whose files were deleted outside VOLT gets a "Files
+    missing" pill (bepinex_mod_list.py), a tooltip line and a "files"
+    warning in the issues window / "⚠ N" count. Reinstall (row menu, any
+    mod, always enabled while idle - a harmless repair on a healthy mod)
+    = reinstall_mod: the same version again from the cached zip (or
+    downloaded, the bar then shows), state / position / config kept.
   - Edit config... (THUNDERSTORE.md §7; screens/bepinex_config_window.py):
     the open load order's BepInEx/config/ files, browsed and edited in a
     split-pane window. Scoped to the whole load order, not a mod (no
@@ -189,19 +202,23 @@ from PySide6.QtWidgets import (
 )
 
 from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, bepinex_share as share, icons, painters, paths, theme
+from volt_py import download_state as ds
 from volt_py import first_run as fr
+from volt_py import mod_icons
 from volt_py import thunderstore as ts
 from volt_py.app_root import migrate_legacy_app_root, resolve_app_root
 from volt_py.applog import clip, init_log, log
 from volt_py.bepinex_install import BEPINEX_DIR, PackageError
 from volt_py.mods import natural_key
 from volt_py.paths import norm
-from volt_py.screens.bepinex_browse_window import DEPRECATED_BANNER, BepInExBrowseWindow
+from volt_py.screens.bepinex_browse_window import DEPRECATED_BANNER, BepInExBrowseWindow, _IconLoader, rounded_pixmap
 from volt_py.screens.bepinex_config_window import BepInExConfigWindow
 from volt_py.screens.bepinex_issues_window import BepInExIssuesWindow
 from volt_py.screens.bepinex_local_import_dialog import LocalModDialog
-from volt_py.screens.bepinex_mod_list import BepInExModListView, RowInfo
+from volt_py.screens.bepinex_mod_list import ROW_ICON_PX, ROW_ICON_RADIUS, BepInExModListView, RowInfo
 from volt_py.screens.details_panel import details_well, readout
+from volt_py.screens.download_bar import PackageDownloadBar
+from volt_py.screens.error_box import show_error
 from volt_py.screens.first_run_widgets import ChecklistStrip, EmptyStateCard
 from volt_py.screens.bepinex_settings_window import BepInExSettingsWindow
 from volt_py.screens.help_window import HelpWindow
@@ -227,55 +244,54 @@ from volt_py.screens.rimworld_main_screen import (
 from volt_py.settings import SettingsStore
 
 IMPORT_TOOLTIP = (
-    "Import a profile from a file (.r2z - VOLT's and r2modman / Thunderstore Mod Manager's profile format) "
-    "as a new profile or in place of the open one: its mods are downloaded at the file's versions and its config "
-    "files restored."
+    "Open a profile file (.r2z) someone shared - from VOLT, r2modman or Thunderstore Mod Manager - as a new "
+    "profile or in place of the open one. Its mods are downloaded and its mod settings put in place."
 )
 EXPORT_TOOLTIP = (
-    "Save the open profile as a .r2z profile file - its mod list (with versions and on/off state) and its "
-    "BepInEx config files, no mod files - readable by VOLT and by r2modman / Thunderstore Mod Manager."
+    "Save the open profile as a file (.r2z) to share: the mod list, versions, on/off switches and mod settings. "
+    "The mods themselves download again on the other computer. VOLT, r2modman and Thunderstore Mod Manager can open it."
 )
-ENABLE_ALL_TOOLTIP = "Switch every mod in the Active list on (an unsaved change, like a single toggle - Save applies it)."
+ENABLE_ALL_TOOLTIP = "Switch every mod in the Active list on. Press Save to keep it."
 DISABLE_ALL_TOOLTIP = (
-    "Switch every mod in the Active list off, except the framework (an unsaved change, like a single toggle - "
-    "Save applies it). The mods stay in the Active list."
+    "Switch every mod in the Active list off (the mod loader stays on). The mods stay in the list; press Save to "
+    "keep it."
 )
 IMPORT_CODE_TOOLTIP = (
-    "Import a profile from a code (r2modman / Thunderstore Mod Manager's or VOLT's): the profile is "
-    "downloaded from Thunderstore and imported as a new profile or in place of the open one, exactly like a file."
+    "Paste a profile code someone sent you (from VOLT, r2modman or Thunderstore Mod Manager). VOLT downloads "
+    "the profile from Thunderstore and imports it, as a new profile or in place of the open one."
 )
 EXPORT_CODE_TOOLTIP = (
-    "Upload the open profile (mod list + config files) to Thunderstore's public profile service and "
-    "get a code anyone can import - in VOLT, r2modman or Thunderstore Mod Manager."
+    "Upload the open profile (mod list and mod settings) to Thunderstore and get a short code to send. Anyone with "
+    "the code can import it in VOLT, r2modman or Thunderstore Mod Manager."
 )
 EXPORT_CODE_CONFIRM = (
-    'Upload "{name}" to Thunderstore?\n\nThe profile - its mod list and every file in its BepInEx config folder - '
-    "is uploaded to Thunderstore's public profile-sharing service (the one r2modman and Thunderstore Mod Manager "
-    "use). Anyone who has the code can download it; it can't be taken back. Mod files themselves aren't uploaded.\n\n"
-    "Don't share a profile whose config files hold anything private (server passwords, tokens...)."
+    'Upload "{name}" to Thunderstore?\n\nThe profile - its mod list and all its mod settings files - is uploaded '
+    "to Thunderstore's public profile-sharing service (the one r2modman and Thunderstore Mod Manager use). Anyone "
+    "who has the code can download it, and it can't be taken back. The mods themselves aren't uploaded.\n\n"
+    "Don't share a profile whose mod settings hold anything private (server passwords, tokens and so on)."
 )
 IMPORT_CODE_PROMPT = (
-    "Paste the profile code - from VOLT, r2modman or Thunderstore Mod Manager (their \"Export as code\"). "
-    "The profile is downloaded from Thunderstore, then imported as a new profile or in place of the open one."
-    "\n\nCode:"
+    "Paste the profile code someone sent you - from VOLT, r2modman or Thunderstore Mod Manager (their "
+    "\"Export as code\"). VOLT downloads the profile from Thunderstore, then imports it as a new profile or in "
+    "place of the open one.\n\nCode:"
 )
 DEP_STRINGS_TOOLTIP = (
-    "List the open profile's mods as Thunderstore dependency strings (\"Team-Package-Version\") to copy into a "
-    "modpack's manifest.json - the framework and every switched-on Active mod, as shown on screen."
+    "For modpack makers: list the open profile's mods as \"Author-ModName-Version\" lines (Thunderstore's "
+    "dependency strings) to paste into a modpack's manifest.json - the mod loader and every switched-on Active mod."
 )
 SHARE_FILTER = "Profile files (*.r2z);;All files (*)"
 IMPORT_LOCAL_TOOLTIP = (
-    "Install one mod from a Thunderstore package zip on this computer into the open profile - for a mod "
-    "that isn't (or is no longer) on Thunderstore. It's never checked for updates."
+    "Install one mod from a Thunderstore mod .zip on this computer into the open profile - for a mod that isn't "
+    "(or is no longer) on Thunderstore. It's never checked for updates."
 )
 BROWSE_TOOLTIP = "Browse Thunderstore's {game} mods and install them into the open profile."
 # The two launch buttons' tooltips ({game} = the game module's NAME).
-MODDED_TOOLTIP = "Launch {game} with this profile's mods (BepInEx)."
-VANILLA_TOOLTIP = "Launch {game} without mods or BepInEx."
+MODDED_TOOLTIP = "Start {game} with this profile's mods."
+VANILLA_TOOLTIP = "Start {game} without any mods."
 PLAY_ICON_PX = icons.PLAY_ICON_PX
 ADD_MOD_PROMPT = (
-    "Thunderstore package to install, with its dependencies, into the open profile.\n"
-    "A package name (Team-Package, e.g. {example}) or its thunderstore.io page URL:"
+    "The mod to install into the open profile, with any mods it needs.\n"
+    "Its name as Thunderstore writes it (Author-ModName, like {example}) or the address of its thunderstore.io page:"
 )  # {example} = the game module's EXAMPLE_PACKAGE
 # thunderstore.io/c/<community>/p/<Team>/<Package>/ (the site) or /package/<Team>/<Package>/ (older links).
 _PACKAGE_URL = re.compile(r"thunderstore\.io/(?:c/[^/]+/p|package)/([A-Za-z0-9_]+)/([A-Za-z0-9_]+)/?", re.IGNORECASE)
@@ -358,6 +374,7 @@ class _JobDone(QObject):
 
     done = Signal(object)  # {"ok": result} or {"error": message}
     progress = Signal(str)
+    package = Signal(object)  # bepinex_load_orders.package_progress events (a downloads= job only)
 
 
 def _details_text(rich: bool = False) -> QLabel:
@@ -450,7 +467,7 @@ class ThunderstoreDetailsPanel(QFrame):
         if latest and ts.is_newer(latest, entry["version"]):
             ver += f' &nbsp; <span style="color:{theme.WARN}">({latest} available)</span>'
         elif framework:
-            ver += f' &nbsp; <span style="color:{theme.MUTED}">(framework, required)</span>'
+            ver += f' &nbsp; <span style="color:{theme.MUTED}">(mod loader, always on)</span>'
         f["version"].setText(ver)
         when = _parse_iso(date_updated)
         f["updated"].setText(when.strftime("%Y-%m-%d") if when else "-")
@@ -570,6 +587,7 @@ class BepInExMainScreen(QWidget):
         self._jobs: dict[_JobDone, threading.Thread] = {}
         self._issues: dict[str, list[tuple[str, str]]] = {}  # full_name -> [(severity, text)] (the rows / tooltips)
         self._issue_list: list[dict] = []  # bepinex_load_orders.dependency_issues' dicts (the issues window)
+        self._missing_files: dict[str, tuple[int, int]] = {}  # lo.missing_files of the open load order (0.6.27)
         # The launch being watched (Run): exe_name, load_order_name, modded,
         # phase "starting" / "running", started (monotonic). None when idle.
         self._launch: dict | None = None
@@ -577,6 +595,21 @@ class BepInExMainScreen(QWidget):
         # job's queued result / progress is dropped from then on (the screen
         # is being deleted; its threads just finish on their own).
         self._closed = False
+        # The footer's download bar (0.6.25): the one downloads= job in flight
+        # (its carrier), its download_state, full_name -> mod name. None = hidden.
+        self._dl: ds.DownloadState | None = None
+        self._dl_job: _JobDone | None = None
+        self._dl_titles: dict[str, str] = {}
+        # More bars on the same state while Browse Mods is open (0.6.26): its footer's and its
+        # detail card's - the window is modal over the footer one (_browse_mods registers them).
+        self._extra_dl_bars: list[PackageDownloadBar] = []
+        # The rows' icons (0.6.26, mod_icons.py): icon key ("Team-Package-Version") -> the row's
+        # pixmap, None while loading / when the package has none (the placeholder tile). Asked for
+        # when a row is first painted; read from disk on _IconLoader's worker threads.
+        self._icons: dict[str, QPixmap | None] = {}
+        self._icon_waiting: set[str] = set()  # keys asked for, not back yet (one log line per batch, 0.6.27)
+        self._icon_loader = _IconLoader(None, fetch=lambda key: mod_icons.load_icon(self.app_root, key))
+        self._icon_loader.loaded.connect(self._on_row_icon, Qt.ConnectionType.QueuedConnection)
         self._poll_timer = QTimer(self)
         self._poll_timer.setSingleShot(True)  # re-armed after each poll's result, so polls never overlap
         self._poll_timer.timeout.connect(self._poll_launch)
@@ -659,15 +692,22 @@ class BepInExMainScreen(QWidget):
         if not self.game.is_game_root(picked):
             self._warn(
                 "Couldn't set game folder",
-                f'"{picked}" doesn\'t look like a {self.game_name} install folder '
-                f"(expected {self.game.DATA_DIR} or the game executable inside it).",
-                parent,
+                f"That folder doesn't look like where {self.game_name} is installed.",
+                means=f"VOLT looks for {self.game.DATA_DIR} or the game's .exe inside the folder you pick. "
+                      "The game folder wasn't changed.",
+                tryit=f"Pick the folder that holds the {self.game_name} .exe, or press Autodetect to find it for you. "
+                      f"In Steam: right-click {self.game_name} > Manage > Browse local files shows it.",
+                details=f"Picked: {picked}\nExpected inside it: {self.game.DATA_DIR} or one of {', '.join(self.game.GAME_EXES)}",
+                parent=parent,
             )
             return
         try:
             self._settings.update({"game_dir": picked, "game_source": "manual"})
         except OSError as err:
-            self._warn("Couldn't save settings", str(err), parent)
+            self._warn("Couldn't save settings", "VOLT couldn't save your settings.",
+                       means="The change you made won't be remembered next time VOLT starts.",
+                       tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                       details=str(err), parent=parent)
             return
         log(f"browse game folder: picked {picked}")
         self._reload_for_paths()
@@ -680,13 +720,21 @@ class BepInExMainScreen(QWidget):
             try:
                 self._settings.update({"game_dir": str(found["game"]["game_dir"]), "game_source": found["game"]["source"]})
             except OSError as err:
-                self._warn("Couldn't save settings", str(err), parent)
+                self._warn("Couldn't save settings", "VOLT couldn't save your settings.",
+                           means="The change you made won't be remembered next time VOLT starts.",
+                           tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                           details=str(err), parent=parent)
                 return
         self._reload_for_paths()
         if found["game"]:
             self._notice("Autodetect", f"Found {self.game_name} (Steam) at {found['game']['game_dir']}.")
         else:
-            self._warn("Autodetect", f"Autodetect didn't find a {self.game_name} install. Please locate it manually.", parent)
+            self._warn("Autodetect", f"VOLT couldn't find {self.game_name} on this computer.",
+                       means="Autodetect only looks in Steam's usual library folders.",
+                       tryit=f"Use Browse to pick the folder {self.game_name} is installed in. In Steam: right-click "
+                             f"{self.game_name} > Manage > Browse local files shows it.",
+                       details="Looked in: " + (", ".join(str(t) for t in found.get("tried") or []) or "(nowhere)"),
+                       parent=parent)
 
     def _show_settings(self) -> None:
         log("settings window opened")
@@ -717,7 +765,11 @@ class BepInExMainScreen(QWidget):
 
     def _show_help(self) -> None:
         log("help window opened")
-        HelpWindow(self._help_entries, parent=self).exec()
+        HelpWindow(self._help_entries, parent=self, report={
+            "game": self.game_name, "slug": self.game.SLUG, "game_dir": self.game_dir, "profile_label": "Profile",
+            "profile": self.load_order_picker.currentText() if self.current_load_order else None,
+            "log_path": self._log_path,
+        }).exec()
         log("help window closed")
 
     def _edit_config(self, query: str = "") -> None:
@@ -980,9 +1032,10 @@ class BepInExMainScreen(QWidget):
     def _apply_path_links(self) -> None:
         """Paths: Load order / BepInEx follow the picker (disabled with none
         open), and the muted path line under the bar."""
-        for link, path in ((self.load_order_link, self._load_order_dir()), (self.bepinex_link, self._bepinex_dir())):
+        for link, path, what in ((self.load_order_link, self._load_order_dir(), ""),
+                                 (self.bepinex_link, self._bepinex_dir(), "The mod loader's folder (BepInEx): ")):
             link.setEnabled(path is not None)
-            link.setToolTip(str(path) if path else fr.NO_PROFILE_TIP if self.game_dir is not None else "")
+            link.setToolTip(f"{what}{path}" if path else fr.NO_PROFILE_TIP if self.game_dir is not None else "")
         parts = [str(p) for p in (self.game_dir, self._bepinex_dir()) if p]
         self.path_line.set_text("  /  ".join(parts))
         self.path_line.setVisible(bool(parts))
@@ -1006,9 +1059,13 @@ class BepInExMainScreen(QWidget):
         return "Active" if pane is self.active_list else "Inactive"
 
     # ---- boxes / notices ----
-    def _warn(self, title: str, message: str, parent: QWidget | None = None) -> None:
-        log(f"warning shown: {title}: {message}")
-        QMessageBox.warning(parent if parent is not None else self, title, message)
+    def _warn(self, title: str, what: str, *, means: str = "", tryit: str = "", details: str = "",
+              parent: QWidget | None = None) -> None:
+        """The friendly error box (screens/error_box.py, 0.6.24): what happened /
+        what it means / what to try, Copy details for the raw detail. Logged
+        there, every part included. parent: a dialog showing the failure, so
+        the box sits over it; else this screen."""
+        show_error(parent if parent is not None else self, title, what, means=means, tryit=tryit, details=details)
 
     def _notice(self, title: str, message: str) -> None:
         log(f"info shown: {title}: {message}")
@@ -1057,23 +1114,39 @@ class BepInExMainScreen(QWidget):
             return
         self._closed = True
         self._poll_timer.stop()
+        self._icon_loader.stop()
         log(f"back to game select: leaving the {self.game_name} manager")
         self.back_requested.emit()
 
     # ---- background jobs ----
-    def _run_job(self, name: str, fn, on_done, *, progress=None) -> None:
+    def _run_job(self, name: str, fn, on_done, *, progress=None, downloads=None) -> None:
         """Runs fn(report) on a daemon thread; on_done({"ok": result} or
         {"error": text}) then runs on the GUI thread. report(text) reaches
-        `progress` (GUI thread) when given."""
+        `progress` (GUI thread) when given. `downloads` (full_names, may be
+        empty): a job that fetches mods - the footer's download bar follows
+        its per-mod events (_on_package) from the start and hides before
+        on_done (or when the screen is left: _closed drops everything)."""
         carrier = _JobDone()
         carrier.done.connect(lambda payload: self._finish_job(carrier, on_done, payload), Qt.ConnectionType.QueuedConnection)
         if progress is not None:
             carrier.progress.connect(lambda text: None if self._closed else progress(text),
                                      Qt.ConnectionType.QueuedConnection)
+        if downloads is not None:
+            carrier.package.connect(lambda ev: None if self._closed else self._on_package(carrier, ev),
+                                    Qt.ConnectionType.QueuedConnection)
+            self._dl_job, self._dl = carrier, ds.seed_packages(downloads)
+            self._dl_titles = {i: self._mod_title(i) for i in self._dl.wids}
+            self._render_dl()
+            log(f"download bar: job {name} started, {len(self._dl.wids)} mods known {clip(list(self._dl.wids), 600)}")
 
         def run() -> None:
             try:
-                payload = {"ok": fn(carrier.progress.emit)}
+                if downloads is None:
+                    result = fn(carrier.progress.emit)
+                else:
+                    with lo.package_progress(carrier.package.emit):
+                        result = fn(carrier.progress.emit)
+                payload = {"ok": result}
             except Exception as err:  # every failure reaches the GUI as text; nothing crashes the thread
                 log(f"[job {name}] failed: {err!r}")
                 payload = {"error": str(err) or repr(err)}
@@ -1088,7 +1161,75 @@ class BepInExMainScreen(QWidget):
         self._jobs.pop(carrier, None)
         if self._closed:  # finished after the screen was left (_request_back): nothing to show it on
             return
+        if carrier is self._dl_job:  # its download bar goes before on_done's dialogs / follow-up jobs
+            if self._dl is not None:
+                log(f"download bar: job finished, {ds.count_text(self._dl)} mods, "
+                    f"{len(self._dl.failed)} failed - bar hidden")
+            self._dl_job, self._dl = None, None
+            self._render_dl()
         on_done(payload)
+
+    # ---- the footer's download bar (0.6.25, PLAN.md §11 (a)) ----
+    def _mod_title(self, full_name: str) -> str:
+        """The bar's name for a mod: its installed display name, else the
+        package name with spaces (as Thunderstore shows it)."""
+        if full_name in self._entries:
+            return self._display_name(full_name)
+        return full_name.split("-", 1)[-1].replace("_", " ")
+
+    def _on_package(self, carrier: _JobDone, ev: dict) -> None:
+        if carrier is not self._dl_job:  # a late event from a job already finished
+            return
+        kind = ev.get("type")
+        for mod_id in ev["ids"] if kind == "plan" else [ev["id"]] if kind == "start" else []:
+            self._dl_titles.setdefault(mod_id, self._mod_title(mod_id))
+        self._dl = ds.apply_package_event(self._dl, ev)
+        if kind == "plan":
+            log(f"download bar: total now {len(self._dl.wids)} (pre-pass planned {len(ev['ids'])})")
+        elif kind == "item-done":
+            log(f"download bar: {ev['id']} {'done' if ev.get('ok') else 'FAILED: ' + clip(ev.get('message'), 300)} "
+                f"({ds.count_text(self._dl)})")
+        self._render_dl()
+
+    def _render_dl(self) -> None:
+        """The bars (the footer's + Browse Mods' while it's open) follow _dl:
+        hidden (and cleared) when None or nothing to fetch yet."""
+        for bar in (self.download_bar, *self._extra_dl_bars):
+            if self._dl is None or not self._dl.wids:
+                bar.setVisible(False)
+                bar.clear()
+            else:
+                bar.render(self._dl, self._dl_titles)
+                bar.setVisible(True)
+
+    # ---- the rows' icons (0.6.26) ----
+    def _row_icon(self, mod_id: str) -> QPixmap | None:
+        """The row's icon pixmap, or None (placeholder); the first ask for a
+        key queues its load."""
+        key = mod_icons.icon_key(self._entries[mod_id])
+        if key not in self._icons:
+            self._icons[key] = None
+            self._icon_waiting.add(key)
+            self._icon_loader.request(key)
+        return self._icons[key]
+
+    def _on_row_icon(self, key: str, data: bytes) -> None:
+        if self._closed:
+            return
+        self._icon_waiting.discard(key)
+        if not self._icon_waiting:  # a batch of rows is done: one line, never one per paint
+            s = mod_icons.take_stats()
+            log(f"icons: batch done - {s['cache']} from the icon cache, {s['copied']} copied from downloaded zips, "
+                f"{s['none']} without an icon (plain tile)")
+        if not data:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            log(f"icons: {key}: icon.png isn't a readable image")
+            return
+        self._icons[key] = rounded_pixmap(pixmap, ROW_ICON_PX, ROW_ICON_RADIUS)
+        for mod_list in (self.active_list, self.inactive_list):
+            mod_list.viewport().update()
 
     def _set_busy(self, text: str | None) -> None:
         self._busy = text
@@ -1103,7 +1244,10 @@ class BepInExMainScreen(QWidget):
         try:
             return lo.load_load_order(self.app_root, self.current_load_order)
         except (OSError, ValueError) as err:
-            self._warn("Couldn't load profile", str(err))
+            self._warn("Couldn't open profile", "VOLT couldn't read this profile's saved mod list.",
+                       means="Its file may be damaged, or made by a newer VOLT. Nothing was changed.",
+                       tryit="Pick another profile, or delete this one and import or create it again.",
+                       details=f"Profile folder: {self._load_order_dir()}\n{err}")
             return None
 
     def _take_manifest(self, manifest: dict | None) -> None:
@@ -1111,6 +1255,9 @@ class BepInExMainScreen(QWidget):
         self._entries = lo.installed(manifest) if manifest else {}
         fw = manifest.get("framework") if manifest else None
         self._framework = fw["full_name"] if fw else None
+        # Files missing (0.6.27): one walk of BepInEx/ per manifest read, on the GUI thread
+        # (a directory listing, no per-file stat; the log line has its time).
+        self._missing_files = lo.missing_files(self.app_root, self.current_load_order, manifest) if manifest else {}
 
     def _apply_current_load_order_to_panes(self) -> None:
         """Shows the open load order's saved lists and toggles; they become
@@ -1240,17 +1387,19 @@ class BepInExMainScreen(QWidget):
     def _delete_load_order(self, slug: str, name: str) -> None:
         if not self._confirm(
             "Delete profile",
-            f'Delete "{name}"? Its whole folder - the BepInEx install and every mod in it - is removed from disk. '
-            "This can't be undone.\n\nDownloaded packages stay in VOLT's cache; the game itself isn't touched.",
+            f'Delete "{name}"? The profile and every mod in it are removed from disk. This can\'t be undone.\n\n'
+            "VOLT keeps its downloaded copies of the mods, and the game itself isn't touched.",
             confirm_label="Delete",
         ):
             log(f"delete load order {slug} ({name!r}): cancelled")
             return
         res = lo.delete_load_order(self.app_root, slug)
         if res.get("skipped"):
-            self._warn("Couldn't delete everything",
-                       f"{len(res['skipped'])} file(s) couldn't be removed (in use?):\n"
-                       + "\n".join(str(s.get("path", s)) for s in res["skipped"][:10]))
+            self._warn("Couldn't delete everything", f"{len(res['skipped'])} file(s) of the profile couldn't be removed.",
+                       means="Another program (often the game) is probably still using them. The rest is gone.",
+                       tryit=f"Close {self.game_name} and anything showing that folder, then delete the leftover files "
+                             "by hand (Copy details lists them).",
+                       details="\n".join(str(s.get("path", s)) for s in res["skipped"]))
         old = self.current_load_order
         self._reload_load_order_picker(select_slug=old)
         if self.current_load_order == old:
@@ -1277,8 +1426,8 @@ class BepInExMainScreen(QWidget):
             return
         name = self._ask_name(
             "New profile",
-            f"A new profile gets its own BepInEx install: {self.ts_game.framework_package} is downloaded "
-            "from Thunderstore (or taken from VOLT's cache) and set up for it right away.",
+            f"A new profile gets its own copy of the mod loader ({self.ts_game.framework_package}), downloaded "
+            "from Thunderstore (or reused if VOLT already has it), so it's ready to play right away.",
         )
         if name is None:
             return
@@ -1290,7 +1439,11 @@ class BepInExMainScreen(QWidget):
         def done(payload: dict) -> None:
             self._set_busy(None)
             if "error" in payload:
-                self._warn("Couldn't create profile", payload["error"])
+                self._warn("Couldn't create profile", f'Couldn\'t create the profile "{name}".',
+                           means=f"Every profile needs the mod loader ({self.ts_game.framework_package}) from "
+                                 "Thunderstore, and VOLT couldn't get it. No profile was made.",
+                           tryit="Check your internet connection and try again in a minute.",
+                           details=payload["error"])
                 self.status_text.set_status_text(f"Couldn't create \"{name}\".", "error")
                 return
             manifest = payload["ok"]
@@ -1302,7 +1455,7 @@ class BepInExMainScreen(QWidget):
                                              f"{manifest['framework']['version']}.")
             self._start_update_check()
 
-        self._run_job("create-load-order", job, done)
+        self._run_job("create-load-order", job, done, downloads=[self.ts_game.framework_package])
 
     def _copy_to_new_load_order(self) -> None:
         """Copies the open load order's whole tree under a new name, then
@@ -1320,7 +1473,11 @@ class BepInExMainScreen(QWidget):
                 manifest = lo.save_load_order(self.app_root, manifest["slug"], *self._save_lists())
         except (OSError, ValueError) as err:
             log(f"Copy to new load order: {src} -> {name!r} failed: {err!r}")
-            self._warn("Couldn't copy profile", str(err))
+            self._warn("Couldn't copy profile", f'Couldn\'t copy the profile to "{name}".',
+                       means="The open profile is unchanged.",
+                       tryit="Make sure the disk isn't full and nothing (like the game) is using the profile's "
+                             "files, then try again.",
+                       details=str(err))
             return
         log(f"Copy to new load order: {src} -> {manifest['slug']} ({name!r})")
         self._settings.update({"last_load_order": manifest["slug"]})
@@ -1406,12 +1563,15 @@ class BepInExMainScreen(QWidget):
         def done(payload: dict) -> None:
             self._set_busy(None)
             if "error" in payload:
-                self._warn("Export failed", payload["error"])
+                self._warn("Export failed", f'Couldn\'t export "{lo_name}".',
+                           means="Your profile is unchanged; only the export didn't happen.",
+                           tryit="Pick a different place to save the file (one you can write to) and try again.",
+                           details=payload["error"])
                 self.status_text.set_status_text(f"Couldn't export \"{lo_name}\".", "error")
                 return
             res = payload["ok"]
             self.status_text.set_status_text(
-                f"Exported \"{lo_name}\": {res['mods']} mods, {res['config_files']} config files -> {path.name}.")
+                f"Exported \"{lo_name}\": {res['mods']} mods, {res['config_files']} settings files -> {path.name}.")
             self._notice("Export", f"Exported \"{lo_name}\" ({res['mods']} mods, {res['files']} files) to {path}.")
 
         self._run_job(f"export-{slug}", job, done)
@@ -1436,7 +1596,10 @@ class BepInExMainScreen(QWidget):
         try:
             profile = share.read_profile(path)
         except (share.ProfileError, OSError) as err:
-            self._warn("Couldn't import", str(err))
+            self._warn("Couldn't import", f"VOLT couldn't read {path.name}.",
+                       means="It may not be a profile file (.r2z), or it may be damaged. Nothing was changed.",
+                       tryit="Ask for the file again, or import it with a profile code instead.",
+                       details=f"File: {path}\n{err}")
             return
         self._import_profile(profile, path.name)
 
@@ -1513,7 +1676,10 @@ class BepInExMainScreen(QWidget):
         try:
             share.check_game(profile, self.ts_game, self.game_name)
         except share.ProfileError as err:
-            self._warn("Couldn't import", str(err))
+            self._warn("Couldn't import", f"This profile isn't for {self.game_name}.",
+                       means="It was made for another game, so its mods wouldn't work here. Nothing was changed.",
+                       tryit=f"Import it in that game's manager, or ask for a {self.game_name} profile.",
+                       details=str(err))
             return
         n = sum(1 for m in profile["mods"] if m["full_name"] != self.ts_game.framework_package)
         default = profile["name"] or path.stem
@@ -1539,10 +1705,10 @@ class BepInExMainScreen(QWidget):
                 return
             name = self._ask_name(
                 "Import profile",
-                f"{source} holds {n} mod{'s' if n != 1 else ''} and {len(profile['files'])} config file"
-                f"{'s' if len(profile['files']) != 1 else ''}. It becomes a new profile: {self.ts_game.framework_package} "
-                "is set up for it, every listed mod is downloaded at the file's version, then the config files are put "
-                "in place. Existing profiles aren't touched.",
+                f"{source} holds {n} mod{'s' if n != 1 else ''} and {len(profile['files'])} mod settings file"
+                f"{'s' if len(profile['files']) != 1 else ''}. It becomes a new profile: VOLT sets up the mod loader "
+                "for it, downloads every mod at the file's version, then puts the mod settings in place. Your other "
+                "profiles aren't touched.",
                 default,
             )
             if name is None:
@@ -1571,7 +1737,11 @@ class BepInExMainScreen(QWidget):
                     self._apply_current_load_order_to_panes()
                 self._apply_load_order_state()
                 log(f"import ({mode}): failed{f', {old_name!r} kept' if replacing else ''}: {payload['error']}")
-                self._warn("Couldn't replace profile" if replacing else "Couldn't import", payload["error"])
+                self._warn("Couldn't replace profile" if replacing else "Couldn't import",
+                           f'Couldn\'t replace "{old_name}".' if replacing else f'Couldn\'t import "{name}".',
+                           means=payload["error"],  # bepinex_share's own words (what was kept, what to do)
+                           tryit="Check your internet connection and try again in a minute.",
+                           details=payload["error"])
                 self.status_text.set_status_text(
                     f"Couldn't replace \"{old_name}\" - it's unchanged." if replacing else f"Couldn't import \"{name}\".", "error")
                 return
@@ -1585,13 +1755,14 @@ class BepInExMainScreen(QWidget):
             kind = "warn" if res["failed"] or res["errors"] or res.get("replace_skipped") else "info"
             self.status_text.set_status_text(
                 (f"Replaced \"{old_name}\" with \"{name}\"" if replacing else f"Imported \"{name}\"")
-                + f": {len(res['installed'])} of {res['listed']} mods, {len(res['restored'])} config files"
+                + f": {len(res['installed'])} of {res['listed']} mods, {len(res['restored'])} settings files"
                 + (f", {len(res['failed'])} failed" if res["failed"] else "") + ".", kind)
             QMessageBox.information(self, "Import finished", share.describe_import(res))
             self._start_update_check()
 
         self._run_job(f"import-replace-{old_slug}" if mode == "replace" else f"import-{name}", job, done,
-                      progress=lambda text: self.status_text.set_status_text(text))
+                      progress=lambda text: self.status_text.set_status_text(text),
+                      downloads=[self.ts_game.framework_package] + [m["full_name"] for m in profile["mods"]])
 
     def _import_code(self) -> None:
         """Import from code...: a profile code (r2modman / TMM / VOLT) ->
@@ -1606,7 +1777,10 @@ class BepInExMainScreen(QWidget):
         try:
             code = share.parse_code(text)
         except ValueError as err:
-            self._warn("Couldn't import", str(err))
+            self._warn("Couldn't import", "That doesn't look like a profile code.",
+                       means="A code looks like 01a0eadb-df03-ee4a-20f7-eccc823a5a5d. Nothing was downloaded.",
+                       tryit="Copy the whole code again and paste it in.",
+                       details=str(err))
             return
         log(f"import from code {code}: downloading")
         self._set_busy(f"Downloading profile {code} from Thunderstore...")
@@ -1617,7 +1791,11 @@ class BepInExMainScreen(QWidget):
         def done(payload: dict) -> None:
             self._set_busy(None)
             if "error" in payload:
-                self._warn("Couldn't import", payload["error"])
+                self._warn("Couldn't import", f"Couldn't download the profile for code {code}.",
+                           means="The code may be mistyped or too old, or Thunderstore couldn't be reached. "
+                                 "Nothing was changed.",
+                           tryit="Check the code and your internet connection, then try again in a minute.",
+                           details=payload["error"])
                 self.status_text.set_status_text(f"Couldn't fetch profile {code}.", "error")
                 return
             profile = payload["ok"]
@@ -1641,7 +1819,7 @@ class BepInExMainScreen(QWidget):
 
         def blocked(ref: ts.PackageRef) -> str | None:
             if ref.full_name == self._framework or ref.full_name == self.ts_game.framework_package:
-                return f"{ref.full_name} is this profile's framework package - it's always installed."
+                return f"{ref.full_name} is this profile's mod loader - it's always installed."
             if ref.full_name in self._entries:
                 return f"{ref.full_name} is already in this profile (v{self._entries[ref.full_name]['version']})."
             return None
@@ -1678,12 +1856,15 @@ class BepInExMainScreen(QWidget):
         def done(payload: dict) -> None:
             self._set_busy(None)
             if "error" in payload:
-                self._warn("Export failed", payload["error"])
+                self._warn("Export failed", f'Couldn\'t upload "{lo_name}".',
+                           means="Your profile is unchanged; no code was made.",
+                           tryit="Check your internet connection and try again in a minute, or use Export to file instead.",
+                           details=payload["error"])
                 self.status_text.set_status_text(f"Couldn't upload \"{lo_name}\".", "error")
                 return
             res = payload["ok"]
             self.status_text.set_status_text(
-                f"Uploaded \"{lo_name}\": {res['mods']} mods, {res['config_files']} config files - code {res['code']}.")
+                f"Uploaded \"{lo_name}\": {res['mods']} mods, {res['config_files']} settings files - code {res['code']}.")
             self._show_code(lo_name, res["code"])
 
         self._run_job(f"export-code-{slug}", job, done)
@@ -1732,8 +1913,8 @@ class BepInExMainScreen(QWidget):
         lines, n = res["lines"], len(res["lines"])
         log(f"dependency strings for {self.current_load_order} ({lo_name!r}): {n} listed, {res['local']} local omitted, "
             f"{res['invalid']} without a version omitted{' (unsaved edits included)' if self._dirty() else ''}")
-        intro = (f"{n} dependency string{'' if n == 1 else 's'} for \"{lo_name}\" (the framework and every switched-on "
-                 "Active mod) - paste into a modpack manifest.json's dependencies array.")
+        intro = (f"{n} dependency string{'' if n == 1 else 's'} for \"{lo_name}\" (the mod loader and every switched-on "
+                 "Active mod) - paste them into the \"dependencies\" list of a modpack's manifest.json.")
         if res["local"]:
             intro += f" {res['local']} local mod{'' if res['local'] == 1 else 's'} omitted (not on Thunderstore)."
         if res["invalid"]:
@@ -1784,7 +1965,10 @@ class BepInExMainScreen(QWidget):
             manifest = lo.save_load_order(self.app_root, self.current_load_order, active, inactive)
         except (OSError, ValueError) as err:
             log(f"save load order {self.current_load_order} ({counts}) failed: {err!r}")
-            self._warn("Save failed", str(err))
+            self._warn("Save failed", "Couldn't save your changes.",
+                       means="Your changes are still on screen, but the profile on disk may be only partly updated.",
+                       tryit=f"Close {self.game_name} (and anything using the profile's files), then press Save again.",
+                       details=f"Profile folder: {self._load_order_dir()}\n{err}")
             return
         log(f"saved load order {self.current_load_order} ({counts})")
         self._take_manifest(manifest)
@@ -1817,11 +2001,11 @@ class BepInExMainScreen(QWidget):
         if mod_id in self._updating:
             return f"{v}  ·  updating...", False
         if not e.get("online_source", True):
-            return f"{v}  ·  local package", False
+            return f"{v}  ·  local mod", False
         if self._has_update(mod_id):
             return f"{v}  ·  update available", True
         if mod_id == self._framework:
-            return f"{v}  ·  framework, required", False
+            return f"{v}  ·  mod loader, always on", False
         m = self._meta.get(mod_id)
         when = ago(m.get("date_updated")) if m else None
         if when:
@@ -1855,6 +2039,8 @@ class BepInExMainScreen(QWidget):
             update_tip=f"Update {self._display_name(mod_id)} to {m.get('latest_version')}" if update else "",
             disabled=in_active and not pinned and not self._toggles[mod_id],
             deprecated=bool(m.get("deprecated")),
+            icon=self._row_icon(mod_id),
+            files_missing=mod_id in self._missing_files,
         )
 
     def _row_tooltip(self, mod_id: str) -> str | None:
@@ -1962,8 +2148,16 @@ class BepInExMainScreen(QWidget):
         aside) isn't installed = error; installed but inactive / toggled off
         = warning (bepinex_load_orders.dependency_issues). Fills _issue_list,
         the rows' _issues and the "⚠ N · ✕ M" button."""
-        self._issue_list = lo.dependency_issues(self._entries, self._active_ids(), self._toggles,
-                                                self.ts_game.framework_package)
+        deps: dict[str, list[dict]] = {}
+        for issue in lo.dependency_issues(self._entries, self._active_ids(), self._toggles,
+                                          self.ts_game.framework_package):
+            deps.setdefault(issue["mod_id"], []).append(issue)
+        # 0.6.27: each mod's "files" warning first, then its dependency issues, in list order (Active, then Inactive)
+        self._issue_list = [
+            issue for mod_id in self._active_ids() + self.inactive_list.mod_ids()
+            for issue in ([lo.files_issue(mod_id, *self._missing_files[mod_id])] if mod_id in self._missing_files else [])
+            + deps.get(mod_id, [])
+        ]
         issues: dict[str, list[tuple[str, str]]] = {}
         for issue in self._issue_list:
             issues.setdefault(issue["mod_id"], []).append((issue["severity"], issue["text"]))
@@ -2001,10 +2195,12 @@ class BepInExMainScreen(QWidget):
                 on_done({"error": "The screen is busy." if self._busy else "Nothing to install."})
             return
         n = len(packages)
-        self._set_busy(f"Installing {n} missing dependenc{'ies' if n != 1 else 'y'}...")
+        self._set_busy(f"Installing {n} missing required mod{'s' if n != 1 else ''}...")
         slug = self.current_load_order
 
         def job(report):
+            lo.plan_downloads(self.app_root, slug, self.ts_game, (ts.PackageRef.parse(n) for n in packages),
+                              self.app_version)  # the bar's total up front (0.6.26)
             done, failed = [], []
             for i, name in enumerate(packages, 1):
                 report(f"Installing {name} ({i} of {n})...")
@@ -2022,18 +2218,25 @@ class BepInExMainScreen(QWidget):
             self._set_busy(None)
             if "error" in payload:
                 self._refresh_after_change()
-                self._warn("Couldn't install the missing dependencies", payload["error"], parent)
-                self.status_text.set_status_text("Couldn't install the missing dependencies.", "error")
+                self._warn("Couldn't install required mods", "Couldn't install the missing required mods.",
+                           means="Some mods need other mods to work, and VOLT couldn't download those.",
+                           tryit="Check your internet connection and try again in a minute.",
+                           details=payload["error"], parent=parent)
+                self.status_text.set_status_text("Couldn't install the missing required mods.", "error")
             else:
                 res = payload["ok"]
                 log(f"install missing: installed {res['installed']}, {len(res['failed'])} failed")
                 self._absorb_installed(res["installed"])
                 if res["failed"]:
-                    self._warn("Some dependencies couldn't be installed",
-                               "\n".join(f"{name}: {msg}" for name, msg in res["failed"]), parent)
+                    self._warn("Some required mods couldn't be installed",
+                               f"{len(res['failed'])} required mod(s) couldn't be installed.",
+                               means="The mods that need them may not work until they're installed.",
+                               tryit="Try again in a minute. If one keeps failing, it may have been removed from "
+                                     "Thunderstore.",
+                               details="\n".join(f"{name}: {msg}" for name, msg in res["failed"]), parent=parent)
                 got = len(res["installed"])
                 self.status_text.set_status_text(
-                    f"Installed {got} missing dependenc{'ies' if got != 1 else 'y'}."
+                    f"Installed {got} missing required mod{'s' if got != 1 else ''}."
                     + (f" {len(res['failed'])} failed." if res["failed"] else ""),
                     "warn" if res["failed"] else "info",
                 )
@@ -2041,7 +2244,8 @@ class BepInExMainScreen(QWidget):
             if on_done is not None:
                 on_done(payload)
 
-        self._run_job("install-missing", job, finished, progress=lambda text: self.status_text.set_status_text(text))
+        self._run_job("install-missing", job, finished, progress=lambda text: self.status_text.set_status_text(text),
+                      downloads=packages)
 
     # ---- update checking (THUNDERSTORE.md §3) ----
     def _start_update_check(self, force: bool = False, max_age_s: float | None = None) -> None:
@@ -2101,7 +2305,7 @@ class BepInExMainScreen(QWidget):
             elif self._check_errors:
                 sep = ". " if self._check_error() == ts.RATE_LIMITED_MSG else ": "
                 self.status_text.set_status_text(
-                    f"Couldn't check {len(self._check_errors)} package(s) for updates{sep}{self._check_error()}", "warn")
+                    f"Couldn't check {len(self._check_errors)} mod(s) for updates{sep}{self._check_error()}", "warn")
             else:
                 self.status_text.set_status_text("All mods are up to date.")
         self._apply_load_order_state()
@@ -2133,7 +2337,10 @@ class BepInExMainScreen(QWidget):
             self._updating.discard(mod_id)
             self._set_busy(None)
             if "error" in payload:
-                self._warn(f"Couldn't update {name}", payload["error"])
+                self._warn(f"Couldn't update {name}", f"Couldn't update {name}.",
+                           means="It stays at the version you had.",
+                           tryit="Check your internet connection and try again in a minute.",
+                           details=payload["error"])
                 self.status_text.set_status_text(f"Couldn't update {name}.", "error")
                 return
             res = payload["ok"]
@@ -2144,7 +2351,55 @@ class BepInExMainScreen(QWidget):
                 self.status_text.set_status_text(f"{name} is already at its latest version.")
             self._start_update_check(max_age_s=RECHECK_AFTER_S)
 
-        self._run_job(f"update-{mod_id}", job, done)
+        self._run_job(f"update-{mod_id}", job, done, downloads=[mod_id])
+
+    def _reinstall(self, mod_id: str) -> None:
+        """The row menu's Reinstall (0.6.27): the mod extracted again at its
+        installed version (lo.reinstall_mod - the cached zip, else a download
+        through the bar), putting back files deleted outside VOLT; its on/off
+        state, place in the list and settings files stay. Not confirmed (it
+        removes nothing). A local .zip mod whose zip VOLT no longer has gets
+        the friendly error box instead."""
+        if self._busy is not None or mod_id not in self._entries or mod_id in self._updating:
+            return
+        entry = self._entries[mod_id]
+        name = self._display_name(mod_id)
+        source = lo.reinstall_source(self.app_root, entry)
+        log(f"reinstall {mod_id} {entry.get('version')}: asked, source={source}, files missing={self._missing_files.get(mod_id)}")
+        if source is None:
+            self._warn(f"Couldn't reinstall {name}", f"VOLT can't reinstall {name}.",
+                       means=f"{name} was added from a .zip file on your computer, and VOLT's own copy of that "
+                             "file is gone, so there is nothing to reinstall it from.",
+                       tryit=f"Use Import > Local mod (.zip) to add the same file again, or Uninstall {name} "
+                             "and get it from Thunderstore.",
+                       details=f"{mod_id} {entry.get('version')}: no cached zip in {ts.package_cache_dir(self.app_root)}")
+            return
+        self._updating.add(mod_id)
+        self._set_busy(f"Reinstalling {name}...")
+        slug = self.current_load_order
+
+        def job(report):
+            return lo.reinstall_mod(self.app_root, slug, self.ts_game, mod_id, self.app_version)
+
+        def done(payload: dict) -> None:
+            self._updating.discard(mod_id)
+            self._set_busy(None)
+            if "error" in payload:
+                self._refresh_after_change()  # whatever landed on disk shows (the marker follows the tree)
+                self._warn(f"Couldn't reinstall {name}", f"Couldn't reinstall {name}.",
+                           means="Its files that were already missing are still missing.",
+                           tryit="Check your internet connection and try again in a minute. If it keeps failing, "
+                                 f"Uninstall {name} and add it again.",
+                           details=payload["error"])
+                self.status_text.set_status_text(f"Couldn't reinstall {name}.", "error")
+                return
+            res = payload["ok"]
+            log(f"reinstall {mod_id}: from the {res['source']}, {res['missing_before']} files were missing, "
+                f"{res['missing_after']} still missing")
+            self._refresh_after_change(res["manifest"])
+            self.status_text.set_status_text(f"Reinstalled {name}.")
+
+        self._run_job(f"reinstall-{mod_id}", job, done, downloads=[mod_id])
 
     def _update_all_clicked(self) -> None:
         if self._checking or self._busy is not None:
@@ -2178,20 +2433,26 @@ class BepInExMainScreen(QWidget):
             self._set_busy(None)
             if "error" in payload:
                 self._refresh_after_change()
-                self._warn("Update all failed", payload["error"])
+                self._warn("Update all failed", "Couldn't update your mods.",
+                           means="Mods that weren't updated stay at the version you had.",
+                           tryit="Check your internet connection and try again in a minute.",
+                           details=payload["error"])
                 return
             res = payload["ok"]
             self._refresh_after_change()
             if res["failed"]:
-                self._warn("Some updates failed",
-                           "\n".join(f"{self._display_name(n)}: {msg}" for n, msg in res["failed"]))
+                self._warn("Some updates failed", f"{len(res['failed'])} of {len(names)} mods couldn't be updated.",
+                           means="Those stay at the version you had; the others were updated.",
+                           tryit="Check your internet connection and try again in a minute.",
+                           details="\n".join(f"{self._display_name(n)}: {msg}" for n, msg in res["failed"]))
             self.status_text.set_status_text(
                 f"Updated {len(res['done'])} of {len(names)} mods." if res["failed"] else f"Updated {len(res['done'])} mods.",
                 "warn" if res["failed"] else "info",
             )
             self._start_update_check(max_age_s=RECHECK_AFTER_S)
 
-        self._run_job("update-all", job, finished, progress=lambda text: self.status_text.set_status_text(text))
+        self._run_job("update-all", job, finished, progress=lambda text: self.status_text.set_status_text(text),
+                      downloads=names)
 
     # ---- add / uninstall ----
     def _add_mod(self) -> None:
@@ -2204,7 +2465,12 @@ class BepInExMainScreen(QWidget):
         try:
             ref = parse_package_input(text)
         except ValueError:
-            self._warn("Add mod", f'"{text.strip()}" isn\'t a Thunderstore package name (Team-Package) or package URL.')
+            self._warn("Add mod", "VOLT didn't recognise that as a mod name.",
+                       means="Add mod needs the mod's name as Thunderstore writes it (Author-ModName) or the address "
+                             "of its thunderstore.io page.",
+                       tryit=f"Copy the address from the mod's Thunderstore page, or use Browse Mods to search instead. "
+                             f"Example name: {self.game.EXAMPLE_PACKAGE}.",
+                       details=f"Typed: {text.strip()!r}")
             return
         if ref.full_name in self._entries:
             self._notice("Add mod", f"{ref.full_name} is already in this profile.")
@@ -2219,12 +2485,17 @@ class BepInExMainScreen(QWidget):
             return
         name = self.load_order_picker.currentText()
         log(f"browse mods window opened for {self.current_load_order} ({name!r})")
-        BepInExBrowseWindow(
+        window = BepInExBrowseWindow(
             self.ts_game, self.game_name, name,
             installed=lambda: self._entries, framework=self._framework, run_job=self._run_job,
             install=self._install_package, switch_version=self._switch_version, is_busy=lambda: self._busy is not None,
             app_version=self.app_version, parent=self,
-        ).exec()
+        )
+        self._extra_dl_bars = list(window.download_bars)  # the same bar state as the footer's (0.6.26)
+        try:
+            window.exec()
+        finally:
+            self._extra_dl_bars = []
         log("browse mods window closed")
 
     def _switch_version(self, full_name: str, version: str | None, on_done=None, parent: QWidget | None = None) -> None:
@@ -2250,7 +2521,11 @@ class BepInExMainScreen(QWidget):
             self._updating.discard(full_name)
             self._set_busy(None)
             if "error" in payload:
-                self._warn(f"Couldn't {'update' if version is None else 'switch'} {name}", payload["error"], parent)
+                self._warn(f"Couldn't {'update' if version is None else 'switch'} {name}",
+                           f"Couldn't {'update' if version is None else 'switch'} {name}.",
+                           means="It stays at the version you had.",
+                           tryit="Check your internet connection and try again in a minute.",
+                           details=payload["error"], parent=parent)
                 self.status_text.set_status_text(f"Couldn't {'update' if version is None else 'switch'} {name}.", "error")
             else:
                 res = payload["ok"]
@@ -2263,7 +2538,7 @@ class BepInExMainScreen(QWidget):
             if on_done is not None:
                 on_done(payload)
 
-        self._run_job(f"switch-{full_name}", job, done)
+        self._run_job(f"switch-{full_name}", job, done, downloads=[full_name])
 
     def _install_package(self, ref: ts.PackageRef, on_done=None, parent: QWidget | None = None, *,
                          local_zip: Path | None = None) -> None:
@@ -2286,13 +2561,18 @@ class BepInExMainScreen(QWidget):
         def job(report):
             if local_zip is not None:
                 return lo.import_local_mod(self.app_root, slug, self.ts_game, local_zip, self.app_version)
+            lo.plan_downloads(self.app_root, slug, self.ts_game, [ref], self.app_version)  # the bar's total up front (0.6.26)
             return lo.install_mod(self.app_root, slug, self.ts_game, ref, self.app_version)
 
         def done(payload: dict) -> None:
             self._set_busy(None)
             if "error" in payload:
                 self._refresh_after_change()  # a dependency may have landed before the target failed
-                self._warn(f"Couldn't install {ref.full_name}{source}", payload["error"], parent)
+                self._warn(f"Couldn't install {ref.full_name}", f"Couldn't install {ref.full_name}{source}.",
+                           means="It wasn't added to your profile.",
+                           tryit="Check your internet connection and the mod's name, then try again in a minute."
+                                 if local_zip is None else "Make sure the file is a Thunderstore mod .zip, then try again.",
+                           details=payload["error"], parent=parent)
                 self.status_text.set_status_text(f"Couldn't install {ref.full_name}.", "error")
                 if on_done is not None:
                     on_done(payload)
@@ -2302,20 +2582,25 @@ class BepInExMainScreen(QWidget):
             log(f"add mod: installed {new}{source}, {len(res['problems'])} problems")
             self._absorb_installed(new)
             if res["problems"]:
-                self._warn("Some dependencies couldn't be installed",
-                           "\n".join(f"{p.get('package', '?')}: {p.get('message', '')}" for p in res["problems"]), parent)
+                self._warn("Some required mods couldn't be installed",
+                           f"{ref.full_name} was installed, but {len(res['problems'])} mod(s) it needs couldn't be.",
+                           means="It may not work until they're installed.",
+                           tryit="Press the warnings button above Save (⚠ / ✕), then Install all missing.",
+                           details="\n".join(f"{p.get('package', '?')}: {p.get('message', '')}" for p in res["problems"]),
+                           parent=parent)
             extra = len(new) - 1
             if not new:  # already installed (install_mod's guard) - nothing changed
                 self.status_text.set_status_text(f"{ref.full_name} is already in this profile.")
             else:
                 self.status_text.set_status_text(
                     f"Installed {ref.full_name}{source}"
-                    + (f" and {extra} dependenc{'ies' if extra != 1 else 'y'}" if extra > 0 else "") + ".")
+                    + (f" and {extra} required mod{'s' if extra != 1 else ''}" if extra > 0 else "") + ".")
             self._start_update_check(max_age_s=RECHECK_AFTER_S)
             if on_done is not None:
                 on_done(payload)
 
-        self._run_job(f"install-{ref.full_name}", job, done)
+        self._run_job(f"install-{ref.full_name}", job, done,
+                      downloads=[] if local_zip is not None else [ref.full_name])  # a local zip: only its dependencies download
 
     def _absorb_installed(self, new: list[str]) -> None:
         """After an install landed on disk: the new mods (active + enabled
@@ -2335,8 +2620,8 @@ class BepInExMainScreen(QWidget):
         name = self._display_name(mod_id)
         if not self._confirm(
             "Uninstall mod",
-            f"Remove {name} ({mod_id}) from this profile? Its files are deleted from the profile's "
-            "BepInEx folder (its config files are kept). Other profiles aren't affected.",
+            f"Remove {name} ({mod_id}) from this profile? Its files are deleted from the profile (its settings "
+            "files are kept). Other profiles aren't affected.",
             confirm_label="Uninstall",
         ):
             log(f"uninstall {mod_id}: cancelled")
@@ -2344,7 +2629,10 @@ class BepInExMainScreen(QWidget):
         try:
             manifest = lo.remove_mod(self.app_root, self.current_load_order, mod_id)
         except (OSError, ValueError) as err:
-            self._warn(f"Couldn't uninstall {name}", str(err))
+            self._warn(f"Couldn't uninstall {name}", f"Couldn't uninstall {name}.",
+                       means="Some of its files may still be in the profile.",
+                       tryit=f"Close {self.game_name}, then try again.",
+                       details=str(err))
             return
         ids, toggles = self._snapshot()
         self._take_manifest(manifest)
@@ -2373,17 +2661,25 @@ class BepInExMainScreen(QWidget):
         reason = bl.platform_error()
         if reason:
             log(f"run: preflight failed (platform): {reason}")
-            self._warn("Run failed", reason)
+            self._warn("Run failed", f"VOLT can't start {self.game_name} on this system.",
+                       means="Starting games from VOLT only works on Windows for now.",
+                       tryit="Start the game from Steam instead.",
+                       details=reason)
             return
         exe = self.game.find_game_exe(self.game_dir)
         if exe is None:
             log(f"run: preflight failed (exe): game_dir={self.game_dir}, looked for {', '.join(self.game.GAME_EXES)}")
-            self._warn("Run failed", f"No {self.game_name} executable found in {self.game_dir or '(game folder not set)'}")
+            self._warn("Run failed", f"VOLT couldn't find {self.game_name}'s .exe.",
+                       means="The game folder in Settings may be wrong, or the game was moved or uninstalled.",
+                       tryit="Open Settings and use Autodetect or Browse to set the game folder again.",
+                       details=f"Game folder: {self.game_dir or '(not set)'}\nLooked for: {', '.join(self.game.GAME_EXES)}")
             return
         slug, name = self.current_load_order, self.load_order_picker.currentText()
         if modded and (slug is None or self._manifest is None):
             log("run: preflight failed (load order): none open")
-            self._warn("Run failed", "Open a profile first.")
+            self._warn("Run failed", "No profile is open.",
+                       means="Modded starts the game with a profile's mods, so it needs one.",
+                       tryit="Pick a profile at the top, or make one with New profile. Vanilla works without one.")
             return
         tree = self._load_order_dir()
         if modded:
@@ -2392,8 +2688,10 @@ class BepInExMainScreen(QWidget):
                 log(f"run: preflight failed (framework): tree={tree}, missing {missing}")
                 self._warn(
                     "Run failed",
-                    f"The profile's BepInEx install is incomplete (missing {', '.join(missing)}). "
-                    "Rescan, or delete and recreate the profile.",
+                    "This profile's mod loader is incomplete.",
+                    means="Some files of the mod loader (BepInEx) are missing from the profile, so mods can't load.",
+                    tryit="Press Rescan. If that doesn't help, make a new profile (or delete and recreate this one).",
+                    details=f"Profile folder: {tree}\nMissing: {', '.join(missing)}",
                 )
                 return
         steam_exe = paths.find_steam_exe()
@@ -2402,7 +2700,10 @@ class BepInExMainScreen(QWidget):
             log(f"run: preflight failed (steam.exe): looked in {looked}")
             self._warn(
                 "Run failed",
-                f"Couldn't find steam.exe - {self.game_name} is started through Steam. Looked in: {looked}",
+                "VOLT couldn't find Steam.",
+                means=f"{self.game_name} is started through Steam, so Steam has to be installed.",
+                tryit="Make sure Steam is installed, start it once, then try again.",
+                details=f"Looked for steam.exe in: {looked}",
             )
             return
         launch_args = self._settings.get().get("launch_args") or ""
@@ -2410,7 +2711,10 @@ class BepInExMainScreen(QWidget):
             extra_args = bl.parse_launch_args(launch_args)
         except ValueError as err:
             log(f"run: preflight failed (launch arguments {launch_args!r}): {err}")
-            self._warn("Run failed", f"The launch arguments in Settings > Launch can't be read ({err}). Fix them and try again.")
+            self._warn("Run failed", "The launch options in Settings can't be read.",
+                       means="Something in Settings > Launch is mistyped (often a missing closing quote).",
+                       tryit="Open Settings > Launch, fix or clear the text, then try again.",
+                       details=f"Launch arguments: {launch_args!r}\n{err}")
             return
         mods_with_errors = [m for m, v in self._issues.items() if any(sev == "error" for sev, _ in v)]
         log(f"run: preflight ok ({'modded' if modded else 'vanilla'}): game_dir={self.game_dir}, exe={exe.name}, "
@@ -2418,7 +2722,7 @@ class BepInExMainScreen(QWidget):
             f"mods with dependency errors={len(mods_with_errors)}, launch args={extra_args}")
         if modded and self._dirty() and not self._confirm(
             "Unsaved profile changes",
-            f"The active list has unsaved changes. Run doesn't save them: {self.game_name} starts with the profile "
+            f"You have unsaved changes. Modded doesn't save them: {self.game_name} starts with the profile "
             "as it was last saved.",
             confirm_label="Run without saving",
         ):
@@ -2426,17 +2730,18 @@ class BepInExMainScreen(QWidget):
             return
         n = len(mods_with_errors)
         if modded and n and not self._confirm(
-            "Missing dependencies",
-            f"{n} active mod{'s have' if n != 1 else ' has'} dependencies that aren't installed; BepInEx will skip "
-            f"{'them' if n != 1 else 'it'}. Run anyway?",
-            confirm_label="Run anyway",
+            "Missing required mods",
+            f"{n} active mod{'s need' if n != 1 else ' needs'} other mods that aren't installed, so the game will skip "
+            f"{'them' if n != 1 else 'it'}. Start anyway?",
+            confirm_label="Start anyway",
         ):
             log("run: cancelled at the missing-dependencies prompt")
             return
         if modded and (Path(self.game_dir) / BEPINEX_DIR).is_dir() and not self._confirm(
-            "BepInEx already in the game folder",
-            f"{self.game_name}'s folder has its own BepInEx install. This run uses the profile's BepInEx instead "
-            "and leaves that folder untouched (its plugins won't load). Continue?",
+            "Another mod loader in the game folder",
+            f"{self.game_name}'s folder already has its own copy of the mod loader (BepInEx), probably from another mod "
+            "manager. VOLT uses this profile's copy instead and leaves that one alone, so the mods installed there "
+            "won't load. Continue?",
             confirm_label="Continue",
         ):
             log("run: cancelled at the foreign-BepInEx prompt")
@@ -2448,7 +2753,10 @@ class BepInExMainScreen(QWidget):
             )
         except (bl.LaunchError, OSError) as err:
             log(f"run: failed: {err!r}")
-            self._warn("Run failed", str(err))
+            self._warn("Run failed", f"Couldn't start {self.game_name}.",
+                       means=str(err),
+                       tryit=f"Make sure Steam is running and {self.game_name} isn't already open, then try again.",
+                       details=str(err))
             return
         self._begin_watch(exe_name=exe.name, load_order_name=name, modded=modded, phase="starting")
 
@@ -2461,7 +2769,11 @@ class BepInExMainScreen(QWidget):
             rec = bl.recover(self.app_root)
         except OSError as err:
             log(f"run: recovery failed: {err!r}")
-            self._warn("Couldn't check the last run", str(err))
+            self._warn("Couldn't check the last run", "VOLT couldn't check how the last game session ended.",
+                       means="Some mod loader files may still be in the game folder. They don't affect normal "
+                             "Steam launches.",
+                       tryit="Press Modded or Vanilla; VOLT tidies the game folder before every start.",
+                       details=str(err))
             return
         state = rec["state"]
         if state == "none":
@@ -2475,10 +2787,10 @@ class BepInExMainScreen(QWidget):
         if state == "incomplete":
             self._warn_cleanup_failed(rec["result"])
             self.status_text.set_status_text(
-                f"Leftover loader files from the last run are still in the {self.game_name} folder.", "warn")
+                f"Mod loader files from the last run are still in the {self.game_name} folder.", "warn")
         else:
             self.status_text.set_status_text(
-                f"Removed leftover loader files from the {self.game_name} folder (the last run wasn't cleaned up).", "warn")
+                f"Removed leftover mod loader files from the {self.game_name} folder (the last run wasn't tidied up).", "warn")
 
     def _begin_watch(self, *, exe_name: str, load_order_name: str, modded: bool, phase: str) -> None:
         """Busy until the game (by image name) has been seen and is gone."""
@@ -2541,7 +2853,7 @@ class BepInExMainScreen(QWidget):
             if result["failed"]:
                 self._warn_cleanup_failed(result)
                 self.status_text.set_status_text(
-                    f"{what} - some loader files are still in the {self.game_name} folder.", "warn")
+                    f"{what} - some mod loader files are still in the {self.game_name} folder.", "warn")
             else:
                 self.status_text.set_status_text(f"{what} - game folder restored.", kind)
 
@@ -2552,8 +2864,10 @@ class BepInExMainScreen(QWidget):
         first = result["failed"][0][1]
         self._warn(
             "Couldn't restore the game folder",
-            f"Couldn't remove {names} from the {self.game_name} folder ({first}). They're harmless for normal Steam "
-            "launches; VOLT retries the next time you open this manager or press Modded or Vanilla.",
+            f"Some mod loader files are still in the {self.game_name} folder.",
+            means="They're harmless: normal Steam launches ignore them. VOLT tries again next time.",
+            tryit=f"Close {self.game_name} fully, then open this manager again or press Modded or Vanilla.",
+            details=f"Files: {names}\nFirst error: {first}",
         )
 
     # ---- right-click menu ----
@@ -2570,7 +2884,8 @@ class BepInExMainScreen(QWidget):
         is_fw = mod_id == self._framework
         idle = self._busy is None
         log(f"context menu: {mod_id} in {self._pane_name(pane)} (folder={folder}, update={self._has_update(mod_id)}, "
-            f"missing deps={lo.mod_missing_dependencies(self._entries, mod_id, self.ts_game.framework_package)})")
+            f"missing deps={lo.mod_missing_dependencies(self._entries, mod_id, self.ts_game.framework_package)}, "
+            f"files missing={self._missing_files.get(mod_id)})")
         menu = QMenu(pane)
 
         def item(label: str, enabled, fn) -> None:
@@ -2581,13 +2896,14 @@ class BepInExMainScreen(QWidget):
         item("Open folder", folder, lambda: self._open_folder(folder))
         item("Open on Thunderstore", True, lambda: self._open_url(page))
         item("Open website", site, lambda: self._open_url(site))
-        item("Copy package name", True, lambda: self._copy_text(e["full_name"], f'Copied "{e["full_name"]}".'))
+        item("Copy Thunderstore name", True, lambda: self._copy_text(e["full_name"], f'Copied "{e["full_name"]}".'))
         item("Edit config...", True, lambda: self._edit_config(e.get("name") or ""))
         menu.addSeparator()
         missing = lo.mod_missing_dependencies(self._entries, mod_id, self.ts_game.framework_package)
         if missing:  # only a mod with missing dependencies gets the entry (Active or Inactive alike)
-            item(f"Install missing dependencies ({len(missing)})", idle, lambda: self._install_missing(missing))
+            item(f"Install missing required mods ({len(missing)})", idle, lambda: self._install_missing(missing))
         item("Update", idle and self._has_update(mod_id) and mod_id not in self._updating, lambda: self._update_one(mod_id))
+        item("Reinstall", idle and mod_id not in self._updating, lambda: self._reinstall(mod_id))  # 0.6.27
         item("Uninstall...", idle and not is_fw, lambda: self._uninstall(mod_id))
         menu.exec(pane.viewport().mapToGlobal(pos))
         menu.deleteLater()
@@ -2804,7 +3120,7 @@ class BepInExMainScreen(QWidget):
         layout.addLayout(list_cell, 1)
         drag_hint = None
         if draggable:
-            drag_hint = _label("Clear the filter to drag-reorder.", muted=True)
+            drag_hint = _label("Clear the search to drag mods.", muted=True)
             drag_hint.setVisible(False)
             layout.addWidget(drag_hint)
         search.textChanged.connect(lambda text: mod_list.set_search(query=text))
@@ -2834,13 +3150,13 @@ class BepInExMainScreen(QWidget):
         bulk_row.addWidget(self.enable_all_button)
         bulk_row.addWidget(self.disable_all_button)
         self.rescan_button = _button("Rescan")
-        self.rescan_button.setToolTip("Re-read the open profile from disk and check for updates again.")
+        self.rescan_button.setToolTip("Read the open profile from disk again and check for updates.")
         # Config: the Edit config window, no search query (placed by the user
         # 2026-09-30, between Rescan and the Get mods label)
         self.config_button = _button("Config")
-        self.config_button.setToolTip("Edit the open profile's mod config files.")
+        self.config_button.setToolTip("Change the settings of the open profile's mods.")
         self.add_mod_button = _button("Add mod...", variant="accent-outline")
-        self.add_mod_button.setToolTip("Install a Thunderstore package (and its dependencies) into the open profile.")
+        self.add_mod_button.setToolTip("Install a mod (and any mods it needs) by its Thunderstore name or address.")
         self.browse_button = _button("Browse Mods...", variant="accent-outline")
         self.browse_button.setToolTip(BROWSE_TOOLTIP.format(game=self.game_name))
         # Group labels (step 3.1, DESIGN.md §15 decision 6: LOAD ORDER over
@@ -2921,6 +3237,10 @@ class BepInExMainScreen(QWidget):
         row.addWidget(prompt)
         self.status_text = _StatusText()
         row.addWidget(self.status_text, 1)
+        # 0.6.25: docked right, as RimWorld's SteamCMD row; hidden until a job downloads (_render_dl)
+        self.download_bar = PackageDownloadBar()
+        self.download_bar.setVisible(False)
+        row.addWidget(self.download_bar, 0, Qt.AlignmentFlag.AlignVCenter)
         column.addWidget(footer)
         return box
 
