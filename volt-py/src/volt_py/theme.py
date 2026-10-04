@@ -1754,6 +1754,16 @@ QPushButton[variant="checklist-step"][next="true"]:disabled {{
     font-weight: 600;
 }}
 
+/* ---- Update dialog (screens/update_dialog.py, 0.6.30): the release notes
+   in a --panel-2 well on the --panel dialog (the Help rail's frame); notes
+   --text 12.0:1, "no notes" [muted] 5.7:1. Headline = first-run-title
+   (--text 13.5:1 on --panel), reason / progress lines [muted] 6.4:1. ---- */
+QScrollArea#updateNotes {{
+    background: {PANEL_2};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+}}
+
 /* ---- Installed / already installed (design phase 2, decision 5): a success
    state, not a washed-out disabled control - a 12% --ok wash, a 45% --ok
    edge, --ok text 600 and a drawn check (the screen sets the icon). Last, so

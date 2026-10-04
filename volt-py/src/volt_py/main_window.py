@@ -7,13 +7,14 @@ from PySide6.QtCore import QRectF, QSettings, QTimer
 from PySide6.QtGui import QPainter, QResizeEvent
 from PySide6.QtWidgets import QMainWindow
 
-from volt_py import bepinex_games, theme
+from volt_py import bepinex_games, theme, update_flow
 from volt_py.app_root import resolve_base_root
 from volt_py.painters import crossfade, paint_dots
 from volt_py.screens.bepinex_help_entries import help_entries
 from volt_py.screens.bepinex_main_screen import BepInExMainScreen
 from volt_py.screens.game_select import GameSelectScreen
 from volt_py.screens.rimworld_main_screen import RimWorldMainScreen
+from volt_py.screens import update_dialog
 from volt_py.settings import APP_DEFAULTS, APP_SETTINGS_FILE, SettingsStore
 
 DEFAULT_SIZE = (1600, 900)
@@ -71,6 +72,15 @@ class MainWindow(QMainWindow):
         # / Alt+Left comes back here (_on_back_requested, 0.6.8).
         self.setCentralWidget(self._game_select())
 
+        # Self-update (0.6.30, PLAN.md §12): once per start, a second after the
+        # first show (singleShot fires once the event loop runs, the window
+        # already up): update_flow.startup_work on a worker - leftovers of
+        # the last update cleaned (a failed copy reported), then the silent
+        # check. A newer release is only offered on game select, never over a
+        # manager (held in _pending_release until the user goes back there).
+        self._pending_release = None
+        QTimer.singleShot(update_dialog.STARTUP_DELAY_MS, self._start_update_check)
+
     def _game_select(self) -> GameSelectScreen:
         # A fresh screen every time (first launch and every way back), so no
         # tile keeps a hover/focus state from before (no origin-tile focus, by
@@ -116,6 +126,23 @@ class MainWindow(QMainWindow):
         screen.back_requested.connect(self._on_back_requested)
         self._swap_to(screen)
 
+    def _start_update_check(self) -> None:
+        update_dialog.start_job(self, "update-startup", update_flow.startup_work, self._on_update_checked)
+
+    def _on_update_checked(self, payload: dict) -> None:
+        result = payload.get("ok") or {}
+        if result.get("report"):
+            update_dialog.show_failed_apply(self, result["report"])
+        if result.get("release") is not None:
+            self._pending_release = result["release"]
+            self._offer_pending_update()
+
+    def _offer_pending_update(self) -> None:
+        if self._pending_release is None or not isinstance(self.centralWidget(), GameSelectScreen):
+            return
+        release, self._pending_release = self._pending_release, None
+        update_dialog.show_update(self, release, "startup")
+
     def _on_back_requested(self) -> None:
         # A manager's "Games" button / Alt+Left, already past its own guard
         # (unsaved-changes confirm, not busy) and teardown (_request_back):
@@ -123,6 +150,8 @@ class MainWindow(QMainWindow):
         # the same MOTION_SCREEN crossfade. Emitted from the manager's own
         # click/shortcut handler; setCentralWidget only deleteLater()s it.
         self._swap_to(self._game_select())
+        if self._pending_release is not None:  # a startup offer that arrived while a manager was open
+            QTimer.singleShot(theme.MOTION_SCREEN + 50, self._offer_pending_update)
 
     def _swap_to(self, screen) -> None:
         old = self.centralWidget()

@@ -11,6 +11,8 @@ controls directly under it; SECTION_GAP between groups.
   key, shared with the Thunderstore games' window): Windows (default: follow
   Windows' "Animation effects") / On / Off, saved at once (settings.json
   "animations", this game's) and applied app-wide (theme.set_animation_mode).
+  UPDATES (0.6.30, last on the tab - user decision 2026-10-04): UpdatesBlock,
+  shared with the Thunderstore games' window.
 - Steam: DOWNLOAD MODS VIA - the three exclusive mod-acquisition modes
   (settings steam_acquire_via; unset = auto: 'gog' for a GOG install, else
   'steamcmd' - settings.effective_acquire_via); MISSING WORKSHOP MODS -
@@ -54,6 +56,7 @@ from PySide6.QtCore import QEvent, QObject, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -65,9 +68,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import painters, paths, theme
+from volt_py import painters, paths, theme, update
+from volt_py import update_flow as uw
 from volt_py.applog import log
+from volt_py.screens.error_box import show_error
 from volt_py.screens.flow_layout import FlowLayout
+from volt_py.screens.update_dialog import show_update, start_job
 from volt_py.settings import ACQUIRE_VIA, ANIMATIONS, SettingsStore, effective_acquire_via, effective_animations
 
 SOURCE_LABEL = {"steam": "Steam", "gog": "GOG", "manual": "Manual"}
@@ -215,6 +221,108 @@ def _set_animations(settings: SettingsStore, mode: str) -> None:
         log(f"settings: animations {mode} FAILED to save: {err!r}")
         return
     log(f"settings: animations set to {mode}")
+
+
+class UpdatesBlock(QWidget):
+    """General's UPDATES rows (both Settings windows, 0.6.30, PLAN.md §12):
+    Check for updates + a muted status line ("You have VOLT 0.6.30. Last
+    checked today at 14:02."), then the "Check for updates when VOLT starts"
+    checkbox (update.json check_on_startup, saved on toggle). key=True (the
+    Thunderstore window's key-row style): a copper UPDATES key in the path
+    key column, the checkbox under the button, then the note (DATA FOLDER's
+    shape); key=False (RimWorld, whose groups carry the heading + note): the
+    caller adds _group("Updates", SETTINGS_NOTE) first.
+
+    The manual check always answers (update_flow.check_now on a worker):
+    "Checking..." -> "You're up to date (X)." / the update dialog (even for a
+    skipped version) / the error box with the reason. The status line changes
+    under a MOTION_FAST crossfade."""
+
+    def __init__(self, *, key: bool, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._checking = False
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(GAP)
+        row = QHBoxLayout()
+        row.setSpacing(GAP)
+        if key:
+            name = _key("Updates")
+            name.setFixedWidth(PATH_LABEL_WIDTH)
+            row.addWidget(name)
+        self.check_button = _button(uw.CHECK)
+        row.addWidget(self.check_button)
+        self.status = _muted("")
+        self.status.setWordWrap(True)
+        row.addWidget(self.status, 1)
+        col.addLayout(row)
+        state = update.load_state()  # never raises: defaults when missing / unreadable
+        self.on_start = QCheckBox(uw.CHECK_ON_START)
+        self.on_start.setToolTip(uw.CHECK_ON_START_TIP)
+        self.on_start.setChecked(bool(state["check_on_startup"]))
+        check_row = QHBoxLayout()
+        if key:
+            check_row.addSpacing(PATH_LABEL_WIDTH + GAP)  # under the button, past the key column
+        check_row.addWidget(self.on_start)
+        check_row.addStretch(1)
+        col.addLayout(check_row)
+        if key:
+            note = _muted(uw.SETTINGS_NOTE)
+            note.setWordWrap(True)
+            col.addWidget(note)
+        self.status.setText(uw.status_line(update.current_version(), state["last_check"]))
+        self.check_button.clicked.connect(self._check)
+        self.on_start.toggled.connect(self._set_on_start)
+
+    def _set_status(self, text: str) -> None:
+        if self.status.text() != text:
+            painters.crossfade(self.status, lambda: self.status.setText(text), theme.MOTION_FAST)
+
+    def _check(self) -> None:
+        if self._checking:
+            return
+        self._checking = True
+        log("[update] settings: Check for updates pressed")
+        self.check_button.setEnabled(False)
+        self.check_button.setText(uw.CHECKING)
+        self._set_status(uw.CHECKING_LINE)
+        start_job(self, "update-check", uw.check_now, self._on_checked)
+
+    def _on_checked(self, payload: dict) -> None:
+        self._checking = False
+        self.check_button.setText(uw.CHECK)
+        self.check_button.setEnabled(True)
+        current = update.current_version()
+        if "error" in payload:
+            err = payload["error"]
+            known = isinstance(err, update.UpdateError)
+            log(f"[update] settings: check failed, shown: {err!r}")
+            self._set_status(f"You have VOLT {current}. The check didn't work.")
+            show_error(self.window(), uw.CHECK_ERROR_TITLE,
+                       str(err) if known else "VOLT couldn't check for updates because of an unexpected error.",
+                       tryit="" if known else "Try again in a minute.",
+                       details=f"{err!r}" + (f"\ncaused by {err.__cause__!r}" if err.__cause__ else ""),
+                       log_prefix="[update] ")
+            return
+        release = payload["ok"]
+        if release is None:
+            log(f"[update] settings: up to date ({current})")
+            self._set_status(uw.up_to_date(current))
+            return
+        self._set_status(uw.available_line(release.version))
+        show_update(self.window(), release, "manual")
+
+    def _set_on_start(self, on: bool) -> None:
+        try:
+            update.save_state({"check_on_startup": bool(on)})
+        except OSError as err:
+            log(f"[update] settings: check on startup {'on' if on else 'off'} FAILED to save: {err!r}")
+            show_error(self.window(), uw.CHECK_ERROR_TITLE, "VOLT couldn't save this setting.",
+                       means="It applies until VOLT closes, then goes back to what it was.",
+                       tryit="Check that VOLT's folder isn't read-only.", details=f"{err!r}",
+                       log_prefix="[update] ")
+            return
+        log(f"[update] settings: check for updates when VOLT starts {'on' if on else 'off'}")
 
 
 def _button_row(*buttons: QPushButton) -> QHBoxLayout:
@@ -379,6 +487,10 @@ class SettingsWindow(QDialog):
         layout.addSpacing(SECTION_GAP)
         _group(layout, "Animations", ANIMATIONS_NOTE)
         layout.addLayout(animations_row(self._settings, page, key=False))
+        layout.addSpacing(SECTION_GAP)
+        _group(layout, "Updates", uw.SETTINGS_NOTE)
+        self.updates = UpdatesBlock(key=False)
+        layout.addWidget(self.updates)
         layout.addStretch(1)
 
         self.game_browse.clicked.connect(lambda: self._browse("game"))

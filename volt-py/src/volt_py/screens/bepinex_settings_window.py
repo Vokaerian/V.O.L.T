@@ -11,7 +11,7 @@ Thunderstore game actually needs today:
   like GAME FOLDER's (this game's APP-ROOT, Open data folder shows it in
   Explorer) with a muted line saying what's in it. 0.6.2: SECTION_GAP extra
   space between the three groups, so the button no longer reads as part of
-  ANIMATIONS.
+  ANIMATIONS. 0.6.30: UPDATES last (settings_window.UpdatesBlock, key row).
 - Launch (2026-09-30): "Launch arguments", one line of extra command-line
   arguments for the game (settings.json launch_args, saved as typed on
   editingFinished and again when the window closes, only once
@@ -88,6 +88,7 @@ from volt_py.screens.settings_window import (
     SECTION_GAP,
     SOURCE_LABEL,
     WINDOW_SIZE,
+    UpdatesBlock,
     _button,
     _button_row,
     _group,
@@ -275,6 +276,9 @@ class BepInExSettingsWindow(QDialog):
         note = _muted(DATA_FOLDER_NOTE)
         note.setWordWrap(True)
         layout.addWidget(note)
+        layout.addSpacing(SECTION_GAP)
+        self.updates = UpdatesBlock(key=True)
+        layout.addWidget(self.updates)
         layout.addStretch(1)
         self.game_browse.clicked.connect(lambda: self._browse())
         self.autodetect_button.clicked.connect(lambda: self._autodetect())
