@@ -226,7 +226,23 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
             "installed but inactive or switched off.\n\n"
             "Click that button for the list. It has an \"Install\" button for each missing mod and \"Install all "
             "missing\" at the top.\n\n"
-            "Fix a ⚠ by switching the needed mod back on or moving it to Active."
+            "Fix a ⚠ by switching the needed mod back on or moving it to Active.\n\n"
+            "The same button also warns about mods that get in each other's way: see \"What are conflict warnings?\"."
+        ),
+    },
+    {
+        "name": "What are conflict warnings?",
+        "short": "Some mods get in each other's way, and VOLT tells you before you launch.",
+        "long": (
+            "VOLT checks the switched-on mods in the Active list for mods that get in each other's way, and lists "
+            "what it finds under the ⚠ / ✕ button above \"Save\":\n"
+            "- \"Incompatible mod\" (✕): a mod says it won't run beside another one, so the mod loader skips it.\n"
+            "- \"Shared files differ\" (⚠): two mods bring different copies of the same file.\n"
+            "- \"Possible duplicate\" (⚠): two mods look like copies of the same mod.\n\n"
+            "VOLT only advises: it never switches anything off for you. Click the button to see what each warning "
+            "means and what to try.\n\n"
+            "\"Needed by\" in a mod's details shows which installed mods rely on it, which helps you decide which "
+            "one to keep."
         ),
     },
     {
@@ -272,18 +288,60 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
     # ---- trouble ----
     {
         "name": "How do I fix a broken mod?",
-        "short": "Switch some mods off, Save, and press Modded again until the problem goes away.",
+        "short": "Press Troubleshoot first; if it finds nothing, switch mods off in groups until the problem goes away.",
         "long": (
-            "To find the mod causing it:\n"
+            "Start with \"Troubleshoot\" at the top right. It reads the game's log from the last launch of this "
+            "profile and tells you which mod went wrong, and what to try.\n\n"
+            "To find the mod causing it yourself:\n"
             "1. Switch off the mod you added last, or half of your mods.\n"
             "2. Press \"Save\", then \"Modded\", and see if the problem is gone.\n"
             "3. Switch mods back on in smaller groups until you find the one.\n\n"
-            "The ⚠ / ✕ button above \"Save\" lists mods that are missing a mod they need.\n\n"
-            "A mod marked \"Files missing\" lost some of its files outside VOLT (deleted, or moved away by an "
-            "antivirus program). Right-click it and choose \"Reinstall\" to put them back.\n\n"
+            "The ⚠ / ✕ button above \"Save\" lists mods that are missing a mod they need, and conflict warnings: "
+            "mods that block each other or look like two copies of the same mod. A mod marked \"Files missing\" "
+            "lost some of its files outside VOLT (deleted, or moved away by an antivirus program). Right-click it and choose \"Reinstall\" to put them back.\n\n"
             "\"Update all\" often helps, and \"Config\" lets you change a mod's settings.\n\n"
             "If the game itself seems damaged, Settings > Troubleshooting > \"Reset installation\" deletes the "
             "game folder and has Steam download it again. Your profiles are kept."
+        ),
+    },
+    {
+        "name": "What does Troubleshoot do?",
+        "short": "It reads the game's log from your last launch and explains, in plain words, what went wrong.",
+        "long": (
+            "Press \"Troubleshoot\" at the top right after a launch with \"Modded\". VOLT reads the log the game "
+            "wrote, groups the same error into one row, and for each problem says what happened, what it means and "
+            "what to try.\n\n"
+            "The first error of the run is listed first: later problems often follow from it, so fix that one "
+            "first. Tick \"Show harmless messages too\" to see messages that are known not to matter.\n\n"
+            "A word on each problem says how sure VOLT is:\n"
+            "- certain: the log or the mods' files prove it.\n"
+            "- likely: the error points at that mod, but another mod may still be the cause.\n"
+            "- possible: a warning, or the error names no mod.\n\n"
+            "VOLT keeps your last 10 launches with \"Modded\". Pick one next to \"Last run\":\n"
+            "- \"What changed since it last worked\" lists the mods added, removed, updated or switched on or off "
+            "since your last run that worked (or the run before it). Problems that weren't there then say "
+            "\"New since\".\n"
+            "- A run \"probably worked\" when the mods finished loading and you played 5 minutes or more.\n"
+            "- Mark a run \"worked\" or \"didn't work\" if VOLT got it wrong: your mark always wins.\n\n"
+            "The \"Mod contents\" tab shows what each mod's files are made of, and warns when two mods contain "
+            "copies of the same code. VOLT only gives advice: it never changes your profile by itself. \"Copy "
+            "summary\" copies the findings, without your folder paths, to paste when you ask someone for help."
+        ),
+    },
+    {
+        "name": "What are patch details?",
+        "short": "A one-off recording of which game code each mod changes, shown in Troubleshoot's \"Mod contents\" tab.",
+        "long": (
+            "Tick \"Record patch details on next launch\" in Settings > Troubleshooting, or press that button in "
+            "Troubleshoot > \"Mod contents\". Then start the profile with \"Modded\" and wait for the main menu.\n\n"
+            "For that one launch the mod loader writes down every game method a mod changes. When the game has "
+            "closed, VOLT reads that into a list: \"Game methods\" shows which mods change the same part of the "
+            "game, and each mod shows the game code it changes.\n\n"
+            "It switches itself off after that launch and puts the mod loader's own setting back, even if VOLT or "
+            "the game was closed in between. That launch's log file is about 5 times bigger than usual; the next "
+            "launch writes a normal one again.\n\n"
+            "It's safe: your mods and their settings don't change. Changes made with MonoMod hooks aren't in the "
+            "list."
         ),
     },
     {

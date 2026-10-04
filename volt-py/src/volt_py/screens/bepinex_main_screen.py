@@ -14,7 +14,7 @@ what's installed), thunderstore.py (metadata, downloads, the shared package
 cache and the per-package metadata cache) and bepinex_install.py.
 
 Top to bottom (the mockup):
-  paths bar      Settings | Paths: Game / Load order / BepInEx | storefront tag | version ... Help
+  paths bar      Settings | Paths: Game / Load order / BepInEx | storefront tag | version ... Help | Troubleshoot... (0.6.38)
                  <game folder>  /  <the open load order's BepInEx folder>   (muted, 12px)
   load-order bar Load order [picker] New.. Copy.. [Unsaved changes ↺] ... [⚠ N updates · Update all]
   checklist      GET STARTED 1. .. 2. .. 3. .. 4. .. ... Hide   (0.6.23, until done / hidden)
@@ -123,6 +123,19 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     BepInEx/ folder inside the game install asks once. A launch record
     left by a previous VOLT session is handled on open (_recover_launch):
     re-attach if the game is still running, else clean up and say so.
+    Record patch details (0.6.39, bepinex_patchlog.py): with the profile's
+    switch on, Modded (never Vanilla) adds Info to BepInEx.cfg's
+    [Harmony.Logger] LogChannels before the start (the pending restore saved
+    first); when the watch ends the user's value goes back and the log is read
+    into the profile's patch table on a worker; a profile whose restore is
+    still pending on open (VOLT closed / the game killed) is finished then.
+    Run history (0.6.41, bepinex_runs.py): every Modded launch first finishes
+    the profile's previous run if it is still pending (claimed + its log
+    copied on the GUI thread, so this launch can't overwrite it), then writes
+    the new pending run; the watch's end and the screen's open finish it on
+    a worker (_finish_run). A finished run with NEW certain / likely problems
+    since its baseline appends "N new problems since the last run - see
+    Troubleshoot." to the status text. Vanilla is never recorded.
     Vanilla (v0.4.27, right above Modded; both carry a play-triangle icon,
     _play_icon) is _run(modded=False): a plain Steam launch, nothing
     copied, no confirms - the screen stays locked while it runs, exactly
@@ -143,6 +156,16 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     mod, always enabled while idle - a harmless repair on a healthy mod)
     = reinstall_mod: the same version again from the cached zip (or
     downloaded, the bar then shows), state / position / config kept.
+  - Conflicts (troubleshooting phase 1, volt_py/bepinex_conflicts.py): every
+    manifest read starts a read-only scan job (_scan_packages: plugin GUIDs /
+    declared incompatibilities of each package not scanned yet this session,
+    plus the shared-DLL-name hashing) that never takes the busy state; its
+    result (_on_scan_done) feeds _update_issues three more issue kinds
+    (advice only, no buttons; evidence-derived only - the bundled
+    known-pairs list was retired 2026-10-04). After an install / update /
+    reinstall / import a NEW incompatibility adds a "Heads up" to the
+    status text (_arm_headsup). The details pane's "Needed by" row
+    lists the installed mods that depend on the selected one.
   - Edit config... (THUNDERSTORE.md §7; screens/bepinex_config_window.py):
     the open load order's BepInEx/config/ files, browsed and edited in a
     split-pane window. Scoped to the whole load order, not a mod (no
@@ -201,7 +224,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from volt_py import bepinex_conflicts as bc
 from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, bepinex_share as share, icons, painters, paths, theme
+from volt_py import bepinex_patchlog as pl
+from volt_py import bepinex_runs as runs
 from volt_py import download_state as ds
 from volt_py import first_run as fr
 from volt_py import mod_icons
@@ -221,6 +247,7 @@ from volt_py.screens.download_bar import PackageDownloadBar
 from volt_py.screens.error_box import show_error
 from volt_py.screens.first_run_widgets import ChecklistStrip, EmptyStateCard
 from volt_py.screens.bepinex_settings_window import BepInExSettingsWindow
+from volt_py.screens.bepinex_troubleshoot_window import TroubleshootWindow
 from volt_py.screens.help_window import HelpWindow
 from volt_py.screens.rimworld_main_screen import (
     ACTIONS_WIDTH,
@@ -285,6 +312,7 @@ IMPORT_LOCAL_TOOLTIP = (
     "(or is no longer) on Thunderstore. It's never checked for updates."
 )
 BROWSE_TOOLTIP = "Browse Thunderstore's {game} mods and install them into the open profile."
+TROUBLESHOOT_TOOLTIP = "Reads the game's log from the last launch of this profile and explains what went wrong."
 # The two launch buttons' tooltips ({game} = the game module's NAME).
 MODDED_TOOLTIP = "Start {game} with this profile's mods."
 VANILLA_TOOLTIP = "Start {game} without any mods."
@@ -389,6 +417,9 @@ def _details_text(rich: bool = False) -> QLabel:
     return label
 
 
+NEEDED_BY_SHOWN = 6  # the details pane's "Needed by": names shown before "+N more"
+
+
 class ThunderstoreDetailsPanel(QFrame):
     """The mockup's .details: a deprecated package's warn banner (the Browse
     Mods page's, DEPRECATED_BANNER) at the top, the package icon
@@ -443,17 +474,24 @@ class ThunderstoreDetailsPanel(QFrame):
             ("version", "Version", True),
             ("updated", "Last updated", False),
             ("website", "Website", True),
+            ("needed_by", "Needed by", False),  # troubleshooting phase 1: hidden when nothing needs the mod
         ):
             rows.append((title, _details_text(rich)))
             self.details_fields[key] = rows[-1][1]
-        body_layout.addLayout(readout(rows))
+        grid = readout(rows)
+        self._needed_by_key = grid.itemAtPosition(len(rows) - 1, 0).widget()  # the row's key cell (hidden with it)
+        body_layout.addLayout(grid)
         self.details_description = _details_text()
         body_layout.addWidget(details_well(self.details_description), 1)
         layout.addWidget(body, 1)
         self._icon_source = None
 
     def show_entry(self, entry: dict | None, *, latest: str | None = None, date_updated=None,
-                   icon: Path | None = None, framework: bool = False, deprecated: bool = False) -> None:
+                   icon: Path | None = None, framework: bool = False, deprecated: bool = False,
+                   required_by=()) -> None:
+        """`required_by`: the display names of the installed mods that
+        depend on this one ("Needed by": the first NEEDED_BY_SHOWN, then
+        "+N more", the full list as its tooltip; the row hidden when empty)."""
         shown = entry is not None
         self.details_empty.setVisible(not shown)
         self.details_body.setVisible(shown)
@@ -477,6 +515,12 @@ class ThunderstoreDetailsPanel(QFrame):
             f["website"].setText(f'<a href="{url}" style="color:{theme.ACCENT}; text-decoration: none">{shown_url} ↗</a>')
         else:
             f["website"].setText("-")
+        needed = list(required_by)
+        extra = len(needed) - NEEDED_BY_SHOWN
+        f["needed_by"].setText(", ".join(needed[:NEEDED_BY_SHOWN]) + (f" +{extra} more" if extra > 0 else ""))
+        f["needed_by"].setToolTip(", ".join(needed) if extra > 0 else "")
+        for cell in (self._needed_by_key, f["needed_by"]):
+            cell.setVisible(bool(needed))
         self.details_description.setText((entry.get("description") or "").strip() or "No description.")
         from PySide6.QtGui import QPixmap
 
@@ -555,7 +599,7 @@ class BepInExMainScreen(QWidget):
         self._profile_tips = {w: w.toolTip() for w in (
             self.load_order_picker, self.copy_button, self.export_button, self.enable_all_button,
             self.disable_all_button, self.rescan_button, self.config_button, self.add_mod_button,
-            self.browse_button, self.save_button, self.run_button)}
+            self.browse_button, self.save_button, self.run_button, self.troubleshoot_button)}
         # First-run guidance (0.6.23) as last shown: the card / the checklist
         # band visible, the checklist's state - a change crossfades, a repeat
         # does nothing (_apply_first_run runs on every state change).
@@ -588,7 +632,19 @@ class BepInExMainScreen(QWidget):
         self._issues: dict[str, list[tuple[str, str]]] = {}  # full_name -> [(severity, text)] (the rows / tooltips)
         self._issue_list: list[dict] = []  # bepinex_load_orders.dependency_issues' dicts (the issues window)
         self._missing_files: dict[str, tuple[int, int]] = {}  # lo.missing_files of the open load order (0.6.27)
-        # The launch being watched (Run): exe_name, load_order_name, modded,
+        # Conflicts (troubleshooting phase 1, bepinex_conflicts.py): scan_package results by scan_key
+        # (static per installed package, kept for the session), the open profile's file_conflicts pairs
+        # (_file_hits_slug's), the scan generation (an older scan's result is dropped) and the pending
+        # post-job heads-up: (slug, incompatible issue keys before the job) or None.
+        self._scan_cache: dict[tuple, dict] = {}
+        # The Troubleshoot window's DLL type-index scans (bepinex_type_index.scan_package_types), by the
+        # same scan_key and for the session like _scan_cache; filled from its worker's copy (0.6.38).
+        self._type_cache: dict[tuple, dict] = {}
+        self._file_hits: list[dict] = []
+        self._file_hits_slug: str | None = None
+        self._scan_gen = 0
+        self._headsup: tuple[str, set] | None = None
+        # The launch being watched (Run): exe_name, load_order_name, load_order (slug | None), modded,
         # phase "starting" / "running", started (monotonic). None when idle.
         self._launch: dict | None = None
         # Set once this screen is left for game select (_request_back): every
@@ -608,7 +664,9 @@ class BepInExMainScreen(QWidget):
         # when a row is first painted; read from disk on _IconLoader's worker threads.
         self._icons: dict[str, QPixmap | None] = {}
         self._icon_waiting: set[str] = set()  # keys asked for, not back yet (one log line per batch, 0.6.27)
-        self._icon_loader = _IconLoader(None, fetch=lambda key: mod_icons.load_icon(self.app_root, key))
+        # 0.6.40: + the open profile's folder and the key's entry - its own icon.png is the third source
+        self._icon_loader = _IconLoader(None, fetch=lambda key: mod_icons.load_icon(
+            self.app_root, key, self._load_order_dir(), self._entries.get(key.rpartition("-")[0])))
         self._icon_loader.loaded.connect(self._on_row_icon, Qt.ConnectionType.QueuedConnection)
         self._poll_timer = QTimer(self)
         self._poll_timer.setSingleShot(True)  # re-armed after each poll's result, so polls never overlap
@@ -631,6 +689,8 @@ class BepInExMainScreen(QWidget):
         self._reload_load_order_picker()
         self._apply_paths()
         self._recover_launch()
+        self._recover_patch_details()
+        self._recover_runs()
         if self.game_dir:
             self._apply_current_load_order_to_panes()
             self._start_update_check()
@@ -743,6 +803,8 @@ class BepInExMainScreen(QWidget):
             self._log_path, self, app_root=self.app_root, is_busy=lambda: self._busy is not None,
             settings=self._settings, game=self.game, confirm=self._confirm,
             troubleshooting_info=self._troubleshooting_info,
+            profile=(self.load_order_picker.currentText(), self._load_order_dir()) if self.current_load_order else None,
+            game_running=lambda: self._launch is not None,
         ).exec()
         log("settings window closed")
 
@@ -824,6 +886,8 @@ class BepInExMainScreen(QWidget):
         self.browse_button.setEnabled(ready and has_lo)
         self.save_button.setEnabled(ready and has_lo)
         self.run_button.setEnabled(ready and has_lo)
+        # read-only, so not tied to busy: it is most useful while / right after the game runs
+        self.troubleshoot_button.setEnabled(has_game and has_lo)
         self.vanilla_button.setEnabled(ready)  # no load order needed for a vanilla launch (user-directed 2026-09-28)
         no_profile = fr.needs_profile_tip(game_found=has_game, busy=busy, open_slug=self.current_load_order)
         for widget, tip in self._profile_tips.items():
@@ -1017,6 +1081,7 @@ class BepInExMainScreen(QWidget):
         self.vanilla_button.clicked.connect(lambda: self._run(modded=False))
         self.update_all_button.clicked.connect(lambda: self._update_all_clicked())
         self.issues_button.clicked.connect(lambda: self._show_issues())
+        self.troubleshoot_button.clicked.connect(lambda: self._show_troubleshoot())
 
     # ---- paths bar links ----
     def _load_order_dir(self) -> Path | None:
@@ -1223,7 +1288,7 @@ class BepInExMainScreen(QWidget):
         if not self._icon_waiting:  # a batch of rows is done: one line, never one per paint
             s = mod_icons.take_stats()
             log(f"icons: batch done - {s['cache']} from the icon cache, {s['copied']} copied from downloaded zips, "
-                f"{s['none']} without an icon (plain tile)")
+                f"{s['profile']} read from the profile's own files, {s['none']} without an icon (plain tile)")
         if not data:
             return
         pixmap = QPixmap()
@@ -1261,6 +1326,84 @@ class BepInExMainScreen(QWidget):
         # Files missing (0.6.27): one walk of BepInEx/ per manifest read, on the GUI thread
         # (a directory listing, no per-file stat; the log line has its time).
         self._missing_files = lo.missing_files(self.app_root, self.current_load_order, manifest) if manifest else {}
+        self._scan_packages()
+
+    # ---- conflicts (troubleshooting phase 1, bepinex_conflicts.py) ----
+    def _scan_packages(self) -> None:
+        """The conflict scan of the manifest just taken, as a read-only job
+        (the update check's way: _run_job without _set_busy, so nothing is
+        disabled): scan_package for every package not in _scan_cache, then
+        file_conflicts over every installed mod (the live toggles are applied
+        by _update_issues). A newer manifest's scan supersedes it."""
+        self._scan_gen += 1
+        gen, slug, m = self._scan_gen, self.current_load_order, self._manifest
+        if m is None or slug is None:
+            self._file_hits, self._file_hits_slug = [], None
+            return
+        mods = m["active"] + m["inactive"]
+        todo = [e for e in mods if bc.scan_key(e) not in self._scan_cache]
+        root = lo.tree_root(self.app_root, slug)
+
+        def job(report):
+            t0 = time.monotonic()
+            scans = {bc.scan_key(e): bc.scan_package(root, e) for e in todo}
+            return {"scans": scans, "hits": bc.file_conflicts(root, m, None), "ms": (time.monotonic() - t0) * 1000}
+
+        self._run_job(f"conflict-scan-{slug}", job,
+                      lambda payload: self._on_scan_done(gen, slug, len(todo), len(mods), payload))
+
+    def _on_scan_done(self, gen: int, slug: str, scanned: int, total: int, payload: dict) -> None:
+        if gen != self._scan_gen or slug != self.current_load_order:
+            log(f"conflict scan {slug}: result dropped (the profile changed or a newer scan started)")
+            return
+        if "error" in payload:  # the scan functions never raise; belt and braces
+            log(f"conflict scan {slug}: failed ({payload['error']})")
+            return
+        res = payload["ok"]
+        # a package with unreadable files (mid-rename, mid-update) is scanned again next time
+        self._scan_cache.update({k: v for k, v in res["scans"].items() if not v["skipped"]})
+        self._file_hits, self._file_hits_slug = res["hits"], slug
+        skipped = sum(v["skipped"] for v in res["scans"].values())
+        log(f"conflict scan {slug}: {scanned} packages scanned ({skipped} files skipped), {total - scanned} from "
+            f"the cache, {len(res['hits'])} pairs share differing files, {res['ms']:.0f} ms")
+        self._update_issues()
+        self.active_list.viewport().update()
+        self.inactive_list.viewport().update()
+        selected = self.active_list.selected_mod_id() or self.inactive_list.selected_mod_id()
+        if selected:
+            self._show_details(selected)
+        self._deliver_headsup(slug)
+
+    def _alert_keys(self) -> set:
+        return {(i["mod_id"], i["dep"]) for i in self._issue_list if i["kind"] == "incompatible"}
+
+    def _arm_headsup(self, slug: str | None = None, fresh: bool = False) -> None:
+        """After an install / update / reinstall / import job, before its
+        refresh: the next conflict scan of `slug` (default the open profile)
+        says "Heads up" for an incompatibility that wasn't there
+        before (`fresh`: a new profile - every one is new)."""
+        slug = slug or self.current_load_order
+        if slug is not None:
+            self._headsup = (slug, set() if fresh else self._alert_keys())
+
+    def _deliver_headsup(self, slug: str) -> None:
+        if self._headsup is None:
+            return
+        armed, before = self._headsup
+        self._headsup = None
+        if armed != slug:
+            return
+        new = [i for i in self._issue_list if i["kind"] == "incompatible"
+               and (i["mod_id"], i["dep"]) not in before]
+        if not new:
+            log("conflicts: heads-up armed, nothing new")
+            return
+        more = f" (and {len(new) - 1} more)" if len(new) > 1 else ""
+        note = (f"Heads up: {self._display_name(new[0]['mod_id'])} is incompatible with {new[0]['dep_name']} "
+                f"and won't load{more}. See the warnings button.")
+        kind = self.status_text.status_kind()
+        self.status_text.set_status_text(f"{self.status_text.status_text()} {note}".strip(),
+                                         "error" if kind == "error" else "warn")
 
     def _apply_current_load_order_to_panes(self) -> None:
         """Shows the open load order's saved lists and toggles; they become
@@ -1753,6 +1896,7 @@ class BepInExMainScreen(QWidget):
                 f"{len(res['installed'])} of {res['listed']} installed, "
                 f"{len(res['fallbacks'])} fallbacks, {len(res['failed'])} failed, {len(res['restored'])} files restored")
             self._settings.update({"last_load_order": res["slug"]})
+            self._arm_headsup(res["slug"], fresh=True)  # a new profile: any incompatibility in it is news
             self._reload_load_order_picker(select_slug=res["slug"])
             self._apply_current_load_order_to_panes()
             kind = "warn" if res["failed"] or res["errors"] or res.get("replace_skipped") else "info"
@@ -2075,9 +2219,12 @@ class BepInExMainScreen(QWidget):
             self.details_panel.show_entry(None)
             return
         m = self._meta.get(mod_id) or {}
+        needed = [] if mod_id == self._framework else sorted(
+            (self._display_name(n) for n in bc.required_by(self._entries, mod_id, self._framework)), key=str.casefold)
         self.details_panel.show_entry(
             e, latest=m.get("latest_version"), date_updated=m.get("date_updated"),
             icon=self._mod_icon(e), framework=mod_id == self._framework, deprecated=bool(m.get("deprecated")),
+            required_by=needed,
         )
 
     def _mod_folder(self, entry: dict) -> Path | None:
@@ -2155,11 +2302,20 @@ class BepInExMainScreen(QWidget):
         for issue in lo.dependency_issues(self._entries, self._active_ids(), self._toggles,
                                           self.ts_game.framework_package):
             deps.setdefault(issue["mod_id"], []).append(issue)
-        # 0.6.27: each mod's "files" warning first, then its dependency issues, in list order (Active, then Inactive)
+        # troubleshooting phase 1: conflicts (bepinex_conflicts.profile_issues), once _scan_packages'
+        # result is in
+        scans = {n: self._scan_cache[k] for n, e in self._entries.items() if (k := bc.scan_key(e)) in self._scan_cache}
+        hits = self._file_hits if self._file_hits_slug == self.current_load_order else []
+        clashes: dict[str, list[dict]] = {}
+        for issue in bc.profile_issues(self._entries, self._active_ids(), self._toggles,
+                                       scans, hits, self._framework):
+            clashes.setdefault(issue["mod_id"], []).append(issue)
+        # 0.6.27: each mod's "files" warning first, then its conflicts, then its dependency issues,
+        # in list order (Active, then Inactive)
         self._issue_list = [
             issue for mod_id in self._active_ids() + self.inactive_list.mod_ids()
             for issue in ([lo.files_issue(mod_id, *self._missing_files[mod_id])] if mod_id in self._missing_files else [])
-            + deps.get(mod_id, [])
+            + clashes.get(mod_id, []) + deps.get(mod_id, [])
         ]
         issues: dict[str, list[tuple[str, str]]] = {}
         for issue in self._issue_list:
@@ -2180,6 +2336,28 @@ class BepInExMainScreen(QWidget):
             is_busy=lambda: self._busy is not None, parent=self,
         ).exec()
         log("issues window closed")
+
+    def _show_troubleshoot(self) -> None:
+        """Troubleshoot...: the log analyzer + Mod contents window
+        (screens/bepinex_troubleshoot_window.py) for the open profile, read in
+        a worker job (_run_job) over the session's _type_cache."""
+        if self.current_load_order is None:
+            return
+        slug, name = self.current_load_order, self.load_order_picker.currentText()
+        log_path = self._bepinex_dir() / "LogOutput.log"
+        log(f"[troubleshoot] window opened for {slug} ({name!r}): {log_path}")
+
+        def running() -> bool:  # this profile's modded run is live (the launch watch)
+            st = self._launch
+            return bool(st and st["modded"] and st["load_order_name"] == name)
+
+        TroubleshootWindow(
+            self.game_name, name, log_path=log_path, root=self._load_order_dir(), manifest=lambda: self._manifest,
+            run_job=self._run_job, type_cache=self._type_cache, game_running=running,
+            places={"<PROFILE>": self._load_order_dir(), "<VOLT>": self.app_root, "<GAME>": self.game_dir,
+                    "<HOME>": Path.home()},
+            app_version=self.app_version, parent=self,
+        ).exec()
 
     def _install_missing(self, packages: list[str], on_done=None, parent: QWidget | None = None) -> None:
         """Installs the missing dependencies `packages` (full_names, each at
@@ -2318,6 +2496,7 @@ class BepInExMainScreen(QWidget):
     def _refresh_after_change(self, manifest: dict | None = None) -> None:
         """After a mod was added / removed / updated on disk: re-read the
         manifest, keep the on-screen order / toggles, and re-check."""
+        self._arm_headsup()  # every caller is a job's end (update, reinstall, install missing...)
         self._take_manifest(manifest if manifest is not None else self._read_manifest())
         ids, toggles = self._snapshot()
         self._show_lists(ids, toggles)
@@ -2493,6 +2672,7 @@ class BepInExMainScreen(QWidget):
             installed=lambda: self._entries, framework=self._framework, run_job=self._run_job,
             install=self._install_package, switch_version=self._switch_version, is_busy=lambda: self._busy is not None,
             app_version=self.app_version, app_root=self.app_root, parent=self,  # app_root: the README image cache (0.6.31)
+            tree=self._load_order_dir,  # installed mods' icons from the profile's own files (0.6.40)
         )
         self._extra_dl_bars = list(window.download_bars)  # the same bar state as the footer's (0.6.26)
         try:
@@ -2611,6 +2791,7 @@ class BepInExMainScreen(QWidget):
         an install is never itself an unsaved change; the manifest is
         re-read, the state re-applied."""
         ids, toggles = self._snapshot()
+        self._arm_headsup()
         self._take_manifest(self._read_manifest())
         self._show_lists(ids + [n for n in new if n not in ids], {**toggles, **{n: True for n in new}})
         base_ids, base_toggles = self._baseline
@@ -2749,19 +2930,32 @@ class BepInExMainScreen(QWidget):
         ):
             log("run: cancelled at the foreign-BepInEx prompt")
             return
+        if modded:  # Run history (0.6.41): the previous run before this launch overwrites its log, then this one
+            prev = runs.claim(tree)
+            if prev is not None:
+                log(f"run: the previous run of {slug} was still pending; finishing it first")
+                self._finish_run(tree, claimed=prev)
+            runs.write_pending(tree, self._manifest)
+        if modded:  # Record patch details (0.6.39): Info on in this profile's BepInEx.cfg for this launch
+            pl.restore(tree)  # a restore left pending by an earlier run goes first (arm never stacks on one)
+            armed = pl.arm(tree)
+            log(f"run: record patch details: {armed}")
         try:
             bl.start(
                 self.app_root, self.game_dir, tree, self._manifest, appid=self.game.STEAM_APPID, exe_name=exe.name,
                 steam_exe=steam_exe, load_order=slug or "", load_order_name=name, modded=modded, extra_args=extra_args,
             )
         except (bl.LaunchError, OSError) as err:
+            if modded:
+                log(f"run: start failed, record patch details: restore {pl.restore(tree)}")
+                runs.discard_pending(tree)
             log(f"run: failed: {err!r}")
             self._warn("Run failed", f"Couldn't start {self.game_name}.",
                        means=str(err),
                        tryit=f"Make sure Steam is running and {self.game_name} isn't already open, then try again.",
                        details=str(err))
             return
-        self._begin_watch(exe_name=exe.name, load_order_name=name, modded=modded, phase="starting")
+        self._begin_watch(exe_name=exe.name, load_order_name=name, modded=modded, phase="starting", slug=slug)
 
     def _recover_launch(self) -> None:
         """On open: a launch record left by a previous VOLT session means the
@@ -2785,7 +2979,7 @@ class BepInExMainScreen(QWidget):
         name = record.get("load_order_name") or record.get("load_order") or "?"
         if state == "running":
             self._begin_watch(exe_name=record["exe_name"], load_order_name=name, modded=bool(record.get("modded", True)),
-                              phase="running")
+                              phase="running", slug=record.get("load_order") or None)
             return
         if state == "incomplete":
             self._warn_cleanup_failed(rec["result"])
@@ -2795,10 +2989,12 @@ class BepInExMainScreen(QWidget):
             self.status_text.set_status_text(
                 f"Removed leftover mod loader files from the {self.game_name} folder (the last run wasn't tidied up).", "warn")
 
-    def _begin_watch(self, *, exe_name: str, load_order_name: str, modded: bool, phase: str) -> None:
+    def _begin_watch(self, *, exe_name: str, load_order_name: str, modded: bool, phase: str,
+                     slug: str | None = None) -> None:
         """Busy until the game (by image name) has been seen and is gone."""
-        self._launch = {"exe_name": exe_name, "load_order_name": load_order_name, "modded": modded,
-                        "phase": phase, "started": time.monotonic()}
+        self._launch = {"exe_name": exe_name, "load_order_name": load_order_name, "load_order": slug,
+                        "modded": modded, "phase": phase, "started": time.monotonic(),
+                        "reattached": phase == "running"}  # run history: no measured play time then
         what = f'profile "{load_order_name}"' if modded else "vanilla, no mods"
         if phase == "running":
             self._set_busy(f"{self.game_name} is running ({what}), started by a previous VOLT session."
@@ -2844,6 +3040,15 @@ class BepInExMainScreen(QWidget):
         job - a locked file is retried for a few seconds), then the status."""
         st, self._launch = self._launch, None
         self._poll_timer.stop()
+        if st["modded"] and st.get("load_order"):
+            tree = lo.tree_root(self.app_root, st["load_order"])
+            self._finish_patch_details(tree)
+            # run history: finished once the cleanup's status is up (the heads-up appends to it); a relaunch
+            # can't come first (busy until then, and _run claims a pending run itself anyway)
+            if st.get("reattached"):  # watched since a previous VOLT session: measured from the launch instead
+                finish_kw = {"ended_at": time.time()}
+            else:
+                finish_kw = {"play_s": time.monotonic() - st["started"] if st["phase"] == "running" else 0.0}
         if not st["modded"]:
             self._set_busy(None)
             self.status_text.set_status_text(f"{what}.", kind)
@@ -2859,6 +3064,8 @@ class BepInExMainScreen(QWidget):
                     f"{what} - some mod loader files are still in the {self.game_name} folder.", "warn")
             else:
                 self.status_text.set_status_text(f"{what} - game folder restored.", kind)
+            if st.get("load_order"):
+                self._finish_run(lo.tree_root(self.app_root, st["load_order"]), **finish_kw)
 
         self._run_job("launch-cleanup", lambda report: bl.cleanup(self.app_root), done)
 
@@ -2872,6 +3079,87 @@ class BepInExMainScreen(QWidget):
             tryit=f"Close {self.game_name} fully, then open this manager again or press Modded or Vanilla.",
             details=f"Files: {names}\nFirst error: {first}",
         )
+
+    # ---- Record patch details (0.6.39, bepinex_patchlog.py; spec temp/troubleshoot-phase2/SPEC.md §6) ----
+    def _recover_patch_details(self) -> None:
+        """On open: every profile whose recording run never got its cfg
+        restored (VOLT closed / crashed while the game ran, the game killed)
+        is finished now - unless it is the run _recover_launch just re-attached
+        to (that one finishes when the game exits)."""
+        live = self._launch.get("load_order") if self._launch else None
+        for tree in pl.pending_trees(lo.load_orders_root(self.app_root)):
+            if tree.name == live:
+                log(f"[patchlog] {tree.name}: recording run still going (re-attached); restored when it exits")
+                continue
+            log(f"[patchlog] {tree.name}: a recording run wasn't finished (VOLT closed or the game was killed); "
+                "finishing it now")
+            self._finish_patch_details(tree)
+
+    def _finish_patch_details(self, tree: Path) -> None:
+        """After a recording run: the user's LogChannels back at once (GUI
+        thread, a small file, before anything can open the cfg), then the log
+        read into the patch table on a worker (no busy state)."""
+        p = pl.load_state(tree)["pending"]
+        if not p:
+            return
+        outcome = pl.restore(tree)
+        log(f"[patchlog] {tree.name}: run finished, restore {outcome}; reading the patch details")
+        try:
+            manifest = lo.load_load_order(self.app_root, tree.name)
+        except Exception as err:
+            log(f"[patchlog] {tree.name}: profile unreadable, recording without mod names: {err!r}")
+            manifest = None
+        cache = dict(self._type_cache)  # the worker fills a copy (as the Troubleshoot window does)
+
+        def done(payload: dict) -> None:
+            res = payload.get("ok") or {"ok": False, "reason": payload.get("error"), "cache": {}}
+            self._type_cache.update(res.get("cache") or {})
+            if res["ok"]:
+                n = res["targets"]
+                self.status_text.set_status_text(f"Recorded patch details: {n:,} changed game method{'' if n == 1 else 's'}. "
+                                                 "See Troubleshoot > Mod contents.")
+
+        self._run_job("patch-details", lambda report: pl.record_table(tree, manifest, cache, p.get("at")), done)
+
+    # ---- Run history (0.6.41, bepinex_runs.py; spec temp/troubleshoot-phase4/SPEC.md) ----
+    def _recover_runs(self) -> None:
+        """On open: every profile with a pending run (VOLT closed / crashed,
+        the game killed) is finished now - except the run _recover_launch
+        just re-attached to (finished when the game exits)."""
+        live = self._launch.get("load_order") if self._launch else None
+        for tree in runs.pending_trees(lo.load_orders_root(self.app_root)):
+            if tree.name == live:
+                log(f"[runs] {tree.name}: run still going (re-attached); finished when it exits")
+                continue
+            log(f"[runs] {tree.name}: a run wasn't finished (VOLT closed or the game was killed); finishing it now")
+            self._finish_run(tree)
+
+    def _finish_run(self, tree: Path, **kw) -> None:
+        """finish_run on a worker (no busy state); a run with new certain /
+        likely problems since its baseline adds one heads-up line to the
+        status text when it is the open profile's."""
+        cache = dict(self._type_cache)  # the worker fills a copy (as the Troubleshoot window does)
+
+        def job(report):
+            record = runs.finish_run(tree, cache=cache, **kw)
+            if record is None:
+                return None
+            base, kind = runs.baseline(runs.list_runs(tree), record["id"])
+            new = runs.new_problems(record, base)
+            log(f"[runs] {tree.name}: run {record['id']} vs "
+                + (f"{kind} run {base['id']}: {len(new)} new certain / likely problems" if base else "nothing (first run)"))
+            return len(new)
+
+        def done(payload: dict) -> None:
+            self._type_cache.update(cache)
+            n = payload.get("ok")
+            if not n or tree.name != self.current_load_order:
+                return
+            kind = self.status_text.status_kind()
+            self.status_text.set_status_text(f"{self.status_text.status_text()} {runs.new_problems_text(n)}".strip(),
+                                             "error" if kind == "error" else "warn")
+
+        self._run_job(f"run-history-{tree.name}", job, done)
 
     # ---- right-click menu ----
     def _show_mod_menu(self, pane, pos) -> None:
@@ -2944,6 +3232,10 @@ class BepInExMainScreen(QWidget):
         row.addStretch(1)
         self.help_button = _button("Help")
         row.addWidget(self.help_button)
+        # 0.6.38 (troubleshooting phase 2): the right-most item, right of Help (user 2026-10-04)
+        self.troubleshoot_button = _button("Troubleshoot...")
+        self.troubleshoot_button.setToolTip(TROUBLESHOOT_TOOLTIP)
+        row.addWidget(self.troubleshoot_button)
         column.addLayout(row)
         self.path_line = _PathLine()
         self.path_line.setContentsMargins(2, 0, 0, 0)  # padding-left: 2px

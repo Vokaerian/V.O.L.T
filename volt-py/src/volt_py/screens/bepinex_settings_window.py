@@ -50,7 +50,11 @@ Thunderstore game actually needs today:
   clipboard), SUPPORT INFO (Copy troubleshooting info), MOD CACHE (Clean
   cache), and RESET INSTALLATION pushed to the bottom of the page by the
   stretch (destructive; no danger button variant exists, so separation
-  only).
+  only). 0.6.39 (troubleshooting phase 2 dispatch C): PATCH DETAILS after
+  DOWNLOADED MODS, before the stretch - a note, the "Record patch details on
+  next launch" checkbox (the open profile's switch, bepinex_patchlog; the
+  Troubleshoot window's record button sets the same one; disabled while the
+  game runs or with no profile) and a muted status line under it.
 
 Opened from the paths bar's Settings button (BepInExMainScreen._show_settings);
 Browse / Autodetect are the screen's own (on_browse(kind, parent) /
@@ -67,6 +71,7 @@ import PySide6
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QGridLayout,
     QHBoxLayout,
@@ -78,7 +83,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, paths
+from volt_py import bepinex_launch as bl, bepinex_load_orders as lo, bepinex_patchlog as pl, painters, paths, theme
 from volt_py.applog import log, read_tail, troubleshooting_text
 from volt_py.screens.settings_window import (
     GAP,
@@ -180,6 +185,8 @@ class BepInExSettingsWindow(QDialog):
         game,
         confirm: Callable[..., bool],
         troubleshooting_info: Callable[[], list[tuple[str, object]]],
+        profile: tuple[str, Path] | None = None,
+        game_running: Callable[[], bool] = lambda: False,
     ) -> None:
         """app_root: this game's APP-ROOT (Clean cache's package cache and
         load orders, Open data folder). is_busy(): the screen has a mutating
@@ -188,7 +195,9 @@ class BepInExSettingsWindow(QDialog):
         STEAM_APPID, is_game_root, find_game_exe) for Reset installation.
         confirm(title, message, confirm_label=, parent=): the screen's
         Enter-confirms box. troubleshooting_info(): the screen's (key, value)
-        lines for Copy troubleshooting info (game, folder, load order, mods)."""
+        lines for Copy troubleshooting info (game, folder, load order, mods).
+        profile: (display name, folder) of the open profile, or None (PATCH
+        DETAILS). game_running(): the screen's launch watch is live."""
         super().__init__(parent)
         self.setObjectName("settings")
         self.setWindowTitle("Settings")
@@ -205,6 +214,8 @@ class BepInExSettingsWindow(QDialog):
         self._game = game
         self._confirm = confirm
         self._troubleshooting_info = troubleshooting_info
+        self._profile = profile
+        self._game_running = game_running
         self._bad_launch_args: str | None = None  # the last text refused (warned once, not again on close)
         prev = log_path.with_name(log_path.name + ".prev") if log_path else None
         self._prev_log_path = prev if prev and prev.exists() else None
@@ -235,6 +246,7 @@ class BepInExSettingsWindow(QDialog):
         self.tabs.currentChanged.connect(lambda i: log(f"settings: {self.tabs.tabText(i)} tab"))
         # A job can finish while this modal window is open: re-read the busy state on every tab switch.
         self.tabs.currentChanged.connect(lambda i: self._apply_clean_state())
+        self.tabs.currentChanged.connect(lambda i: self._apply_record_state())
 
         width, height = WINDOW_SIZE
         if parent is not None:
@@ -352,6 +364,8 @@ class BepInExSettingsWindow(QDialog):
         self.clean_cache_button = _button("Clean up downloads")
         self._apply_clean_state()
         _group(layout, "Downloaded mods", f"{CLEAN_CACHE_TOOLTIP}.", self.clean_cache_button)
+        layout.addSpacing(SECTION_GAP)
+        self._build_patch_details(layout)
         layout.addStretch(1)  # the destructive group sits apart, at the bottom of the page
         self.reset_button = _button("Reset installation")
         self._apply_clean_state()
@@ -369,6 +383,63 @@ class BepInExSettingsWindow(QDialog):
         self.copy_info_button.clicked.connect(lambda: self._copy_info())
         self.reset_button.clicked.connect(lambda: self._reset_installation())
         return page
+
+    # ---- Troubleshooting: PATCH DETAILS (0.6.39, bepinex_patchlog.py) ----
+    def _build_patch_details(self, layout: QVBoxLayout) -> None:
+        """The note, the "Record patch details on next launch" checkbox (the
+        "Check for updates when VOLT starts" control) and its muted status
+        line, indented under the box's label. The switch is per profile
+        (patch-details.json); the Troubleshoot window's record button sets the
+        same switch."""
+        _group(layout, "Patch details",
+               pl.SETTINGS_NOTE.format(profile=self._profile[0] if self._profile else "the open profile"))
+        self.record_box = QCheckBox(pl.RECORD_LABEL)
+        self.record_box.setToolTip(pl.RECORD_TOOLTIP)
+        layout.addWidget(self.record_box)
+        row = QHBoxLayout()
+        row.addSpacing(20)  # under the checkbox's label (indicator + its spacing), the mockup's padding-left
+        self.record_status = _muted("")
+        self.record_status.setProperty("role", "ts-small")
+        self.record_status.setWordWrap(True)
+        row.addWidget(self.record_status, 1)
+        layout.addLayout(row)
+        self._apply_record_state(fade=False)
+        self.record_box.toggled.connect(self._set_record)
+
+    def _apply_record_state(self, fade: bool = True) -> None:
+        if not hasattr(self, "record_box"):
+            return
+        if self._profile is None:
+            self.record_box.setEnabled(False)
+            text = pl.NO_PROFILE
+        else:
+            name, tree = self._profile
+            state = pl.load_state(tree)
+            running = self._game_running()
+            self.record_box.blockSignals(True)
+            self.record_box.setChecked(state["record"])
+            self.record_box.blockSignals(False)
+            self.record_box.setEnabled(not running)
+            text = pl.status_line(state, name, cfg_exists=pl.cfg_path(tree).is_file(), running=running)
+        if self.record_status.text() != text:
+            if fade:
+                painters.crossfade(self.record_status, lambda: self.record_status.setText(text), theme.MOTION_FAST)
+            else:
+                self.record_status.setText(text)
+
+    def _set_record(self, on: bool) -> None:
+        if self._profile is None:
+            return
+        if self._game_running():  # a safety net behind the disabled box (the game may have started meanwhile)
+            log("settings: record patch details refused: the game is running")
+            self._apply_record_state()
+            return
+        if not pl.set_record(self._profile[1], on, "Settings"):
+            self._warn("Couldn't save this setting", "VOLT couldn't save the patch details switch.",
+                       means="Nothing changes for the next launch.",
+                       tryit="Make sure VOLT's folder isn't read-only or full, then try again.",
+                       details=str(self._profile[1]), parent=self)
+        self._apply_record_state()
 
     def _refresh(self) -> None:
         state = self._paths_state()

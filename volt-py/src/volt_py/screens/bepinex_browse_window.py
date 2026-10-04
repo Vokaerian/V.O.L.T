@@ -548,15 +548,21 @@ def shrink_image(data: bytes) -> bytes | None:
     return out
 
 
-def _icon_fetcher(app_root, app_version):
+def _icon_fetcher(app_root, app_version, installed=None, tree=None):
     """The window's icon loader fetch (one loader, one queue): a plain URL
     from the network (as before), DISK_ICON keys from the installed copy on
     disk - mod_icons.load_icon: the icon cache, else the cached zip's root
-    icon.png, no network (0.6.34) - and VERSION_ICON keys through that
+    icon.png, no network (0.6.34), else (0.6.40, with `installed` + `tree`)
+    the mod's own icon.png in the open profile's folder - and VERSION_ICON keys through that
     version's metadata to its icon URL (the Required tab's small lists only)."""
     def fetch(key: str) -> bytes:
         if key.startswith(DISK_ICON):
-            return mod_icons.load_icon(app_root, key[len(DISK_ICON):]) if app_root else b""
+            key = key[len(DISK_ICON):]
+            if not app_root:
+                return b""
+            if installed is None or tree is None:
+                return mod_icons.load_icon(app_root, key)
+            return mod_icons.load_icon(app_root, key, tree(), installed().get(key.rpartition("-")[0]))
         if key.startswith(VERSION_ICON):
             ref = ts.PackageRef.parse(key[len(VERSION_ICON):])
             url = tb.fetch_version(ref.namespace, ref.name, ref.version, app_version)["icon"]
@@ -1076,7 +1082,7 @@ def _clear_layout(layout) -> None:
 
 class BepInExBrowseWindow(QDialog):
     def __init__(self, game, game_name: str, load_order_name: str, *, installed, framework: str | None,
-                 run_job, install, switch_version, is_busy, app_version=None, app_root=None,
+                 run_job, install, switch_version, is_busy, app_version=None, app_root=None, tree=None,
                  parent: QWidget | None = None) -> None:
         """`game`: the ThunderstoreGame (community slug). `installed()` ->
         the open load order's full_name -> entry dict (read live, it grows
@@ -1088,7 +1094,8 @@ class BepInExBrowseWindow(QDialog):
         None, on_done, parent)`: its in-place re-install at that version
         (None = the latest). `is_busy()`: the screen's mutating-job lock.
         `app_root`: the game's app root, for the README image cache (None:
-        no disk cache)."""
+        no disk cache). `tree()` -> the open profile's folder (0.6.40: an
+        installed mod's icon from its own files there; None: not used)."""
         super().__init__(parent)
         self.setObjectName("browseMods")
         self.setWindowTitle(f"Browse Thunderstore Mods - {game_name}")
@@ -1142,7 +1149,7 @@ class BepInExBrowseWindow(QDialog):
         self._dep_icons: list[tuple[str, QLabel]] = []  # Required tab: (icon_url, label)
         # icons: url -> QPixmap (null when the fetch failed), session-lived
         self._icons: dict[str, QPixmap] = {}
-        self._icon_loader = _IconLoader(app_version, fetch=_icon_fetcher(app_root, app_version))
+        self._icon_loader = _IconLoader(app_version, fetch=_icon_fetcher(app_root, app_version, installed, tree))
         self._icon_loader.loaded.connect(self._on_icon, Qt.ConnectionType.QueuedConnection)
         self._image_feed = _ImageFeed()
         self._image_feed.arrived.connect(self._on_image, Qt.ConnectionType.QueuedConnection)

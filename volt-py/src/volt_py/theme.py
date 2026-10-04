@@ -1764,6 +1764,164 @@ QScrollArea#updateNotes {{
     border-radius: {RADIUS}px;
 }}
 
+/* ---- Troubleshoot window (screens/bepinex_troubleshoot_window.py, 0.6.38; the signed-off
+   mockup https://claude.ai/artifact/SxrxdohnFoGwze1KuNNcBz). Reused as is: the Warnings window's
+   rail / detail frames (#validationRail, #validationDetail[severity]), Settings' underline tabs
+   (#settingsTabs, here on a frameless pane), Edit Config's rail frame (#configRail /
+   #configRailList), Browse Mods' search strip, the first-run card, the details readout keys,
+   the config-filter toggle, config-banner's wash. New below: the rail entries, the confidence
+   pill, the mod chips, the readout's widget cells, the banner with a link, the callout. ---- */
+QDialog#troubleshoot {{
+    background: {PANEL};
+}}
+/* the tabs' pane: frameless, so the rail + detail sit on the dialog as in the Warnings window */
+QTabWidget#settingsTabs[frameless="true"]::pane {{
+    background: transparent;
+    border: 0;
+}}
+/* a rail entry (finding or mod): flat, a 3px severity bar (--danger / --warn; none for
+   harmless and mods), --hover on hover, sinks to --panel when pressed, --selected when
+   selected. Two lines inside: the title (--text 12.0:1 on --panel-2, 10.0 on --hover, 10.1 on
+   --selected) and ts-sub (--muted 12px: 5.7 / 4.8 / 4.75). */
+QPushButton[variant="ts-entry"] {{
+    background: transparent;
+    border: 0;
+    border-left: 3px solid transparent;
+    border-radius: 0;
+    padding: 0;
+    text-align: left;
+}}
+QPushButton[variant="ts-entry"][severity="error"] {{
+    border-left-color: {DANGER};
+}}
+QPushButton[variant="ts-entry"][severity="warning"] {{
+    border-left-color: {WARN};
+}}
+QPushButton[variant="ts-entry"]:hover {{
+    background: {HOVER};
+}}
+QPushButton[variant="ts-entry"]:pressed {{
+    background: {PANEL};
+}}
+QPushButton[variant="ts-entry"][selected="true"],
+QPushButton[variant="ts-entry"][selected="true"]:hover {{
+    background: {SELECTED};
+}}
+QLabel[role="ts-sub"] {{
+    color: {MUTED};
+    font-size: 12px;
+}}
+/* the confidence word (the mockup's word pill): an opaque --panel chip, mono 10px 600 caps
+   (caps / spacing on the label's font), so it reads the same on a plain, hovered or selected
+   row. certain = --muted edge, likely = --border-hi edge, possible = dashed --border-hi with
+   --muted text. --text on --panel 13.5:1, --muted 6.4:1. No hue: severity keeps the colours. */
+QLabel[role="ts-pill"] {{
+    background: {PANEL};
+    border: 1px solid {BORDER_HI};
+    border-radius: 8px;
+    padding: 0px 6px;
+    font-family: {_MONO_CSS};
+    font-size: 10px;
+    font-weight: 600;
+    color: {TEXT};
+}}
+QLabel[role="ts-pill"][conf="certain"] {{
+    border-color: {MUTED};
+}}
+QLabel[role="ts-pill"][conf="possible"] {{
+    border-style: dashed;
+    color: {MUTED};
+}}
+/* "Shares code" on a Mod contents rail row: the Files-missing pill family (--warn on its 14%
+   wash) */
+QLabel[role="ts-tag"] {{
+    background: {_alpha(WARN, 0.14)};
+    border-radius: 8px;
+    padding: 0px 6px;
+    color: {WARN};
+    font-size: 11px;
+}}
+/* a mod chip (jumps to that mod in Mod contents): a --panel-2 pill on the --panel detail,
+   --text 12px (12.0:1); hover = --accent edge + --accent-hover text (Browse's chip) */
+QPushButton[variant="ts-chip"] {{
+    background: {PANEL_2};
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 1px 8px;
+    color: {TEXT};
+    font-size: 12px;
+}}
+QPushButton[variant="ts-chip"]:enabled:hover {{
+    border-color: {ACCENT};
+    color: {ACCENT_HOVER};
+}}
+QPushButton[variant="ts-chip"]:enabled:pressed {{
+    background: {HOVER};
+}}
+/* a readout value cell that holds widgets (pill + text, chips): details-value's rules on a QFrame */
+QFrame[role="ts-value"] {{
+    border: 0;
+    border-bottom: 1px solid {BORDER};
+}}
+QFrame[role="ts-value"][first="true"] {{
+    border-top: 1px solid {BORDER};
+}}
+QLabel[role="ts-mono"] {{
+    font-family: {_MONO_CSS};
+    font-size: 12px;
+}}
+QLabel[role="ts-small"] {{
+    font-size: 12px;
+}}
+/* the two banners (profile saved after the run; game still running): config-banner's 14% --warn
+   wash and --warn text, as a frame so "Read the log again" (a link, --accent) can sit in it */
+QFrame[role="ts-banner"] {{
+    background: {_alpha(WARN, 0.14)};
+    border-radius: {RADIUS}px;
+}}
+QFrame[role="ts-banner"] QLabel {{
+    color: {WARN};
+}}
+/* "Shares code with": Edit Config's search-match wash (8% --warn, 30% --warn edge) */
+QFrame[role="ts-callout"] {{
+    background: {_alpha(WARN, 0.08)};
+    border: 1px solid {_alpha(WARN, 0.3)};
+    border-radius: {RADIUS}px;
+}}
+/* the Mods | Game methods segment: two config-filter toggles joined in the middle */
+QPushButton[variant="config-filter"][seg="left"] {{
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+}}
+QPushButton[variant="config-filter"][seg="right"] {{
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+}}
+/* Game methods rail (dispatch C fills it): ~1,300 rows, so a QListView, its items in the
+   rail entries' states */
+QListView#tsMethods {{
+    background: transparent;
+    border: 0;
+}}
+QListView#tsMethods::item {{
+    padding: 6px 10px;
+    color: {TEXT};
+}}
+QListView#tsMethods::item:hover {{
+    background: {HOVER};
+}}
+QListView#tsMethods::item:selected {{
+    background: {SELECTED};
+    color: {TEXT};
+}}
+/* a patch-table cell: a rule under each row */
+QLabel[role="ts-cell"] {{
+    border: 0;
+    border-bottom: 1px solid {BORDER};
+    padding: 4px 6px 4px 2px;
+    font-size: 12px;
+}}
+
 /* ---- Installed / already installed (design phase 2, decision 5): a success
    state, not a washed-out disabled control - a 12% --ok wash, a 45% --ok
    edge, --ok text 600 and a drawn check (the screen sets the icon). Last, so

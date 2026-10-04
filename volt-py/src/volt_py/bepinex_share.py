@@ -92,8 +92,11 @@ EXTENSION = ".r2z"
 MANIFEST_NAME = "export.r2x"
 CONFIG_FOLDER = "config"  # zip folder <-> BepInEx/config/
 EXTRA_EXTENSIONS = frozenset({".cfg", ".txt", ".json", ".yml", ".yaml", ".ini"})  # r2modman's config-like set
-SKIP_NAMES = frozenset({"manifest.json", "mods.yml", MANIFEST_NAME.lower(), lo.MANIFEST_FILE.lower()})
-SKIP_FOLDERS = frozenset({"_state", "dotnet", "melonloader"})  # top-level: r2modman's own state / non-BepInEx loaders
+# 0.6.41: + VOLT's own per-profile state - Record patch details' two files (bepinex_patchlog) and the run
+# history folder (bepinex_runs) - never exported, and ignored when an older export carries them.
+SKIP_NAMES = frozenset({"manifest.json", "mods.yml", MANIFEST_NAME.lower(), lo.MANIFEST_FILE.lower(),
+                        "patch-details.json", "patch-table.json"})
+SKIP_FOLDERS = frozenset({"_state", "dotnet", "melonloader", "volt-runs"})  # top-level: r2modman's own state / non-BepInEx loaders / VOLT's run history
 BLOCKED_EXTENSIONS = frozenset({  # never restored under config/, whatever the file says
     ".dll", ".exe", ".bat", ".cmd", ".com", ".ps1", ".sh", ".msi", ".scr", ".vbs", ".js", ".jar",
     ".lnk", ".pif", ".cpl", ".so", ".dylib",

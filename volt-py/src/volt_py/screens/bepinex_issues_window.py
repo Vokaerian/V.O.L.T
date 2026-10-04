@@ -34,6 +34,14 @@ the mod itself) under the mod's own header - some or all of its files are
 gone from the profile folder; the detail says so and points at the row's
 Reinstall (no button here).
 
+Conflicts (troubleshooting phase 1, volt_py/bepinex_conflicts.py): three
+more kinds, listed under the mod they affect, advice only (no button) -
+"incompatible" (a
+plugin declares the other mod incompatible, so BepInEx won't load it,
+error), "duplicate_plugin" and "duplicate_file" (warnings). Their dicts
+carry "dep_name" (the other mod as on screen) and "needed_by" (the mods
+that need this one), which the texts use.
+
 Three sections (0.6.28, PLAN.md §11 (g)): under the heading, the detail
 reads "What happened" / "What it means" / "What to try" (detail_text's
 three parts), each a small terminal label (the "side" rule, as Browse
@@ -65,13 +73,18 @@ GROUP_GAP = 6
 
 # 0.6.24 plain words: a "dependency" is a "required mod" (a mod another mod needs to work).
 RAIL_LABEL = {"missing": "Required mod missing", "inactive": "Required mod inactive", "off": "Required mod switched off",
-              "files": "Files missing"}
+              "files": "Files missing", "incompatible": "Incompatible mod",
+              "duplicate_file": "Shared files differ", "duplicate_plugin": "Possible duplicate"}
 HEADING = {
     "missing": "A mod it needs isn't installed",
     "inactive": "A mod it needs is in the Inactive list",
     "off": "A mod it needs is switched off",
     "files": "Some of its files are gone",
+    "incompatible": "It won't load: another mod blocks it",
+    "duplicate_file": "It shares files with another mod",
+    "duplicate_plugin": "It may be a second copy of another mod",
 }
+FILES_SHOWN = 5  # duplicate_file: file names named before "and N more"
 SECTIONS = ("What happened", "What it means", "What to try")
 SECTION_GAP = 4  # a section label to its text (the detail's own 8px sits between sections)
 
@@ -80,6 +93,8 @@ def detail_text(issue: dict, name: str, dep_name: str) -> tuple[str, str, str]:
     """The selected issue as SECTIONS: what happened, what it means, what to
     try (plain text: blank lines split paragraphs, "1. " lines are steps)."""
     kind = issue["kind"]
+    if kind in ("incompatible", "duplicate_file", "duplicate_plugin"):
+        return _conflict_text(issue, name, issue.get("dep_name") or dep_name)
     if kind == "files":
         missing, total = issue["missing"], issue["total"]
         count = (f"All {total} of {name}'s files are" if missing >= total
@@ -113,6 +128,46 @@ def detail_text(issue: dict, name: str, dep_name: str) -> tuple[str, str, str]:
         f"Switched-off mods aren't loaded, so {name} can't use {dep_name}.",
         f"1. Click the switch at the right of {dep_name} to turn it back on.\n"
         "2. Press \"Save\".",
+    )
+
+
+def _names(items: list[str], shown: int | None = None) -> str:
+    """"A", "A and B", "A, B and C" (then "and N more" past `shown`)."""
+    if shown is not None and len(items) > shown:
+        return ", ".join(items[:shown]) + f" and {len(items) - shown} more"
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _conflict_text(issue: dict, name: str, dep: str) -> tuple[str, str, str]:
+    """detail_text for bepinex_conflicts' kinds (advice only)."""
+    kind = issue["kind"]
+    needed = issue.get("needed_by") or []
+    if kind == "incompatible":
+        return (
+            f"{name} says it can't be used together with {dep}, and both are switched on.",
+            f"The mod loader (BepInEx) refuses to load {name}, so it does nothing in the game. {dep} still loads."
+            + (f" Mods that need {name}: {_names(needed)} (they may not work properly)." if needed else ""),
+            f"Choose one: switch off or remove {dep} to use {name}, or switch off {name} to keep {dep}. "
+            "Then press \"Save\".",
+        )
+    if kind == "duplicate_file":
+        files = issue.get("files") or ["?"]
+        listed = _names(files, FILES_SHOWN)
+        return (
+            f"{name} and {dep} both contain a file called {listed}, but the two copies are not identical."
+            if len(files) == 1 else
+            f"{name} and {dep} both contain files called {listed}, but the copies are not identical.",
+            "Mods sometimes ship their own copy of a shared library, and different versions can clash. It is often "
+            "harmless; if the game misbehaves, this is a place to look.",
+            f"If the game crashes, or its log shows errors mentioning {listed}, switch off one of the two mods, "
+            "press \"Save\" and test again.",
+        )
+    return (
+        f"{name} and {dep} appear to be two copies of the same mod (the same internal name"
+        + (f", {issue['guid']}" if issue.get("guid") else "") + ").",
+        "Having both usually causes errors, or one of them is ignored. This often happens with re-uploaded "
+        "versions of a mod.",
+        "Keep one and remove the other, then press \"Save\".",
     )
 
 
@@ -331,7 +386,7 @@ class BepInExIssuesWindow(QDialog):
         if self._detail.property("severity") != sel["severity"]:
             self._detail.setProperty("severity", sel["severity"])
             _repolish(self._detail)
-        name, dep = self._display_name(sel["mod_id"]), sel["dep"]
+        name, dep = self._display_name(sel["mod_id"]), sel["dep"]  # dep: the full_name (the conflicts' texts use dep_name)
         self._heading.setText(HEADING[sel["kind"]])
         for blocks, text in zip(self._sections, detail_text(sel, name, dep)):
             blocks.setText(text)

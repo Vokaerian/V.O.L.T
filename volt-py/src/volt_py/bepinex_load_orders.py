@@ -971,12 +971,16 @@ def reinstall_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_ve
 
 def copy_load_order(app_root, slug, new_name: str) -> dict:
     """Duplicates a load order's whole tree (files + manifest, enabled/
-    disabled state included) under a new name. Returns the new manifest."""
+    disabled state included) under a new name, minus the run history
+    (volt-runs/, 0.6.41: those runs belong to the original). Returns the new
+    manifest."""
     src = load_load_order(app_root, slug)  # validates the source first
     display, new_slug = _allocate(app_root, new_name)
     dst = tree_root(app_root, new_slug)
+    top = tree_root(app_root, slug)
     try:
-        shutil.copytree(tree_root(app_root, slug), dst, dirs_exist_ok=True)
+        shutil.copytree(top, dst, dirs_exist_ok=True,
+                        ignore=lambda d, names: ["volt-runs"] if Path(d) == top and "volt-runs" in names else [])
     except Exception:
         remove_tree_best_effort(dst)
         raise

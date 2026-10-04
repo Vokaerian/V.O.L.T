@@ -179,12 +179,14 @@ class _TabRule(QObject):
         return False
 
 
-def underline_tabs(tabs: QTabWidget) -> None:
+def underline_tabs(tabs: QTabWidget, page_fill: str = theme.PANEL_2) -> None:
     """Settings' tab row as the 3.3 underline tabs (theme.py QTabWidget#settingsTabs),
     with the phase-4 motion: the sliding underline + page crossfade
-    (painters.animate_tabs; call before adding the tabs)."""
+    (painters.animate_tabs; call before adding the tabs). `page_fill`: the
+    page's surface for a keyboard switch's fade-in (the Troubleshoot window's
+    frameless pane sits on --panel)."""
     tabs.installEventFilter(_TabRule(tabs))
-    painters.animate_tabs(tabs)
+    painters.animate_tabs(tabs, page_fill)
 
 
 def animations_row(settings: SettingsStore, parent: QWidget, *, key: bool = True) -> QHBoxLayout:
