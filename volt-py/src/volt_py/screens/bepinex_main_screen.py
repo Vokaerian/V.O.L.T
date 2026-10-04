@@ -1181,6 +1181,8 @@ class BepInExMainScreen(QWidget):
         if carrier is not self._dl_job:  # a late event from a job already finished
             return
         kind = ev.get("type")
+        if kind == "checking":
+            log("download bar: checking required mods (pre-pass)")
         for mod_id in ev["ids"] if kind == "plan" else [ev["id"]] if kind == "start" else []:
             self._dl_titles.setdefault(mod_id, self._mod_title(mod_id))
         self._dl = ds.apply_package_event(self._dl, ev)
@@ -1193,9 +1195,10 @@ class BepInExMainScreen(QWidget):
 
     def _render_dl(self) -> None:
         """The bars (the footer's + Browse Mods' while it's open) follow _dl:
-        hidden (and cleared) when None or nothing to fetch yet."""
+        hidden (and cleared) when None or nothing to fetch yet - except while
+        the pre-pass is checking (0.6.34: "Checking required mods...")."""
         for bar in (self.download_bar, *self._extra_dl_bars):
-            if self._dl is None or not self._dl.wids:
+            if self._dl is None or not (self._dl.wids or self._dl.checking):
                 bar.setVisible(False)
                 bar.clear()
             else:

@@ -122,15 +122,18 @@ hands the PackageRef to the manager screen's install callback - the same
 job as "Add mod..." (download into the shared cache if absent,
 dependencies first, appended to the open load order's Active list, the
 screen's lists refreshed) - and the window stays open so the next mod can
-follow; the button reads Installing... then Installed. The dependency
-block and the Install label come from thunderstore_browse.dependency_chain
-(run as parallel_dependency_chain) over the selected version's declared
-dependencies against what the load order already has. The Details tab's
-block (0.6.31) is one summary line - "41 required mods: 0 already
-installed, 41 will be installed." and a "See the Required tab" link - plus
-only the dependencies with a problem (at most DEPS_PROBLEMS_SHOWN, then "and
-N more"); the README's well keeps README_MIN_HEIGHT whatever sits below it,
-so a modpack's page no longer grows the window or squeezes the README.
+follow; the button reads Installing... then Installed. The dependency block
+and the Install label come from thunderstore_browse.dependency_chain (run as
+parallel_dependency_chain) over the selected version's declared dependencies
+against what the load order already has. The Details tab's block (0.6.31) is
+one summary line - "83 mods in all (4 required directly): 42 already
+installed, 41 will be installed." (0.6.33 wording; "at least" past
+thunderstore_browse.CHAIN_LIMIT, 300) and a "See the Required tab" link -
+plus only the dependencies with a problem (at most DEPS_PROBLEMS_SHOWN, then
+"and N more"); the README's well keeps README_MIN_HEIGHT whatever sits below
+it, so a modpack's page no longer grows the window or squeezes the README.
+The Required tab lists only what the version declares itself; when the chain
+counts more, a muted note on top of it says so (0.6.33).
 
 Download bars (0.6.26, PLAN.md §11 (c)): the window is modal over the
 manager's footer, so it carries two more copies of the footer's
@@ -194,7 +197,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import icons, painters, theme, thunderstore as ts, thunderstore_browse as tb
+from volt_py import icons, mod_icons, painters, theme, thunderstore as ts, thunderstore_browse as tb
 from volt_py.applog import clip, log
 from volt_py.screens.download_bar import LABEL_MAX_WIDTH, PackageDownloadBar
 from volt_py.screens.flow_layout import FlowLayout
@@ -241,6 +244,9 @@ IMAGE_MAX_WIDTH = 1600  # shrink_image: a README image is cached and shown at mo
 IMAGE_MAX_PIXELS = 25_000_000  # shrink_image: a bigger bitmap (~100 MB decoded) is never decoded - skipped
 JPEG_QUALITY = 85  # shrink_image's re-encode of an image without alpha (with alpha: PNG)
 README_MIN_HEIGHT = 240  # the Details README well's floor: never squeezed below this by the block under it (0.6.31)
+REQUIRED_ICON_FETCH_MAX = 10  # Required tab: a row still without an icon is looked up only on a list shorter than this
+DISK_ICON = "disk:"  # an icon loader key: "disk:<Team-Package-Version>" = an installed mod's icon from disk (mod_icons)
+VERSION_ICON = "version:"  # "version:<Team-Package-Version>" = that version's metadata, then its icon (two requests)
 DEPS_PROBLEMS_SHOWN = 5  # the Details block lists at most this many problem dependencies, then "and N more"
 AGE_MONTH_DAYS, AGE_YEAR_DAYS = 30, 365  # "Last updated": days -> green, months -> yellow, years -> red
 AGE_COLORS = (theme.RDEP, theme.WARN, theme.DANGER)
@@ -276,10 +282,23 @@ def clamp_text(text: str, fm, width: int, max_lines: int) -> str:
     return "\n".join(lines)
 
 
-def install_label(name: str, missing: int, load_order: str) -> str:
-    """The big button: "Install EpicLoot + 1 required mod to Vanilla+"."""
-    extra = f" + {missing} required mod{'s' if missing != 1 else ''}" if missing else ""
+def install_label(name: str, missing: int, load_order: str, *, at_least: bool = False) -> str:
+    """The big button: "Install EpicLoot + 1 required mod to Vanilla+";
+    `at_least` (the chain stopped at its cap, 0.6.33): "+ at least 300 ..."."""
+    extra = f" + {'at least ' if at_least else ''}{missing} required mod{'s' if missing != 1 else ''}" if missing else ""
     return f"Install {name}{extra} to {load_order}"
+
+
+def direct_count(dependencies) -> int:
+    """How many mods a version lists directly (the Required tab's rows: its dependency strings that parse)."""
+    n = 0
+    for dep in dependencies or ():
+        try:
+            ts.PackageRef.parse(dep)
+        except (ValueError, TypeError):
+            continue
+        n += 1
+    return n
 
 
 def _parse_iso(value) -> datetime | None:
@@ -527,6 +546,23 @@ def shrink_image(data: bytes) -> bytes | None:
         f"scale {(rescaled - decoded) * 1000:.0f} ms, encode {(finished - rescaled) * 1000:.0f} ms, "
         f"{len(data)} -> {len(out)} bytes")
     return out
+
+
+def _icon_fetcher(app_root, app_version):
+    """The window's icon loader fetch (one loader, one queue): a plain URL
+    from the network (as before), DISK_ICON keys from the installed copy on
+    disk - mod_icons.load_icon: the icon cache, else the cached zip's root
+    icon.png, no network (0.6.34) - and VERSION_ICON keys through that
+    version's metadata to its icon URL (the Required tab's small lists only)."""
+    def fetch(key: str) -> bytes:
+        if key.startswith(DISK_ICON):
+            return mod_icons.load_icon(app_root, key[len(DISK_ICON):]) if app_root else b""
+        if key.startswith(VERSION_ICON):
+            ref = ts.PackageRef.parse(key[len(VERSION_ICON):])
+            url = tb.fetch_version(ref.namespace, ref.name, ref.version, app_version)["icon"]
+            return tb.fetch_bytes(url, app_version) if url else b""
+        return tb.fetch_bytes(key, app_version)
+    return fetch
 
 
 class _ImageFeed(QObject):
@@ -863,6 +899,11 @@ class _Readme(QTextBrowser):
         self.verticalScrollBar().setValue(scroll)
 
 
+def _text(value) -> str:
+    """A metadata field as text ("" for a missing / non-string one)."""
+    return value if isinstance(value, str) else ""
+
+
 def _repolish(widget: QWidget) -> None:
     widget.style().unpolish(widget)
     widget.style().polish(widget)
@@ -1101,7 +1142,7 @@ class BepInExBrowseWindow(QDialog):
         self._dep_icons: list[tuple[str, QLabel]] = []  # Required tab: (icon_url, label)
         # icons: url -> QPixmap (null when the fetch failed), session-lived
         self._icons: dict[str, QPixmap] = {}
-        self._icon_loader = _IconLoader(app_version)
+        self._icon_loader = _IconLoader(app_version, fetch=_icon_fetcher(app_root, app_version))
         self._icon_loader.loaded.connect(self._on_icon, Qt.ConnectionType.QueuedConnection)
         self._image_feed = _ImageFeed()
         self._image_feed.arrived.connect(self._on_image, Qt.ConnectionType.QueuedConnection)
@@ -2107,7 +2148,8 @@ class BepInExBrowseWindow(QDialog):
         installed = set(self._installed())
         satisfied = chain["satisfied"] + [n for n in chain["missing"] if n in installed]
         missing = [n for n in chain["missing"] if n not in installed]
-        self._set_deps({"satisfied": satisfied, "missing": missing, "problems": chain["problems"]})
+        self._set_deps({"satisfied": satisfied, "missing": missing, "problems": chain["problems"],
+                        "truncated": chain.get("truncated", False)})
         self._fill_required_tab()
         self._apply_detail_button()
 
@@ -2290,8 +2332,11 @@ class BepInExBrowseWindow(QDialog):
         41 rows, one per dependency, grew the window and squeezed the README):
         one line of counts with a "See the Required tab" link, then only the
         dependencies with a problem (⚠, warn), at most DEPS_PROBLEMS_SHOWN,
-        then "and N more"; past CHAIN_LIMIT a muted note says the rest
-        aren't counted (that marker is not a problem and not in the total).
+        then "and N more". The counts (0.6.33): "83 mods in all (4 required
+        directly): ..." - the whole chain against what the selected version
+        lists itself (the Required tab's rows); past CHAIN_LIMIT
+        (chain["truncated"]) the total and "will be installed" read "at
+        least" and a muted note says the rest aren't counted.
         None: the chain step is still running (or failed: _chain_error)."""
         self._chain = chain
         _clear_layout(self.deps_layout)
@@ -2299,18 +2344,20 @@ class BepInExBrowseWindow(QDialog):
             self.deps_label.setText(f"couldn't check required mods: {self._chain_error}" if self._chain_error
                                     else "checking required mods...")
             return
-        satisfied, missing = len(chain["satisfied"]), len(chain["missing"])
-        problems = [p for p in chain["problems"] if p[1] != tb.CHAIN_LIMIT_MESSAGE]
-        cut_off = len(problems) != len(chain["problems"])  # the CHAIN_LIMIT marker: its own note, not counted
+        satisfied, missing, problems = len(chain["satisfied"]), len(chain["missing"]), chain["problems"]
+        cut_off = bool(chain.get("truncated"))
         total = satisfied + missing + len(problems)
         if not total and not cut_off:
             self.deps_label.setText("nothing else - it needs no other mods.")
             return
         self.deps_label.setText("installed automatically with this mod")
-        counts = [f"{satisfied} already installed", f"{missing} will be installed"]
+        direct = direct_count((self._version_meta or {}).get("dependencies"))
+        at_least = "at least " if cut_off else ""
+        counts = [f"{satisfied} already installed", f"{at_least}{missing} will be installed"]
         if problems:
             counts.append(f"{len(problems)} {'has a problem' if len(problems) == 1 else 'have problems'}")
-        summary = QLabel(f"{total} required mod{'s' if total != 1 else ''}: {', '.join(counts)}."
+        head = f"{at_least}{total} mod{'s' if total != 1 else ''} in all ({direct} required directly)"
+        summary = QLabel(f"{head[0].upper()}{head[1:]}: {', '.join(counts)}."
                          f"&nbsp;&nbsp;{link_html('#required', 'See the Required tab')}")
         summary.setTextFormat(Qt.TextFormat.RichText)
         summary.setWordWrap(True)
@@ -2349,22 +2396,58 @@ class BepInExBrowseWindow(QDialog):
 
     def _fill_required_tab(self) -> None:
         """The selected version's direct dependencies as rich rows: icon,
-        name, team, description, the declared version, a status pill. The
-        listing detail's rows (latest) carry descriptions and icons; an
-        older version's list (fetch_version's strings) has only names."""
+        name, team, description, the declared version, a status pill.
+        Descriptions and icons come from the listing detail's rows (the
+        latest version's - but thunderstore.io sends only the first few of a
+        long list: CORE, 167 declared, came back with 4; 0.6.33), else from
+        the chain's package lookups (`_pkg_cache`: latest.description /
+        latest.icon, there once the chain lands - this tab is refilled then),
+        else the description of the installed copy; none of those - a name
+        only. When the chain counts more mods than these rows, a muted note
+        on top says the rest are counted on the Details tab (0.6.33)."""
         _clear_layout(self.required_layout)
         self._dep_icons = []
         rows: list[dict] = []
         detail_deps = {d["full_name"]: d for d in (self._detail["dependencies"] if self._detail else [])}
+        installed = self._installed()
         for dep in (self._version_meta or {}).get("dependencies", []):
             try:
                 ref = ts.PackageRef.parse(dep)
             except ValueError:
                 continue
             known = detail_deps.get(ref.full_name, {})
+            latest = (self._pkg_cache.get(ref.full_name) or {}).get("latest") or {}
+            description = (known.get("description") or _text(latest.get("description"))
+                           or _text((installed.get(ref.full_name) or {}).get("description")))
             rows.append({"full_name": ref.full_name, "namespace": ref.namespace, "name": ref.name, "version": ref.version or "",
-                         "description": known.get("description", ""), "icon_url": known.get("icon_url", "")})
+                         "description": description, "icon_url": known.get("icon_url") or _text(latest.get("icon"))})
+        # 0.6.34: a row still without an icon - an installed mod's from disk (no network); a mod not installed
+        # is looked up (its version's metadata, then the icon) only once the chain's lookups had their chance
+        # and only on a short list (REQUIRED_ICON_FETCH_MAX): a modpack's long list gets no request burst.
+        sources = {"site / lookups": 0, "disk": 0, "looked up": 0, "none": 0}
+        small = len(rows) < REQUIRED_ICON_FETCH_MAX
+        for r in rows:
+            entry = installed.get(r["full_name"]) or {}
+            if r["icon_url"]:
+                sources["site / lookups"] += 1
+            elif entry.get("version"):
+                r["icon_url"] = DISK_ICON + mod_icons.icon_key(entry)
+                sources["disk"] += 1
+            elif small and self._chain is not None and r["version"]:
+                r["icon_url"] = f"{VERSION_ICON}{r['full_name']}-{r['version']}"
+                sources["looked up"] += 1
+            else:
+                sources["none"] += 1
+        if rows:
+            log(f"browse: Required tab {len(rows)} rows, icons: " + ", ".join(f"{n} {k}" for k, n in sources.items()))
         self.tab_buttons["required"].setText(f"Required ({len(rows)})")
+        chain = self._chain
+        if rows and chain is not None and len(chain["satisfied"]) + len(chain["missing"]) + len(chain["problems"]) > len(rows):
+            note = QLabel("These are the mods this one lists directly. The mods they need in turn are counted "
+                          "in the summary on the Details tab.")
+            note.setProperty("muted", True)
+            note.setWordWrap(True)
+            self.required_layout.addWidget(note)
         if not rows:
             empty = QLabel("This mod needs no other mods.")
             empty.setProperty("muted", True)
@@ -2482,7 +2565,7 @@ class BepInExBrowseWindow(QDialog):
         elif self._chain is None:
             text, enabled = install_label(name, 0, lo), False  # until the dependency chain is known
         else:
-            text, enabled = install_label(name, len(self._chain["missing"]), lo), idle
+            text, enabled = install_label(name, len(self._chain["missing"]), lo, at_least=self._chain.get("truncated", False)), idle
         set_installed_look(button, installed)  # before the fit: the check + bold take room
         self._set_button_text(button, text, reserve=INSTALLED_ICON_ROOM if installed else 0)
         button.setEnabled(enabled)

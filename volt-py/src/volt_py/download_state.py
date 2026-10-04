@@ -58,6 +58,7 @@ class DownloadState:
     cancelled: bool = False
     paused: bool = False
     pausing: bool = False
+    checking: bool = False  # Thunderstore (0.6.34): plan_downloads' pre-pass is still working out the total
 
 
 def _uniq(*seqs) -> tuple[str, ...]:
@@ -209,25 +210,32 @@ def seed_packages(ids) -> DownloadState:
 
 
 def apply_package_event(d: DownloadState | None, ev: dict | None) -> DownloadState | None:
-    """bepinex_load_orders.package_progress's events: "plan" (plan_downloads'
-    pre-pass) adds every mod it names to the total; "start" adds the mod to
+    """bepinex_load_orders.package_progress's events: "checking" (the
+    pre-pass started, 0.6.34) sets `checking` - the bar reads "Checking
+    required mods..." - until its "plan" or the first "start" clears it;
+    "plan" (plan_downloads' pre-pass) adds every mod it names to the total; "start" adds the mod to
     the total (if new) and makes it the current one; "item-done" is
     apply_download_event's (done, failed / un-failed on a later success),
     except the finished mod stays `cur` so the label doesn't flicker to
     "Downloading..." between two mods (percent_of ignores a done `cur`)."""
     if d is None or not ev:
         return d
+    if ev.get("type") == "checking":
+        return replace(d, checking=True)
     if ev.get("type") == "plan":  # the pre-pass (0.6.26): the job's whole list, before the first download
-        return replace(d, wids=_uniq(d.wids, tuple(ev.get("ids") or ())))
+        return replace(d, wids=_uniq(d.wids, tuple(ev.get("ids") or ())), checking=False)
     if ev.get("type") == "start":
-        return replace(d, wids=_uniq(d.wids, (ev["id"],)), cur=Current(ev["id"], 0.0, None))
+        return replace(d, wids=_uniq(d.wids, (ev["id"],)), cur=Current(ev["id"], 0.0, None), checking=False)
     after = apply_download_event(d, ev)
     return after if after is d else replace(after, cur=d.cur)
 
 
 def package_label(d: DownloadState, titles: dict[str, str]) -> str:
     """"Downloading: <mod name>" (the current / last mod's title, else its
-    id), or "Downloading..." before the first one starts."""
+    id), or "Downloading..." before the first one starts; "Checking required
+    mods..." while the pre-pass works out the total (0.6.34)."""
+    if d.checking:
+        return "Checking required mods..."
     if d.cur is None:
         return "Downloading..."
     return f"Downloading: {titles.get(d.cur.id) or d.cur.id}"

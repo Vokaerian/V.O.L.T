@@ -88,7 +88,11 @@ before the first download. Inside package_progress every package metadata
 lookup is remembered for the rest of the block (_fetch_meta), so the
 install reuses the pre-pass's requests instead of repeating them. The
 pre-pass never raises and never changes what the install does; a mod it
-missed still joins the total when it starts, as before.
+missed still joins the total when it starts, as before. Since 0.6.34 it
+first emits {"type": "checking"} (the bar reads "Checking required
+mods..."), and every way out of it emits a "plan" (an empty one on a
+failure) that ends that state; a job that fails or ends meanwhile hides the
+bar as always.
 
 Missing files (0.6.27, PLAN.md §11 (f)): the manifest is the truth for what is
 installed (THUNDERSTORE.md §3a), so files deleted from a tree outside VOLT
@@ -509,6 +513,7 @@ def plan_downloads(app_root, slug, game: ThunderstoreGame, refs, app_version=Non
     package_progress: nothing, []. Never raises."""
     if getattr(_progress, "cb", None) is None:
         return []
+    _emit({"type": "checking"})  # 0.6.34: the bar reads "Checking required mods..." until the "plan" below
     try:
         have = set(installed(load_load_order(app_root, slug))) if slug else set()
         have.add(game.framework_package)
@@ -523,6 +528,7 @@ def plan_downloads(app_root, slug, game: ThunderstoreGame, refs, app_version=Non
         plan += [f for f in chain["missing"] if f not in plan]
     except Exception as err:  # the bar's total must never break an install
         log(f"[loadorders] pre-pass failed ({err!r}); the total grows as mods start")
+        _emit({"type": "plan", "ids": []})  # ends "checking" (0.6.34): nothing added, the bar back to normal
         return []
     log(f"[loadorders] pre-pass: {len(plan)} mods to fetch {plan}")
     _emit({"type": "plan", "ids": plan})

@@ -27,8 +27,15 @@ line starting "1. " / "2. " ... or "- " is a list row with a hanging indent
 `text_blocks` (Qt-free) does the split, `TextBlocks` shows it; the
 Thunderstore Warnings and errors window (bepinex_issues_window.py) reuses
 both.
+
+markup=True (0.6.32, the update dialog's release notes, update_flow.notes_text;
+off everywhere else, so a "# " or "**" in other text stays as typed): a
+"# Title" line is a heading row (marker "#", its own label in the
+HEADING_ROLE text role, no marker column) and a row starting "**Lead.**"
+shows that lead-in bold (a rich-text label, the rest HTML-escaped).
 """
 
+import html
 import re
 
 import platform
@@ -59,6 +66,9 @@ ROW_GAP = 4
 MARKER_WIDTH = 20  # fits "10." at the 13px body size
 MARKER_GAP = 6
 _LIST_LINE = re.compile(r"(\d+\.|-)\s+(.+)")
+_HEADING_LINE = re.compile(r"#{1,6}\s+(.+)")
+_LEAD = re.compile(r"\*\*(.+?)\*\*(.*)")
+HEADING_ROLE = "help-short"  # theme.py: 14px 600, the Help pane's own sub-heading (markup=True only)
 
 # Same box as the Scan issues / Warnings and errors windows: 900 x 600, at
 # most the parent window minus 32px.
@@ -105,15 +115,20 @@ def sorted_entries(entries: list[dict]) -> list[dict]:
     return sorted(entries, key=lambda entry: entry["name"].casefold())
 
 
-def text_blocks(text: str) -> list[list[tuple[str, str]]]:
+def text_blocks(text: str, markup: bool = False) -> list[list[tuple[str, str]]]:
     """`text` as paragraphs (split on blank lines), each a list of rows
     (marker, text): marker "" for a plain line, "1." / "2." ... for a
-    numbered line, "\u2022" for a "- " line."""
+    numbered line, "\u2022" for a "- " line; with markup, "#" for a
+    "# Title" line (the text without the #s)."""
     blocks = []
     for chunk in re.split(r"\n[ \t]*\n", text.strip()):
         rows = []
         for line in chunk.splitlines():
             line = line.strip()
+            heading = _HEADING_LINE.fullmatch(line) if markup else None
+            if heading:
+                rows.append(("#", heading.group(1).strip()))
+                continue
             match = _LIST_LINE.fullmatch(line)
             if match:
                 rows.append(("\u2022" if match.group(1) == "-" else match.group(1), match.group(2)))
@@ -144,11 +159,13 @@ def _text(role: str | None) -> QLabel:
 class TextBlocks(QWidget):
     """A plain text shown as text_blocks: one selectable word-wrapped label
     per paragraph / list row (`role` / `muted` on every label, so the
-    caller's QSS text rule applies). setText rebuilds the rows."""
+    caller's QSS text rule applies; a markup heading takes HEADING_ROLE).
+    setText rebuilds the rows."""
 
-    def __init__(self, role: str | None = None, *, muted: bool = False, parent: QWidget | None = None) -> None:
+    def __init__(self, role: str | None = None, *, muted: bool = False, markup: bool = False,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._role, self._muted, self._raw = role, muted, ""
+        self._role, self._muted, self._markup, self._raw = role, muted, markup, ""
         self._box = QVBoxLayout(self)
         self._box.setContentsMargins(0, 0, 0, 0)
         self._box.setSpacing(0)
@@ -157,8 +174,12 @@ class TextBlocks(QWidget):
     def text(self) -> str:
         return self._raw
 
-    def _label(self, text: str) -> QLabel:
-        label = _text(self._role)
+    def _label(self, text: str, role: str | None = None) -> QLabel:
+        label = _text(role or self._role)
+        lead = _LEAD.fullmatch(text) if self._markup else None
+        if lead:  # "**Lead.** rest" -> the lead-in bold, everything escaped (never raw ** or HTML)
+            label.setTextFormat(Qt.TextFormat.RichText)
+            text = f"<b>{html.escape(lead.group(1))}</b>{html.escape(lead.group(2))}"
         label.setText(text)
         if self._muted:
             label.setProperty("muted", True)
@@ -174,12 +195,12 @@ class TextBlocks(QWidget):
         column = QVBoxLayout(self._rows)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(PARAGRAPH_GAP)
-        for rows in text_blocks(text):
+        for rows in text_blocks(text, self._markup):
             block = QVBoxLayout()
             block.setSpacing(ROW_GAP)
             for marker, line in rows:
-                if not marker:
-                    block.addWidget(self._label(line))
+                if marker in ("", "#"):
+                    block.addWidget(self._label(line, HEADING_ROLE if marker else None))
                     continue
                 row = QHBoxLayout()
                 row.setSpacing(MARKER_GAP)

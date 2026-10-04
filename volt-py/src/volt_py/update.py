@@ -87,6 +87,7 @@ class Release:
     asset_url: str | None = None
     asset_size: int | None = None
     sha256: str | None = None  # lowercase hex
+    url: str | None = None  # the release's GitHub page (html_url; https://github.com/ only), None when absent
 
 
 # ---- versions ----
@@ -161,7 +162,9 @@ def fetch_latest(urlopen=net.urlopen) -> Release | None:
     if ver is None:
         log(f"[update] check: latest release tag {tag!r} isn't a version, ignoring it")
         return None
-    rel = Release(tag=tag, version=ver, notes=str(data.get("body") or ""))
+    page = data.get("html_url")
+    rel = Release(tag=tag, version=ver, notes=str(data.get("body") or ""),
+                  url=page if isinstance(page, str) and page.startswith("https://github.com/") else None)
     assets = data.get("assets") if isinstance(data.get("assets"), list) else []
     for a in assets:
         name = a.get("name") if isinstance(a, dict) else None
@@ -172,7 +175,7 @@ def fetch_latest(urlopen=net.urlopen) -> Release | None:
             rel.asset_size = size if isinstance(size, int) and size > 0 else None
             rel.sha256 = m.group(1).lower() if m else None
             break
-    log(f"[update] latest release {tag} ({len(assets)} asset(s)); zip: "
+    log(f"[update] latest release {tag} ({len(assets)} asset(s)); page {rel.url or 'none (html_url missing)'}; zip: "
         + (f"{rel.asset_name}, {rel.asset_size} bytes, sha256 {rel.sha256 or 'MISSING'}, {rel.asset_url}"
            if rel.asset_name else "none matching " + ASSET_PATTERN))
     return rel

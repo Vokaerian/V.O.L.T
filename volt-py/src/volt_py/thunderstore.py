@@ -166,17 +166,27 @@ def _retry_after(err: urllib.error.HTTPError) -> float | None:
         return None
 
 
+_rate_limit_hits = 0  # HTTP 429 replies seen by open_url this run (rate_limit_hits; 0.6.33, for the browser's warm-up log)
+
+
+def rate_limit_hits() -> int:
+    """How many HTTP 429 replies open_url has seen since VOLT started (every thread)."""
+    return _rate_limit_hits
+
+
 def open_url(req: urllib.request.Request, timeout: float):
     """env.urlopen(req) with HTTP 429 retried: up to RATE_LIMIT_RETRIES more
     tries, waiting Retry-After (capped at RATE_LIMIT_MAX_WAIT_S) or 1 s, 2 s,
     4 s. Still 429 -> RateLimitedError. Every other error (another HTTP code,
     network) is raised as-is for the caller's own handling."""
+    global _rate_limit_hits
     for attempt in range(RATE_LIMIT_RETRIES + 1):
         try:
             return env.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as err:
             if err.code != 429:
                 raise
+            _rate_limit_hits += 1  # ponytail: unlocked += can drop a count under threads; it only feeds a log line
             if attempt == RATE_LIMIT_RETRIES:
                 log(f"[thunderstore] HTTP 429 for {req.full_url}: still rate-limited after {RATE_LIMIT_RETRIES} retries, giving up")
                 raise RateLimitedError(RATE_LIMITED_MSG) from err

@@ -3,8 +3,10 @@ volt_py/update.py, the words + Qt-free decisions volt_py/update_flow.py).
 
 - UpdateDialog: one modal dialog, four states on a QStackedWidget (each
   change under painters.crossfade): (a) "VOLT X is available (you have Y)",
-  the release notes (update_flow.notes_text -> help_window.TextBlocks in a
-  --panel-2 well) and Update now (primary, the default: Enter) / Later (Esc)
+  the release notes (update_flow.notes_text -> help_window.TextBlocks(markup=True)
+  in a --panel-2 well: summary, group headings, top-level bullets with their
+  bold lead-ins; 0.6.32) ending in a "Full release notes on GitHub" link (the
+  system browser, update_flow.notes_url) and Update now (primary, the default: Enter) / Later (Esc)
   / Skip this version (writes skipped_tag); (b) downloading: the footer
   download bar's striped track (download_bar._Track, stretched to the
   dialog's width) + "done of total MB" + Cancel (Esc too); (c) checking and
@@ -37,6 +39,7 @@ calls init_log - so the startup check (game select, before any game opens)
 leaves no lines; the manual check from Settings does (a manager is open).
 """
 
+import html
 import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
@@ -220,9 +223,18 @@ class UpdateDialog(QDialog):
         box = QVBoxLayout(inner)
         box.setContentsMargins(12, 10, 12, 10)
         text = w.notes_text(self._release.notes)
-        body = TextBlocks(muted=not text)
+        body = TextBlocks(muted=not text, markup=True)
         body.setText(text or w.NO_NOTES)
         box.addWidget(body)
+        if text:  # the nested detail is only on GitHub: one link line after the notes
+            url = w.notes_url(self._release)
+            link = QLabel(f'<a href="{html.escape(url)}" style="color:{theme.ACCENT}; text-decoration: none">'
+                          f"{w.NOTES_LINK}</a>")
+            link.setTextFormat(Qt.TextFormat.RichText)
+            link.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+            link.setToolTip(url)
+            link.linkActivated.connect(self._open_notes)  # opened by us (logged), never inside the label
+            box.addWidget(link)
         box.addStretch(1)
         notes.setWidget(inner)
         notes.viewport().setAutoFillBackground(False)  # the QSS well shows through (help_window._transparent)
@@ -355,6 +367,10 @@ class UpdateDialog(QDialog):
         self.cancel_button.setFocus()
         self._job = start_job(self, "update-download", _work(self._release, self._cancel), self._on_done,
                               on_progress=self._on_progress, on_phase=self._on_phase)
+
+    def _open_notes(self, url: str) -> None:
+        log(f"[update] dialog: full release notes opened in the browser ({url})")
+        QDesktopServices.openUrl(QUrl(url))
 
     def _request_cancel(self) -> None:
         if self._phase != "download" or self._cancel is None or self._cancel.is_set():

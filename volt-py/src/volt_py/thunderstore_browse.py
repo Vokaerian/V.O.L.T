@@ -114,9 +114,12 @@ IMAGE_MAX_BYTES = 6 << 20  # a README screenshot; a bigger one is skipped
 IMAGE_LIMIT = 24  # images fetched per README / changelog, in order of appearance
 # ![alt](url "title") and <img src="url"> - the two ways a README carries an image.
 _MD_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+\"[^\"]*\")?\s*\)|<img\b[^>]*?\bsrc\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
-CHAIN_LIMIT = 40  # dependency_chain stops resolving past this many packages (a runaway graph)
-# dependency_chain's problems entry at the cut-off (the window shows it as a note, not as a problem)
-CHAIN_LIMIT_MESSAGE = f"more than {CHAIN_LIMIT} dependencies; the rest aren't listed here"
+# The browser's preview of what an install pulls in (dependency_chain) stops once this many packages
+# are to be installed and says "at least" (chain["truncated"]); the install itself (install_mod) has no
+# cap. 0.6.33: was 40 - a modpack of four modpacks (Lethal_Enhanced_Party_Edition) went far past it.
+CHAIN_LIMIT = 300
+CHAIN_WARM_LIMIT = CHAIN_LIMIT + CHAIN_LIMIT // 3  # parallel_dependency_chain's warm-up: at most this many requests
+CHAIN_ON_DEMAND_LIMIT = 20  # then at most this many one-at-a-time lookups the warm-up missed; past it: truncated
 FETCH_WORKERS = 6  # load_images / parallel_dependency_chain: requests at once (0.6.31; were one at a time)
 IMAGE_TIMEOUT_S = 8.0  # per socket operation for a README image (the API calls keep thunderstore.TIMEOUT_S)
 IMAGE_BUDGET_S = 20.0  # per page: no new image fetch starts after this; the queue is abandoned
@@ -890,18 +893,24 @@ def dependency_chain(dependencies: list[str], installed, framework: str | None, 
     declaration order], "missing": [full_names that get installed, each
     once, dependencies before dependents - install_mod's order], "problems":
     [(full_name, message)] for a dependency whose metadata couldn't be
-    fetched or whose string isn't a package reference}. Missing
+    fetched or whose string isn't a package reference, "truncated": True
+    when the walk stopped at CHAIN_LIMIT packages to install (the counts are
+    then "at least"; 0.6.33: the cut-off is no longer a problem entry, which
+    pinned it on whichever package was being visited)}. Missing
     dependencies are resolved recursively at Thunderstore's latest version
     (fetch = thunderstore.fetch_package), the same policy install_mod
-    applies, stopping at CHAIN_LIMIT packages."""
+    applies (which has no cap). A `fetch` raising _ChainCut also ends the
+    walk as truncated (parallel_dependency_chain's on-demand bound)."""
     fetch = fetch or ts.fetch_package
     installed = set(installed)
     satisfied: list[str] = []
     missing: list[str] = []
     problems: list[tuple[str, str]] = []
     seen: set[str] = set()
+    truncated = False
 
     def visit(dep_strings) -> None:
+        nonlocal truncated
         for dep in dep_strings:
             try:
                 ref = ts.PackageRef.parse(dep)
@@ -916,10 +925,13 @@ def dependency_chain(dependencies: list[str], installed, framework: str | None, 
                 satisfied.append(full)
                 continue
             if len(missing) >= CHAIN_LIMIT:
-                problems.append((full, CHAIN_LIMIT_MESSAGE))
+                truncated = True
                 return
             try:
                 meta = fetch(ref.namespace, ref.name, app_version)
+            except _ChainCut:
+                truncated = True
+                return
             except ThunderstoreError as err:
                 problems.append((full, str(err)))
                 continue
@@ -928,8 +940,13 @@ def dependency_chain(dependencies: list[str], installed, framework: str | None, 
             missing.append(full)  # after its own dependencies: install order
 
     visit([d for d in dependencies if isinstance(d, str)])
-    log(f"[browse] dependency chain: {len(satisfied)} satisfied, {len(missing)} to install {missing}, {len(problems)} problems")
-    return {"satisfied": satisfied, "missing": missing, "problems": problems}
+    log(f"[browse] dependency chain: {len(satisfied)} satisfied, {len(missing)} to install {clip(missing, 2000)}, "
+        f"{len(problems)} problems" + (f", cut at {CHAIN_LIMIT} (truncated)" if truncated else ""))
+    return {"satisfied": satisfied, "missing": missing, "problems": problems, "truncated": truncated}
+
+
+class _ChainCut(Exception):
+    """parallel_dependency_chain's fetch past CHAIN_ON_DEMAND_LIMIT: dependency_chain stops, truncated."""
 
 
 def parallel_dependency_chain(dependencies: list[str], installed, framework: str | None, app_version=None, *,
@@ -939,16 +956,21 @@ def parallel_dependency_chain(dependencies: list[str], installed, framework: str
     level by level (breadth first), `workers` at a time, into `cache`
     (full_name -> fetch_package's dict; the window passes its own so a
     reopened page or Back costs nothing - successes only, a failure is
-    retried next time), then dependency_chain runs over that cache. A
-    package the warm-up didn't reach (past 2 x CHAIN_LIMIT) is fetched on
-    demand as before."""
+    retried next time), then dependency_chain runs over that cache. The
+    warm-up makes at most CHAIN_WARM_LIMIT requests; a package it didn't
+    reach is fetched on demand, at most CHAIN_ON_DEMAND_LIMIT of them - past
+    that the chain ends truncated ("at least"), so the worst case is
+    bounded (only a graph past CHAIN_WARM_LIMIT can get there). Pacing:
+    `workers` requests at once, thunderstore.open_url's HTTP 429 retry /
+    backoff per request; the warm-up's requests, 429 retries and seconds are
+    logged."""
     fetch = fetch or ts.fetch_package
     cache = {} if cache is None else cache
     failed: dict[str, ThunderstoreError] = {}  # this run only
     installed = set(installed)
     seen: set[str] = set()
-    hits = fetched = levels = 0
-    start = time.monotonic()
+    hits = fetched = levels = on_demand = 0
+    start, rate_limited = time.monotonic(), ts.rate_limit_hits()
 
     def new_refs(dep_strings) -> list:
         out = []
@@ -972,26 +994,31 @@ def parallel_dependency_chain(dependencies: list[str], installed, framework: str
             failed[ref.full_name] = err
 
     level = new_refs(dependencies)
-    # ponytail: no cancel - a page left mid-warm-up still finishes its levels (at most 2 x CHAIN_LIMIT small
-    # API calls, ~1-2 s; the results stay in the window's cache). Add a `cancelled` like load_images' if it shows.
-    while level and fetched < 2 * CHAIN_LIMIT:
-        level = level[:2 * CHAIN_LIMIT - fetched]
+    # ponytail: no cancel - a page left mid-warm-up still finishes its levels (at most CHAIN_WARM_LIMIT small
+    # API calls; the results stay in the window's cache). Add a `cancelled` like load_images' if it shows.
+    while level and fetched < CHAIN_WARM_LIMIT:
+        level = level[:CHAIN_WARM_LIMIT - fetched]
         todo = [r for r in level if r.full_name not in cache]
         hits += len(level) - len(todo)
         fetched += len(todo)
         levels += 1
         _parallel(todo, warm, workers)
         level = new_refs(d for r in level for d in ((cache.get(r.full_name) or {}).get("latest", {}).get("dependencies") or []))
-    log(f"[browse] dependency chain warm-up: {fetched} fetched ({len(failed)} failed), {hits} from the window's cache, "
-        f"{levels} levels, {time.monotonic() - start:.2f}s")
+    log(f"[browse] dependency chain warm-up: {fetched} requests ({len(failed)} failed), {hits} from the window's cache, "
+        f"{levels} levels, {ts.rate_limit_hits() - rate_limited} HTTP 429 retries (all VOLT requests meanwhile), "
+        f"{time.monotonic() - start:.2f}s" + (f" - stopped at the {CHAIN_WARM_LIMIT}-request bound" if level else ""))
 
     def cached(namespace: str, name: str, app_version=None) -> dict:
+        nonlocal on_demand
         full = f"{namespace}-{name}"
         if full in cache:
             return cache[full]
         if full in failed:
             raise failed[full]
-        log(f"[browse] dependency chain: {full} past the warm-up, fetched on demand")
+        if on_demand >= CHAIN_ON_DEMAND_LIMIT:
+            raise _ChainCut()
+        on_demand += 1
+        log(f"[browse] dependency chain: {full} past the warm-up, fetched on demand ({on_demand} of at most {CHAIN_ON_DEMAND_LIMIT})")
         meta = fetch(namespace, name, app_version)
         cache[full] = meta
         return meta

@@ -26,7 +26,10 @@ footer row: this row minus the button and the speed (no pause / cancel;
 counts are mods, not bytes), the counter moved before the pill to read as
 the user worded it - "Downloading: <mod name>  <done> / <total>  [pill]" -
 and the label elided at LABEL_MAX_WIDTH (full name as its tooltip). The
-state is the same DownloadState (download_state's package helpers).
+state is the same DownloadState (download_state's package helpers). While a
+job's pre-pass works out the total (`checking`, 0.6.34) it shows only the
+label, "Checking required mods..." - no new painting; the counter and pill
+return with the real total.
 Since 0.6.26 Browse Mods shows two more of it on the same state (its footer,
 its detail card), so the bar stays in sight over the modal window.
 
@@ -307,6 +310,10 @@ class PackageDownloadBar(DownloadBar):
 
     def render(self, state: DownloadState, titles: dict[str, str], *, copying: bool = False) -> None:
         super().render(state, titles)
+        # 0.6.34: while the pre-pass works out the total, the label alone ("Checking required mods..."): the
+        # counter and the pill would read a made-up "0 / 1" - they come back with the real total
+        self.count_label.setVisible(not state.checking)
+        self.track.setVisible(not state.checking)
         text = package_label(state, titles)
         self.label.setToolTip(text)
         self.label.setText(self.label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, self.label_max))
