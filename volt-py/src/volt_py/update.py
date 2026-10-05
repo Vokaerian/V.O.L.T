@@ -62,6 +62,12 @@ ZIP_ROOT = "VOLT"  # the zip's one top-level folder since 0.6.29 (tools/release.
 KEEP_DIRS = ("games", "cache", UPDATE_DIR)
 FAILED_MARK = "RESULT: FAILED"
 OK_MARK = "RESULT: OK"
+# apply.log markers (0.6.44): VOLT writes TARGET_MARK before it launches the
+# script, the script writes STARTED_MARK first and DONE_MARK right before it
+# restarts VOLT. A log missing one of them was cut short (antivirus, say).
+TARGET_MARK = "TARGET VERSION:"
+STARTED_MARK = "VOLT update started"
+DONE_MARK = "FINISHED"
 WAIT_SECONDS = 60
 
 DEFAULT_STATE = {"check_on_startup": True, "skipped_tag": None, "last_check": None}
@@ -361,11 +367,13 @@ def _bat_path(p) -> str:
     return '"' + s.replace("%", "%%") + '"'
 
 
-def write_apply_script(staged, install_dir) -> Path:
+def write_apply_script(staged, install_dir, target=None) -> Path:
     """Writes <base>/update/apply.bat: wait (up to WAIT_SECONDS) until VOLT.exe
     can be opened for writing (every VOLT process has exited), robocopy the
     staged app root over install_dir, log to apply.log, then ALWAYS start
-    VOLT.exe again (the old build if the copy failed; apply.log says so)."""
+    VOLT.exe again (the old build if the copy failed; apply.log says so).
+    Also starts apply.log with TARGET_MARK target (the release tag), which the
+    script appends to and cleanup_leftovers checks on the next start."""
     staged, install = Path(staged), Path(install_dir)
     folder = update_dir()
     bat, logf = folder / APPLY_BAT, folder / APPLY_LOG
@@ -379,7 +387,7 @@ def write_apply_script(staged, install_dir) -> Path:
         "@echo off",
         "setlocal DisableDelayedExpansion",
         "chcp 65001 >nul",
-        f">{L} echo VOLT update started %date% %time%",
+        f">>{L} echo {STARTED_MARK} %date% %time%",
         f">>{L} echo from {S}",
         f">>{L} echo to {D}",
         "set /a tries=0",
@@ -398,7 +406,7 @@ def write_apply_script(staged, install_dir) -> Path:
         "goto start",
         ":copy",
         f">>{L} echo VOLT.exe is free after %tries% second(s), copying",
-        f"robocopy {S} {D} /E /XD {xd} /R:5 /W:2 /NFL /NDL /NJH /NJS /LOG+:{L}",
+        f"robocopy {S} {D} /E /XD {xd} /R:5 /W:2 /NFL /NDL /NJH /LOG+:{L}",
         "set rc=%errorlevel%",
         "if %rc% geq 8 goto failed",
         f">>{L} echo {OK_MARK} - robocopy exit code %rc%",
@@ -406,7 +414,7 @@ def write_apply_script(staged, install_dir) -> Path:
         ":failed",
         f">>{L} echo {FAILED_MARK} - robocopy exit code %rc%; some files may not have been updated, starting VOLT anyway",
         ":start",
-        f">>{L} echo starting {E}",
+        f">>{L} echo {DONE_MARK} - starting {E}",
         f'start "" /D {D} {E}',
         "exit /b 0",
     ]
@@ -414,7 +422,13 @@ def write_apply_script(staged, install_dir) -> Path:
     # CRLF: cmd's label/goto scanning misbehaves on LF-only batch files.
     with open(bat, "w", encoding="utf-8", newline="\r\n") as f:
         f.write("\n".join(lines) + "\n")
-    log(f"[update] wrote {bat}: copy {staged} -> {install}, then start {exe}")
+    # After the .bat: a failed write here leaves no apply.log, which the next
+    # start reads as "never launched", not as an interrupted update.
+    with open(logf, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write(f"VOLT {current_version()} wrote apply.bat at {datetime.now().astimezone():%Y-%m-%d %H:%M:%S %z}\n"
+                f"{TARGET_MARK} {target or '?'}\n")
+    log(f"[update] wrote {bat}: copy {staged} -> {install}, then start {exe}; target {target}; "
+        f"apply.log {logf} started. Script:\n" + "\n".join(lines))
     return bat
 
 
@@ -433,16 +447,53 @@ def launch_apply(bat=None) -> None:
     # outlives VOLT (Windows doesn't kill children with their parent).
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     argv = [comspec, "/d", "/c", bat.name]
-    log(f"[update] launching {argv} in {bat.parent}; VOLT must now quit")
-    env.popen(argv, cwd=str(bat.parent), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-              stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags)
+    log(f"[update] launching {argv} (ComSpec {'from the environment' if os.environ.get('ComSpec') else 'unset, using cmd.exe'}) "
+        f"in {bat.parent}, creationflags {flags:#x} (CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP), stdio DEVNULL")
+    try:
+        p = env.popen(argv, cwd=str(bat.parent), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags)
+    except OSError as err:
+        log(f"[update] launching apply.bat FAILED: {err!r}")
+        # Never launched: drop the TARGET_MARK header so the next start doesn't
+        # report it as an interrupted update (the dialog shows this error now).
+        (bat.parent / APPLY_LOG).unlink(missing_ok=True)
+        raise
+    log(f"[update] apply.bat launched: pid {getattr(p, 'pid', None)}; VOLT must now quit")
+
+
+def _apply_problem(text: str) -> str | None:
+    """What went wrong according to apply.log, in plain words, or None when
+    the update finished. Logs written by 0.6.43 and older have no
+    TARGET_MARK/DONE_MARK, so only the result line is checked for those."""
+    if FAILED_MARK in text:
+        return "apply.bat recorded a failed copy"
+    m = re.search(re.escape(TARGET_MARK) + r"\s*(\S+)", text)
+    target = m.group(1) if m else None
+    if target and STARTED_MARK not in text:
+        return "apply.bat never ran (it was stopped before its first line); nothing was copied"
+    if OK_MARK not in text:
+        return "apply.bat stopped before the copy finished (no result line)"
+    if target and DONE_MARK not in text:
+        return "apply.bat stopped after the copy, before it restarted VOLT"
+    current = current_version()
+    if target and parse_version(target) and parse_version(current) and parse_version(target) != parse_version(current):
+        return f"VOLT is still version {current}, the update was to {target}"
+    return None
 
 
 def cleanup_leftovers() -> str | None:
     """Call once at startup. Empties <base>/update/ (download, staged/,
     apply.bat) and moves apply.log to apply.log.prev (kept for
-    troubleshooting, so it's only reported once). Returns apply.log's text
-    when it records a failed copy, else None. Never raises."""
+    troubleshooting, so it's only reported once). Returns apply.log's text,
+    led by a plain-words line, when the update failed or was cut short
+    (_apply_problem), else None. Never raises."""
+    exe = app_root.exe_path()
+    try:
+        st = exe.stat()
+        about = f"{st.st_size} bytes, modified {datetime.fromtimestamp(st.st_mtime):%Y-%m-%d %H:%M:%S}"
+    except OSError as err:
+        about = f"stat failed: {err!r}"
+    log(f"[update] running VOLT {current_version()} from {exe} ({about})")
     folder = update_dir()
     if not folder.is_dir():
         return None
@@ -451,11 +502,15 @@ def cleanup_leftovers() -> str | None:
     try:
         if logf.is_file():
             text = logf.read_text(encoding="utf-8", errors="replace")
-            ok = OK_MARK in text
-            log(f"[update] last update's apply.log: {'OK' if ok else 'FAILED' if FAILED_MARK in text else 'no result line'}\n{text.strip()}")
-            if FAILED_MARK in text:
-                report = text
+            problem = _apply_problem(text)
+            log(f"[update] last update's apply.log: {'finished OK' if problem is None else 'DID NOT FINISH: ' + problem}"
+                f"{'' if problem is None else ' (antivirus software may have stopped it)'}\n{text.strip()}")
+            if problem:
+                report = f"VOLT on the next start: {problem}.\n{text}"
             os.replace(logf, folder / APPLY_LOG_PREV)
+        elif (folder / APPLY_BAT).exists():
+            log(f"[update] {folder / APPLY_BAT} is there but {logf} isn't: the update was prepared but never "
+                "launched (or apply.log was removed), so nothing was copied")
     except OSError as err:
         log(f"[update] couldn't read/move {logf}: {err!r}")
     for p in folder.iterdir():

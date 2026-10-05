@@ -421,7 +421,7 @@ class UpdateDialog(QDialog):
     def _apply(self, app_dir) -> None:
         base = app_root.resolve_base_root()
         try:
-            bat = update.write_apply_script(app_dir, base)
+            bat = update.write_apply_script(app_dir, base, self._release.tag)
             update.launch_apply(bat)
         except OSError as err:
             log(f"[update] dialog: couldn't start the update copy: {err!r}")

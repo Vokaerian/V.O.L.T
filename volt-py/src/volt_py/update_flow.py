@@ -124,6 +124,7 @@ def failed_apply(log_text: str) -> tuple[str, str, str]:
     else:
         means = ("Some of VOLT's files may not have been updated, so this copy can be part old, part new. "
                  "It usually still works.")
+    means += " Antivirus software may have interrupted the update."
     tryit = ("Use \"Check for updates\" in Settings to try again. If it fails again, download VOLT from its "
              "releases page on GitHub and copy the new files over this folder (your games folder is kept).")
     return what, means, tryit
