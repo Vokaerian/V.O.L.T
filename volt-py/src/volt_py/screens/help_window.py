@@ -13,12 +13,13 @@ screens/rimworld_help_entries.py) and opens it with
 Report a problem (0.6.24, PLAN.md §10 (i)): with `report` given, a button in
 the header row, between the title and Close (an addition; nothing existing
 moves), saves a zip the user can send to whoever is helping:
-applog.write_report (report.txt + volt.log / volt.log.prev / volt-crash.log, the home folder
+applog.write_report (report.txt + every log in <base>/logs/: volt.log(.prev),
+volt-crash.log(.prev), apply.log(.prev) - applog.REPORT_FILES; the home folder
 scrubbed). Stdlib zipfile, nothing uploaded. `report` = {"game": display
 name, "slug": APP-ROOT slug, "game_dir": the game folder or None (only its
 name goes in the note), "profile_label": "Profile" / "Load order",
-"profile": the open one's name or None, "log_path": this run's volt.log or
-None}.
+"profile": the open one's name or None, "log_path": this run's app-wide
+volt.log (applog.log_file) or None}.
 
 Paragraphs and lists (0.6.28, PLAN.md §11 (g)): a long text is plain text
 split on blank lines into paragraphs, each its own word-wrapped QLabel; a

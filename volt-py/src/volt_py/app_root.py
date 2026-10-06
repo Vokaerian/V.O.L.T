@@ -1,7 +1,8 @@
 """Base APP-ROOT resolution (port of Electron's src/electron/lib/appRoot.js).
 
 The base root is where VOLT keeps its per-run data: window-state.ini at the
-base itself, and one data folder per game under <base>/games/<slug>
+base itself, every log under <base>/logs/ (applog.py, since 0.6.45), and one
+data folder per game under <base>/games/<slug>
 (resolve_app_root; since 0.6.7 - it was <base>/<slug> before, which
 migrate_legacy_app_root moves into place once). Resolved as:
  - VOLT_APP_ROOT env var, if set, always wins (testing / custom setups).
@@ -98,11 +99,11 @@ def migrate_legacy_app_root(slug: str, env: Mapping[str, str] | None = None) -> 
     """Moves a pre-0.6.7 <base>/<slug> data folder to <base>/games/<slug>
     (settings, load orders, logs, steamcmd - everything, one rename).
 
-    Call it before anything creates the new folder (init_log does), i.e.
-    right after resolve_app_root in each game screen. Only moves when the old
-    folder exists and the new one doesn't; never overwrites. Never raises.
-    Returns a line for volt.log (the caller logs it after init_log - the log
-    isn't open yet here), or None when there was nothing to do.
+    Call it before anything creates the new folder, i.e. right after
+    resolve_app_root in each game screen. Only moves when the old folder
+    exists and the new one doesn't; never overwrites. Never raises.
+    Returns a line for volt.log (the caller logs it), or None when there was
+    nothing to do.
     """
     try:
         base = resolve_base_root(env)

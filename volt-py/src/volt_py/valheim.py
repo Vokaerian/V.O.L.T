@@ -1,8 +1,8 @@
 """Valheim's own constants and path detection (VALHEIM.md SCOPE): the
 per-game instance of the Thunderstore/BepInEx pattern. Everything generic
 lives in thunderstore.py / bepinex_install.py / bepinex_load_orders.py; this
-module holds only what differs per game. Every other BepInEx game (lethal.py;
-R.E.P.O. next) is a module of this shape with its own values, one row in
+module holds only what differs per game. Every other BepInEx game (lethal.py,
+repo.py) is a module of this shape with its own values, one row in
 bepinex_games.GAMES, and - only where its manager screen truly differs -
 HELP_OVERRIDES / HELP_EXTRA for screens/bepinex_help_entries.py. The required
 attributes are pinned by tools/checks/volt_py_bepinex_games.py.

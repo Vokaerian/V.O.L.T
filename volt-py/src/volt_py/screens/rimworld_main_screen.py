@@ -156,7 +156,7 @@ from volt_py import (
 from volt_py import first_run as fr
 from volt_py import rimworld_launch as rl
 from volt_py.app_root import GAME_SLUG, migrate_legacy_app_root, resolve_app_root
-from volt_py.applog import clip, init_log, log
+from volt_py.applog import clip, log, log_file
 from volt_py.electron_import import import_electron_load_orders_if_needed
 from volt_py.fsutil import read_text, write_text_atomic
 from volt_py.ids import exportable_ids
@@ -433,7 +433,8 @@ class _LaunchPolled(QObject):
     """Carries one launch-watch poll (rimworld_launch.running_pids, a tasklist
     call - off the GUI thread so the window never stutters) back to the GUI
     thread (a queued connection; the _CommunityRulesLoaded pattern). done's
-    payload: the set of running pids."""
+    payload (0.6.46): {"gen": the poll's generation, "pids": the set of running
+    pids or None = tasklist couldn't tell, "error": text when the poll raised}."""
 
     done = Signal(object)
 
@@ -494,11 +495,15 @@ def _cleanup_launch(app_root: Path, carrier: _LaunchCleaned) -> None:
         log(f"run: cleanup could not signal the screen ({err!r})")
 
 
-def _poll_running(exe_name: str, carrier: _LaunchPolled) -> None:
-    """Background-thread body of one launch-watch poll."""
-    pids = rl.running_pids(exe_name)
+def _poll_running(exe_name: str, gen: int, carrier: _LaunchPolled) -> None:
+    """Background-thread body of one launch-watch poll (bounded:
+    bepinex_launch.query_pids; None = couldn't tell, never "not running")."""
     try:
-        carrier.done.emit(pids)
+        payload = {"gen": gen, "pids": rl.query_pids(exe_name)}
+    except Exception as err:  # the thread must never die silently
+        payload = {"gen": gen, "pids": None, "error": repr(err)}
+    try:
+        carrier.done.emit(payload)
     except RuntimeError as err:  # shutting down: the Qt side is already gone
         log(f"run: could not signal the screen ({err!r})")
 
@@ -798,14 +803,16 @@ class RimWorldMainScreen(QWidget):
         # Modded / Vanilla (_run): the launch being watched - exe_name, what
         # (status wording), phase "starting" / "running", started (monotonic);
         # None when idle. While set the screen is locked (_run_block). One
-        # poll at a time: the single-shot timer is re-armed after each result.
+        # poll at a time (0.6.46): a repeating timer that never waits on the
+        # last poll's result - a tick with one in flight is skipped, and the
+        # start deadline is enforced by the tick itself (the BepInEx watch's design).
         self._launch: dict | None = None
         self._launch_polled = _LaunchPolled()  # no parent: owned by self and the poll threads
         self._launch_polled.done.connect(self._on_launch_poll, Qt.ConnectionType.QueuedConnection)
         self._launch_cleaned = _LaunchCleaned()  # no parent: owned by self and the cleanup thread (stage 3, 0.6.17)
         self._launch_cleaned.done.connect(self._on_launch_cleaned, Qt.ConnectionType.QueuedConnection)
         self._launch_timer = QTimer(self)
-        self._launch_timer.setSingleShot(True)
+        self._launch_timer.setSingleShot(False)
         self._launch_timer.timeout.connect(self._poll_launch)
         # slug -> own_data, from the picker's last reload (+ the toggle): drives
         # Modded / Push tooltips and the picker menu's own-game-data entry.
@@ -857,13 +864,11 @@ class RimWorldMainScreen(QWidget):
         self._conflicts: dict[str, set[str]] = {}
         self._scan_problems: list[dict] = []  # minus ignored_scan_issues; the Scan issues window's list
         self.app_root = resolve_app_root(GAME_SLUG)
-        moved = migrate_legacy_app_root(GAME_SLUG)  # before init_log creates the new folder
-        # Action log at <app_root>/volt.log. Started here because this
-        # is the first point the per-game APP-ROOT is known; once a real
-        # game-selection screen exists (multi-game, later slice), this moves to
-        # wherever the chosen game's app root gets resolved. None when it can't be
-        # written (no log): Settings > Troubleshooting's log buttons follow.
-        self._log_path: Path | None = init_log(self.app_root)
+        moved = migrate_legacy_app_root(GAME_SLUG)  # before anything creates the new folder
+        # The app-wide <base>/logs/volt.log (applog.init_log at app start; MainWindow
+        # tags this game's lines). None when it can't be written (no log):
+        # Settings > Troubleshooting's log buttons follow.
+        self._log_path: Path | None = log_file()
         log(f"app root: {self.app_root}")
         if moved:
             log(moved)
@@ -2807,39 +2812,86 @@ class RimWorldMainScreen(QWidget):
     def _begin_watch(self, exe_name: str, what: str) -> None:
         """Locked (_run_block, the Games button, Settings) until the game - by
         image name - has been seen and is gone, or never came."""
-        self._launch = {"exe_name": exe_name, "what": what, "phase": "starting", "started": time.monotonic()}
+        self._launch = {"exe_name": exe_name, "what": what, "phase": "starting", "started": time.monotonic(),
+                        # 0.6.46 watch state: the in-flight poll's start (None = none), its generation (a late
+                        # result of an older poll is ignored), polls answered, polls that couldn't tell in a row
+                        "poll": None, "gen": 0, "polls": 0, "fails": 0, "slow_logged": False}
         self.status_text.set_status_text(f"Launching RimWorld ({what})...")
         self._apply_load_order_state()
         self._launch_timer.start(rl.POLL_INTERVAL_S * 1000)
 
     def _poll_launch(self) -> None:
-        """One tick of the watch: tasklist on a daemon thread, then _on_launch_poll."""
-        if self._launch is None or self._closed:
+        """One tick of the watch's repeating timer (0.6.46): the start deadline
+        from the clock first (a poll that never returns can't keep the screen
+        locked), a tick with a poll in flight skipped (logged once when slow),
+        else tasklist on a daemon thread, then _on_launch_poll."""
+        st = self._launch
+        if st is None or self._closed or st["phase"] == "cleaning":
+            self._launch_timer.stop()
             return
-        threading.Thread(target=_poll_running, args=(self._launch["exe_name"], self._launch_polled),
-                         name="launch-poll", daemon=True).start()
+        try:
+            now = time.monotonic()
+            if st["phase"] == "starting" and now - st["started"] >= rl.START_TIMEOUT_S:
+                inflight = "" if st["poll"] is None else f"; a poll was still running after {now - st['poll']:.0f}s"
+                log(f"run: {st['exe_name']} didn't start within {rl.START_TIMEOUT_S}s "
+                    f"({st['polls']} polls answered, {st['fails']} couldn't tell{inflight})")
+                hint = (" If Steam was updating RimWorld, start it again from VOLT once Steam is done."
+                        if self.game_dir is not None and paths.has_steam_appid(self.game_dir) else "")
+                self._end_watch(f"RimWorld didn't start within {rl.START_TIMEOUT_S // 60} minutes.{hint}", "warn")
+                return
+            if st["poll"] is not None:
+                if now - st["poll"] >= rl.POLL_SLOW_S and not st["slow_logged"]:
+                    st["slow_logged"] = True
+                    log(f"run: a launch poll has been running for {now - st['poll']:.0f}s (tasklist slow?); "
+                        "waiting for it, the start deadline still applies")
+                return
+            st["poll"], st["gen"] = now, st["gen"] + 1
+            threading.Thread(target=_poll_running, args=(st["exe_name"], st["gen"], self._launch_polled),
+                             name="launch-poll", daemon=True).start()
+        except Exception:
+            log("run: launch watch tick FAILED (the watch goes on):\n" + traceback.format_exc().rstrip())
 
     @Slot(object)
-    def _on_launch_poll(self, pids) -> None:
+    def _on_launch_poll(self, payload) -> None:
+        """A poll's result (_LaunchPolled). pids None = couldn't tell: keep
+        watching, never read as "exited". Logged sparingly: the first answer,
+        a state change, the first of a run of failures (then every 30th), a
+        slow poll."""
         st = self._launch
         if st is None or self._closed or st["phase"] == "cleaning":
             return
-        elapsed = time.monotonic() - st["started"]
-        if st["phase"] == "starting":
-            if pids:
-                st["phase"], st["started"] = "running", time.monotonic()
-                log(f"run: {st['exe_name']} running (pids {sorted(pids)}) after {elapsed:.0f}s")
-                self.status_text.set_status_text(f"RimWorld is running ({st['what']}).")
-                self._apply_load_order_state()
-            elif elapsed >= rl.START_TIMEOUT_S:
-                log(f"run: {st['exe_name']} didn't start within {rl.START_TIMEOUT_S}s")
-                self._end_watch(f"RimWorld didn't start within {rl.START_TIMEOUT_S // 60} minutes.", "warn")
+        if payload.get("gen") != st["gen"]:
+            return  # a newer poll is the one awaited
+        try:
+            took = time.monotonic() - st["poll"] if st["poll"] is not None else 0.0
+            st["poll"], st["slow_logged"] = None, False
+            pids = payload.get("pids")
+            if pids is None:
+                st["fails"] += 1
+                if st["fails"] == 1 or st["fails"] % 30 == 0:
+                    log(f"run: couldn't check whether {st['exe_name']} is running ({payload.get('error') or 'tasklist failed'}"
+                        f"; {st['fails']} in a row); still watching")
                 return
-        elif not pids:
-            log(f"run: {st['exe_name']} exited after {elapsed:.0f}s")
-            self._end_watch("RimWorld exited.", "info")
-            return
-        self._launch_timer.start(rl.POLL_INTERVAL_S * 1000)
+            if st["fails"]:
+                log(f"run: tasklist answers again after {st['fails']} failed poll(s)")
+                st["fails"] = 0
+            st["polls"] += 1
+            if took >= rl.POLL_SLOW_S:
+                log(f"run: a launch poll took {took:.0f}s")
+            if st["polls"] == 1:
+                log(f"run: first poll: {st['exe_name']} {'running' if pids else 'not running yet'}")
+            elapsed = time.monotonic() - st["started"]
+            if st["phase"] == "starting":
+                if pids:
+                    st["phase"], st["started"] = "running", time.monotonic()
+                    log(f"run: {st['exe_name']} running (pids {sorted(pids)}) after {elapsed:.0f}s")
+                    self.status_text.set_status_text(f"RimWorld is running ({st['what']}).")
+                    self._apply_load_order_state()
+            elif not pids:
+                log(f"run: {st['exe_name']} exited after {elapsed:.0f}s")
+                self._end_watch("RimWorld exited.", "info")
+        except Exception:
+            log("run: launch poll result FAILED to apply (the watch goes on):\n" + traceback.format_exc().rstrip())
 
     def _end_watch(self, text: str, kind: str) -> None:
         """The game is gone (or never came): with a launch record (Offline mods

@@ -34,8 +34,9 @@ NAME_MAX = 28  # the rail's one-line cap (tools/checks/volt_py_help_window.py me
 
 def _fill(text: str, values: dict) -> str:
     # Plain replace, not str.format: an entry's text may hold literal braces.
+    # A value ending in "." (R.E.P.O.) at a sentence's end keeps one full stop.
     for key, value in values.items():
-        text = text.replace("{" + key + "}", value)
+        text = text.replace("{" + key + "}.", value.rstrip(".") + ".").replace("{" + key + "}", value)
     return text
 
 

@@ -7,11 +7,15 @@ Flow, driven by the UI (dispatch 2): fetch_latest() -> is_newer() ->
 can_self_update() -> download() -> stage() -> write_apply_script() ->
 launch_apply() -> the caller quits the app AT ONCE. Next start:
 cleanup_leftovers() clears <base>/update/ and reports a failed copy.
+apply.log (+ .prev) lives in <base>/logs/ with VOLT's other logs (0.6.45;
+<base>/update/ before, still read once - the update to 0.6.45 itself was
+written by the old build).
 
-User data lives inside the install folder (<base>/games, <base>/cache); the
+User data lives inside the install folder (<base>/games, <base>/cache,
+<base>/logs); the
 .bat copies with robocopy /E (never /MIR, never /PURGE), so nothing in the
-install folder is ever deleted, and the release zip carries no games/ or
-cache/ anyway. Stdlib + volt_py.net only (no PySide6), so
+install folder is ever deleted, and the release zip carries no games/,
+cache/ or logs/ anyway. Stdlib + volt_py.net only (no PySide6), so
 tools/checks/volt_py_update.py runs it in the sandbox.
 
 Testing override: VOLT_UPDATE_API_URL (read once, at import) replaces the
@@ -37,7 +41,7 @@ from importlib.metadata import version as _dist_version
 from pathlib import Path
 
 from volt_py import app_root, fsutil, net
-from volt_py.applog import log
+from volt_py.applog import LOG_DIR, log
 
 REPO = "Vokaerian/V.O.L.T"
 DEFAULT_API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -50,7 +54,7 @@ _DIGEST = re.compile(r"sha256:([0-9a-fA-F]{64})")
 TIMEOUT_S = 10
 _CHUNK = 256 * 1024
 
-UPDATE_DIR = "update"  # <base>/update/: download, staged/, apply.bat, apply.log
+UPDATE_DIR = "update"  # <base>/update/: download, staged/, apply.bat (apply.log: <base>/logs/)
 STAGED_DIR = "staged"
 STATE_FILE = "update.json"  # <base>/update.json
 APPLY_BAT = "apply.bat"
@@ -59,7 +63,7 @@ APPLY_LOG_PREV = "apply.log.prev"  # apply.log once cleanup_leftovers has read i
 EXE_NAME = "VOLT.exe"
 ZIP_ROOT = "VOLT"  # the zip's one top-level folder since 0.6.29 (tools/release.py)
 # In <base>, never touched by an update (robocopy /XD; also never in the zip).
-KEEP_DIRS = ("games", "cache", UPDATE_DIR)
+KEEP_DIRS = ("games", "cache", UPDATE_DIR, LOG_DIR)
 FAILED_MARK = "RESULT: FAILED"
 OK_MARK = "RESULT: OK"
 # apply.log markers (0.6.44): VOLT writes TARGET_MARK before it launches the
@@ -267,6 +271,11 @@ def update_dir() -> Path:
     return app_root.resolve_base_root() / UPDATE_DIR
 
 
+def logs_dir() -> Path:
+    """<base>/logs/ (applog.LOG_DIR): apply.log and apply.log.prev."""
+    return app_root.resolve_base_root() / LOG_DIR
+
+
 # ---- download ----
 def download(release: Release, progress_cb=None, cancel_event=None, urlopen=net.urlopen) -> Path | None:
     """Streams the release zip to <base>/update/<asset>.part, checks size and
@@ -372,11 +381,11 @@ def write_apply_script(staged, install_dir, target=None) -> Path:
     can be opened for writing (every VOLT process has exited), robocopy the
     staged app root over install_dir, log to apply.log, then ALWAYS start
     VOLT.exe again (the old build if the copy failed; apply.log says so).
-    Also starts apply.log with TARGET_MARK target (the release tag), which the
+    Also starts <base>/logs/apply.log with TARGET_MARK target (the release tag), which the
     script appends to and cleanup_leftovers checks on the next start."""
     staged, install = Path(staged), Path(install_dir)
     folder = update_dir()
-    bat, logf = folder / APPLY_BAT, folder / APPLY_LOG
+    bat, logf = folder / APPLY_BAT, logs_dir() / APPLY_LOG
     exe = install / EXE_NAME
     S, D, E, L = _bat_path(staged), _bat_path(install), _bat_path(exe), _bat_path(logf)
     xd = " ".join(_bat_path(staged / d) for d in KEEP_DIRS)
@@ -419,6 +428,7 @@ def write_apply_script(staged, install_dir, target=None) -> Path:
         "exit /b 0",
     ]
     folder.mkdir(parents=True, exist_ok=True)
+    logf.parent.mkdir(parents=True, exist_ok=True)
     # CRLF: cmd's label/goto scanning misbehaves on LF-only batch files.
     with open(bat, "w", encoding="utf-8", newline="\r\n") as f:
         f.write("\n".join(lines) + "\n")
@@ -456,7 +466,7 @@ def launch_apply(bat=None) -> None:
         log(f"[update] launching apply.bat FAILED: {err!r}")
         # Never launched: drop the TARGET_MARK header so the next start doesn't
         # report it as an interrupted update (the dialog shows this error now).
-        (bat.parent / APPLY_LOG).unlink(missing_ok=True)
+        (logs_dir() / APPLY_LOG).unlink(missing_ok=True)
         raise
     log(f"[update] apply.bat launched: pid {getattr(p, 'pid', None)}; VOLT must now quit")
 
@@ -482,11 +492,14 @@ def _apply_problem(text: str) -> str | None:
 
 
 def cleanup_leftovers() -> str | None:
-    """Call once at startup. Empties <base>/update/ (download, staged/,
-    apply.bat) and moves apply.log to apply.log.prev (kept for
-    troubleshooting, so it's only reported once). Returns apply.log's text,
-    led by a plain-words line, when the update failed or was cut short
-    (_apply_problem), else None. Never raises."""
+    """Call once at startup. Judges and moves the last update's apply.log to
+    <base>/logs/apply.log.prev (kept for troubleshooting and Report a problem,
+    so it's only reported once), then empties <base>/update/ (download,
+    staged/, apply.bat). A legacy <base>/update/apply.log (written by a
+    0.6.44-or-older apply.bat - the update to 0.6.45 itself) is judged the same
+    way; a legacy update/apply.log.prev moves to logs/ when logs/ has none.
+    Returns apply.log's text, led by a plain-words line, when the update
+    failed or was cut short (_apply_problem), else None. Never raises."""
     exe = app_root.exe_path()
     try:
         st = exe.stat()
@@ -494,27 +507,39 @@ def cleanup_leftovers() -> str | None:
     except OSError as err:
         about = f"stat failed: {err!r}"
     log(f"[update] running VOLT {current_version()} from {exe} ({about})")
-    folder = update_dir()
-    if not folder.is_dir():
-        return None
+    folder, logs = update_dir(), logs_dir()
     report = None
-    logf = folder / APPLY_LOG
+    prev = logs / APPLY_LOG_PREV
     try:
-        if logf.is_file():
+        legacy_prev = folder / APPLY_LOG_PREV
+        if legacy_prev.is_file() and not prev.exists():
+            os.replace(legacy_prev, prev)
+            log(f"[update] moved {legacy_prev} -> {prev}")
+    except OSError as err:
+        log(f"[update] couldn't move {legacy_prev}: {err!r}")
+    found = False
+    for logf in (folder / APPLY_LOG, logs / APPLY_LOG):  # legacy first: logs/ ends up holding the newest
+        try:
+            if not logf.is_file():
+                continue
+            found = True
             text = logf.read_text(encoding="utf-8", errors="replace")
             problem = _apply_problem(text)
-            log(f"[update] last update's apply.log: {'finished OK' if problem is None else 'DID NOT FINISH: ' + problem}"
+            log(f"[update] last update's {logf}: {'finished OK' if problem is None else 'DID NOT FINISH: ' + problem}"
                 f"{'' if problem is None else ' (antivirus software may have stopped it)'}\n{text.strip()}")
             if problem:
                 report = f"VOLT on the next start: {problem}.\n{text}"
-            os.replace(logf, folder / APPLY_LOG_PREV)
-        elif (folder / APPLY_BAT).exists():
-            log(f"[update] {folder / APPLY_BAT} is there but {logf} isn't: the update was prepared but never "
-                "launched (or apply.log was removed), so nothing was copied")
-    except OSError as err:
-        log(f"[update] couldn't read/move {logf}: {err!r}")
+            prev.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(logf, prev)
+        except OSError as err:
+            log(f"[update] couldn't read/move {logf}: {err!r}")
+    if not folder.is_dir():
+        return report
+    if not found and (folder / APPLY_BAT).exists():
+        log(f"[update] {folder / APPLY_BAT} is there but {logs / APPLY_LOG} isn't: the update was prepared but never "
+            "launched (or apply.log was removed), so nothing was copied")
     for p in folder.iterdir():
-        if p.name in (APPLY_LOG, APPLY_LOG_PREV):
+        if p.name in (APPLY_LOG, APPLY_LOG_PREV):  # legacy ones that couldn't be moved: left alone
             continue
         try:
             shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()

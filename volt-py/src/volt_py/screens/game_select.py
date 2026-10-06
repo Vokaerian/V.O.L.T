@@ -4,7 +4,7 @@ emits GameSelectScreen.gameSelected(slug), which MainWindow answers by
 swapping in that game's screen. The pick isn't persisted (TODO.md #30); each
 manager's "Games" button / Alt+Left comes back to a fresh GameSelectScreen
 (0.6.8). RimWorld's tile is enabled, plus every Thunderstore game with a row
-in bepinex_games.GAMES (Valheim, Lethal Company): Game.enabled reads it.
+in bepinex_games.GAMES (Valheim, Lethal Company, R.E.P.O.): Game.enabled reads it.
 
 Layout (top to bottom, centered, in a QScrollArea - CSS overflow-y: auto):
 the brand header (0.6.9, DESIGN.md §35: a fixed 459x176 mark + wordmark

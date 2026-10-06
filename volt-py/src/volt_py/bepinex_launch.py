@@ -68,6 +68,9 @@ DOORSTOP_VERSION_FILE = ".doorstop_version"
 PRELOADER = ("BepInEx", "core", "BepInEx.Preloader.dll")
 START_TIMEOUT_S = 180  # Steam may update the game, show its launch-option chooser, or start the client itself
 POLL_INTERVAL_S = 2
+POLL_SLOW_S = 20  # a launch poll in flight this long is logged as slow (the watch skips ticks meanwhile)
+TASKLIST_TIMEOUT_S = 15
+KILL_WAIT_S = 5
 CLEANUP_RETRIES = 5  # a delete refused by an AV rescan / an Explorer handle: retried once a second
 SCHEMA_VERSION = 1
 
@@ -316,21 +319,47 @@ def parse_tasklist(text: str, exe_name: str) -> set[int]:
     return pids
 
 
-def running_pids(exe_name: str) -> set[int]:
-    """The PIDs of every running process with this image name (Windows;
-    an empty set elsewhere or when tasklist itself fails)."""
+def query_pids(exe_name: str) -> set[int] | None:
+    """The PIDs of every running process with this image name (Windows; an
+    empty set elsewhere), or None when tasklist failed or didn't answer: the
+    caller can't tell (0.6.46 - the launch watch keeps watching then instead
+    of reading it as "not running").
+    Bounded: TASKLIST_TIMEOUT_S, then a kill and at most KILL_WAIT_S more.
+    Not subprocess.run(timeout=): on Windows, after the kill it waits for the
+    output with no timeout at all, so a tasklist that won't die hangs the
+    caller for good (the suspected cause of 2026-10-06's dead launch watch)."""
     if sys.platform != "win32":
         return set()
     try:
-        out = subprocess.run(
+        proc = subprocess.Popen(
             ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, errors="replace", timeout=15,  # the no-tasks line is localized text
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, errors="replace",  # the no-tasks line is localized text
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except (OSError, subprocess.SubprocessError) as err:
+    except (OSError, ValueError) as err:
+        log(f"run: tasklist failed to start: {err!r}")
+        return None
+    try:
+        out, _ = proc.communicate(timeout=TASKLIST_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.communicate(timeout=KILL_WAIT_S)
+        except Exception:
+            pass  # ponytail: an unkillable tasklist leaves its pipe-reader thread behind (daemon); rare
+        log(f"run: tasklist didn't answer within {TASKLIST_TIMEOUT_S}s (killed)")
+        return None
+    except Exception as err:
         log(f"run: tasklist failed: {err!r}")
-        return set()
-    return parse_tasklist(out.stdout, exe_name)
+        return None
+    return parse_tasklist(out or "", exe_name)
+
+
+def running_pids(exe_name: str) -> set[int]:
+    """query_pids with "couldn't tell" as an empty set (every caller but the
+    launch watch: recover, the start refusal, Reset installation, RimWorld)."""
+    return query_pids(exe_name) or set()
 
 
 def launch(argv: list[str]) -> int:

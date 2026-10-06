@@ -47,7 +47,7 @@ Thunderstore game actually needs today:
   (painters.TerminalLabel rule="heading", the Rules / Warnings dialog
   headings) over a muted one-line description and its buttons, SECTION_GAP
   apart: LOGS (Open log file, Open previous log file, Copy log to
-  clipboard), SUPPORT INFO (Copy troubleshooting info), MOD CACHE (Clean
+  clipboard, Open logs folder - 0.6.46), SUPPORT INFO (Copy troubleshooting info), MOD CACHE (Clean
   cache), and RESET INSTALLATION pushed to the bottom of the page by the
   stretch (destructive; no danger button variant exists, so separation
   only). 0.6.39 (troubleshooting phase 2 dispatch C): PATCH DETAILS after
@@ -355,7 +355,13 @@ class BepInExSettingsWindow(QDialog):
         self.copy_log_button = _button("Copy log to clipboard")
         self.copy_log_button.setEnabled(self._log_path is not None)
         self.copy_log_button.setToolTip(COPY_LOG_TOOLTIP if self._log_path else NO_LOG_TOOLTIP)
-        _group(layout, "Logs", LOGS_NOTE, self.log_button, self.prev_log_button, self.copy_log_button)
+        # 0.6.46: <base>/logs/ itself (volt.log's folder: crash and update logs too), in Explorer
+        self.logs_folder_button = _button("Open logs folder")
+        logs_dir = self._log_path.parent if self._log_path else None
+        self.logs_folder_button.setEnabled(logs_dir is not None)
+        self.logs_folder_button.setToolTip(str(logs_dir) if logs_dir else NO_LOG_TOOLTIP)
+        _group(layout, "Logs", LOGS_NOTE, self.log_button, self.prev_log_button, self.copy_log_button,
+               self.logs_folder_button)
         layout.addSpacing(SECTION_GAP)
         self.copy_info_button = _button("Copy troubleshooting info")
         self.copy_info_button.setToolTip(COPY_INFO_TOOLTIP)
@@ -380,6 +386,7 @@ class BepInExSettingsWindow(QDialog):
         self.prev_log_button.clicked.connect(lambda: self._open_log(self._prev_log_path))
         self.clean_cache_button.clicked.connect(lambda: self._clean_cache())
         self.copy_log_button.clicked.connect(lambda: self._copy_log())
+        self.logs_folder_button.clicked.connect(lambda: self._open_log(logs_dir))
         self.copy_info_button.clicked.connect(lambda: self._copy_info())
         self.reset_button.clicked.connect(lambda: self._reset_installation())
         return page

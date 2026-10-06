@@ -34,9 +34,9 @@ volt_py/update.py, the words + Qt-free decisions volt_py/update_flow.py).
   newer, not-skipped release opens the dialog. MainWindow only opens it on
   the game select screen (held until the user goes back there).
 
-Logging: every step logs via applog.log, which is a no-op until a manager
-calls init_log - so the startup check (game select, before any game opens)
-leaves no lines; the manual check from Settings does (a manager is open).
+Logging: every step logs via applog.log into the app-wide <base>/logs/volt.log,
+opened at app start (0.6.45), so the startup check on game select is logged
+too (untagged; the manual check from Settings carries the open game's tag).
 """
 
 import html

@@ -115,7 +115,10 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     (anything already there is backed up), the game is started through
     `steam.exe -applaunch` with the Doorstop arguments pointing at the
     load order's own BepInEx, and the screen stays busy while the game
-    runs (a poll of `tasklist` every 2 s, off the GUI thread) - the
+    runs (a poll of `tasklist` every 2 s, off the GUI thread; 0.6.46: a
+    repeating timer that never waits on the last poll, the 3-minute start
+    deadline enforced by the timer itself, a poll that can't tell = keep
+    watching) - the
     running load order's DLLs are mapped by the game, so a Save / Update /
     Uninstall rename would fail mid-way. When it exits, the copied files
     are removed and the backups restored ("game folder restored"). Never
@@ -196,6 +199,7 @@ and may overlap a job.
 import re
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -233,7 +237,7 @@ from volt_py import first_run as fr
 from volt_py import mod_icons
 from volt_py import thunderstore as ts
 from volt_py.app_root import migrate_legacy_app_root, resolve_app_root
-from volt_py.applog import clip, init_log, log
+from volt_py.applog import clip, log, log_file
 from volt_py.bepinex_install import BEPINEX_DIR, PackageError
 from volt_py.mods import natural_key
 from volt_py.paths import norm
@@ -669,12 +673,14 @@ class BepInExMainScreen(QWidget):
             self.app_root, key, self._load_order_dir(), self._entries.get(key.rpartition("-")[0])))
         self._icon_loader.loaded.connect(self._on_row_icon, Qt.ConnectionType.QueuedConnection)
         self._poll_timer = QTimer(self)
-        self._poll_timer.setSingleShot(True)  # re-armed after each poll's result, so polls never overlap
+        # 0.6.46: repeating, never re-armed by a poll's result (a lost or hung poll killed the old
+        # single-shot chain for good); _poll_launch skips a tick while a poll is still in flight
+        self._poll_timer.setSingleShot(False)
         self._poll_timer.timeout.connect(self._poll_launch)
 
         self.app_root = resolve_app_root(game.SLUG)
-        moved = migrate_legacy_app_root(game.SLUG)  # before init_log creates the new folder
-        self._log_path: Path | None = init_log(self.app_root)
+        moved = migrate_legacy_app_root(game.SLUG)  # before anything creates the new folder
+        self._log_path: Path | None = log_file()  # the app-wide <base>/logs/volt.log (applog, 0.6.45)
         log(f"app root: {self.app_root} ({self.game_name})")
         if moved:
             log(moved)
@@ -856,7 +862,7 @@ class BepInExMainScreen(QWidget):
         self._no_game.setVisible(not has_game)
         self._no_game_text.setText(
             (f"The saved {self.game_name} folder no longer exists." if self._saved_game_dir_missing
-             else f"Autodetect didn't find a Steam install of {self.game_name}.")
+             else f"Autodetect didn't find a Steam install of {self.game_name.rstrip('.')}.")
             + f" Please locate your {self.game_name} install folder (the one containing {self.game.DATA_DIR})."
         )
         self.inactive_list.setEnabled(has_game)
@@ -1184,7 +1190,7 @@ class BepInExMainScreen(QWidget):
         self.back_requested.emit()
 
     # ---- background jobs ----
-    def _run_job(self, name: str, fn, on_done, *, progress=None, downloads=None) -> None:
+    def _run_job(self, name: str, fn, on_done, *, progress=None, downloads=None, quiet: bool = False) -> None:
         """Runs fn(report) on a daemon thread; on_done({"ok": result} or
         {"error": text}) then runs on the GUI thread. report(text) reaches
         `progress` (GUI thread) when given. `downloads` (full_names, may be
@@ -1220,7 +1226,8 @@ class BepInExMainScreen(QWidget):
         thread = threading.Thread(target=run, name=name, daemon=True)
         self._jobs[carrier] = thread
         thread.start()
-        log(f"[job {name}] started (thread {thread.name})")
+        if not quiet:  # quiet: the launch watch's 2-s polls (it logs their outcomes itself)
+            log(f"[job {name}] started (thread {thread.name})")
 
     def _finish_job(self, carrier: _JobDone, on_done, payload: dict) -> None:
         self._jobs.pop(carrier, None)
@@ -1822,7 +1829,7 @@ class BepInExMainScreen(QWidget):
         try:
             share.check_game(profile, self.ts_game, self.game_name)
         except share.ProfileError as err:
-            self._warn("Couldn't import", f"This profile isn't for {self.game_name}.",
+            self._warn("Couldn't import", f"This profile isn't for {self.game_name.rstrip('.')}.",
                        means="It was made for another game, so its mods wouldn't work here. Nothing was changed.",
                        tryit=f"Import it in that game's manager, or ask for a {self.game_name} profile.",
                        details=str(err))
@@ -2950,7 +2957,7 @@ class BepInExMainScreen(QWidget):
                 log(f"run: start failed, record patch details: restore {pl.restore(tree)}")
                 runs.discard_pending(tree)
             log(f"run: failed: {err!r}")
-            self._warn("Run failed", f"Couldn't start {self.game_name}.",
+            self._warn("Run failed", f"Couldn't start {self.game_name.rstrip('.')}.",
                        means=str(err),
                        tryit=f"Make sure Steam is running and {self.game_name} isn't already open, then try again.",
                        details=str(err))
@@ -2994,7 +3001,10 @@ class BepInExMainScreen(QWidget):
         """Busy until the game (by image name) has been seen and is gone."""
         self._launch = {"exe_name": exe_name, "load_order_name": load_order_name, "load_order": slug,
                         "modded": modded, "phase": phase, "started": time.monotonic(),
-                        "reattached": phase == "running"}  # run history: no measured play time then
+                        "reattached": phase == "running",  # run history: no measured play time then
+                        # 0.6.46 watch state: the in-flight poll's start (None = none), its generation (a late
+                        # result of an older one is ignored), polls answered, polls that couldn't tell in a row
+                        "poll": None, "gen": 0, "polls": 0, "fails": 0, "slow_logged": False}
         what = f'profile "{load_order_name}"' if modded else "vanilla, no mods"
         if phase == "running":
             self._set_busy(f"{self.game_name} is running ({what}), started by a previous VOLT session."
@@ -3004,40 +3014,84 @@ class BepInExMainScreen(QWidget):
         self._poll_timer.start(bl.POLL_INTERVAL_S * 1000)
 
     def _poll_launch(self) -> None:
-        """One tick of the watch: tasklist off the GUI thread, then _on_poll."""
-        if self._launch is None:
-            return
-        exe_name = self._launch["exe_name"]
-        self._run_job("launch-poll", lambda report: bl.running_pids(exe_name), self._on_poll)
-
-    def _on_poll(self, payload: dict) -> None:
+        """One tick of the watch's repeating timer (0.6.46). The start deadline
+        is checked here, from the clock, so a poll that never comes back can't
+        keep the screen busy for good; a tick while a poll is still in flight
+        is skipped (logged once when it gets slow); else tasklist runs off the
+        GUI thread (bepinex_launch.query_pids, bounded) and _on_poll takes it."""
         st = self._launch
         if st is None:
+            self._poll_timer.stop()
             return
-        pids = payload.get("ok") or set()
-        elapsed = time.monotonic() - st["started"]
-        what = f'profile "{st["load_order_name"]}"' if st["modded"] else "vanilla, no mods"
-        if st["phase"] == "starting":
-            if pids:
-                st["phase"], st["started"] = "running", time.monotonic()
-                log(f"run: {st['exe_name']} running (pids {sorted(pids)}) after {elapsed:.0f}s")
-                if st["modded"] and not self._settings.get()["has_launched"]:
-                    self._remember({"has_launched": True})  # the checklist's step 4 (0.6.23)
-                self._set_busy(f"{self.game_name} is running ({what})."
-                               + (" VOLT tidies the game folder when it exits." if st["modded"] else ""))
-            elif elapsed >= bl.START_TIMEOUT_S:
-                log(f"run: {st['exe_name']} didn't start within {bl.START_TIMEOUT_S}s")
-                self._end_watch(f"{self.game_name} didn't start within {bl.START_TIMEOUT_S // 60} minutes", "warn")
+        try:
+            now = time.monotonic()
+            if st["phase"] == "starting" and now - st["started"] >= bl.START_TIMEOUT_S:
+                inflight = "" if st["poll"] is None else f"; a poll was still running after {now - st['poll']:.0f}s"
+                log(f"run: {st['exe_name']} didn't start within {bl.START_TIMEOUT_S}s "
+                    f"({st['polls']} polls answered, {st['fails']} couldn't tell{inflight})")
+                self._end_watch(f"{self.game_name} didn't start within {bl.START_TIMEOUT_S // 60} minutes", "warn",
+                                hint=f"If Steam was updating {self.game_name}, start it again from VOLT once Steam is done.")
                 return
-        elif not pids:
-            log(f"run: {st['exe_name']} exited after {_duration(elapsed)}")
-            self._end_watch(f"{self.game_name} exited after {_duration(elapsed)}", "info")
-            return
-        self._poll_timer.start(bl.POLL_INTERVAL_S * 1000)
+            if st["poll"] is not None:
+                if now - st["poll"] >= bl.POLL_SLOW_S and not st["slow_logged"]:
+                    st["slow_logged"] = True
+                    log(f"run: a launch poll has been running for {now - st['poll']:.0f}s (tasklist slow?); "
+                        "waiting for it, the start deadline still applies")
+                return
+            st["poll"], st["gen"] = now, st["gen"] + 1
+            gen, exe_name = st["gen"], st["exe_name"]
+            self._run_job("launch-poll", lambda report: bl.query_pids(exe_name),
+                          lambda payload: self._on_poll(payload, gen), quiet=True)
+        except Exception:
+            log("run: launch watch tick FAILED (the watch goes on):\n" + traceback.format_exc().rstrip())
 
-    def _end_watch(self, what: str, kind: str) -> None:
+    def _on_poll(self, payload: dict, gen: int | None = None) -> None:
+        """A poll's result: {"ok": pids} (a set; None = tasklist couldn't tell)
+        or {"error": text}. Can't tell: keep watching - never read as "exited".
+        Logged sparingly: the first answer, a state change, the first of a run
+        of failures (then every 30th) and a slow poll."""
+        st = self._launch
+        if st is None or (gen is not None and gen != st["gen"]):
+            return  # the watch ended, or a newer poll is the one awaited
+        try:
+            took = time.monotonic() - st["poll"] if st["poll"] is not None else 0.0
+            st["poll"], st["slow_logged"] = None, False
+            pids = payload.get("ok")
+            if pids is None:
+                st["fails"] += 1
+                if st["fails"] == 1 or st["fails"] % 30 == 0:
+                    log(f"run: couldn't check whether {st['exe_name']} is running ({payload.get('error') or 'tasklist failed'}"
+                        f"; {st['fails']} in a row); still watching")
+                return
+            if st["fails"]:
+                log(f"run: tasklist answers again after {st['fails']} failed poll(s)")
+                st["fails"] = 0
+            st["polls"] += 1
+            if took >= bl.POLL_SLOW_S:
+                log(f"run: a launch poll took {took:.0f}s")
+            if st["polls"] == 1:
+                log(f"run: first poll: {st['exe_name']} {'running' if pids else 'not running yet'}")
+            elapsed = time.monotonic() - st["started"]
+            what = f'profile "{st["load_order_name"]}"' if st["modded"] else "vanilla, no mods"
+            if st["phase"] == "starting":
+                if pids:
+                    st["phase"], st["started"] = "running", time.monotonic()
+                    log(f"run: {st['exe_name']} running (pids {sorted(pids)}) after {elapsed:.0f}s")
+                    if st["modded"] and not self._settings.get()["has_launched"]:
+                        self._remember({"has_launched": True})  # the checklist's step 4 (0.6.23)
+                    self._set_busy(f"{self.game_name} is running ({what})."
+                                   + (" VOLT tidies the game folder when it exits." if st["modded"] else ""))
+            elif not pids:
+                log(f"run: {st['exe_name']} exited after {_duration(elapsed)}")
+                self._end_watch(f"{self.game_name} exited after {_duration(elapsed)}", "info")
+        except Exception:
+            log("run: launch poll result FAILED to apply (the watch goes on):\n" + traceback.format_exc().rstrip())
+
+    def _end_watch(self, what: str, kind: str, hint: str = "") -> None:
         """The game is gone (or never came): a modded run's cleanup (as a
-        job - a locked file is retried for a few seconds), then the status."""
+        job - a locked file is retried for a few seconds), then the status
+        (`hint`: a plain-words next step after it). A run that never started
+        has its pending run-history record discarded, not finished (0.6.46)."""
         st, self._launch = self._launch, None
         self._poll_timer.stop()
         if st["modded"] and st.get("load_order"):
@@ -3049,9 +3103,11 @@ class BepInExMainScreen(QWidget):
                 finish_kw = {"ended_at": time.time()}
             else:
                 finish_kw = {"play_s": time.monotonic() - st["started"] if st["phase"] == "running" else 0.0}
+        never_started = st["phase"] == "starting"
+        tail = f" {hint}" if hint else ""
         if not st["modded"]:
             self._set_busy(None)
-            self.status_text.set_status_text(f"{what}.", kind)
+            self.status_text.set_status_text(f"{what}.{tail}", kind)
             return
         self._set_busy(f"{what} - tidying the game folder...")
 
@@ -3061,11 +3117,16 @@ class BepInExMainScreen(QWidget):
             if result["failed"]:
                 self._warn_cleanup_failed(result)
                 self.status_text.set_status_text(
-                    f"{what} - some mod loader files are still in the {self.game_name} folder.", "warn")
+                    f"{what} - some mod loader files are still in the {self.game_name} folder.{tail}", "warn")
             else:
-                self.status_text.set_status_text(f"{what} - game folder restored.", kind)
+                self.status_text.set_status_text(f"{what} - game folder restored.{tail}", kind)
             if st.get("load_order"):
-                self._finish_run(lo.tree_root(self.app_root, st["load_order"]), **finish_kw)
+                tree = lo.tree_root(self.app_root, st["load_order"])
+                if never_started:  # nothing ran: no run to record (finish_run would drop it on the old log anyway)
+                    runs.discard_pending(tree)
+                    log(f"[runs] {tree.name}: the game never started; pending run discarded")
+                else:
+                    self._finish_run(tree, **finish_kw)
 
         self._run_job("launch-cleanup", lambda report: bl.cleanup(self.app_root), done)
 

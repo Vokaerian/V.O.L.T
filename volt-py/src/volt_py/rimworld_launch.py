@@ -67,8 +67,8 @@ from pathlib import Path
 from . import mods_config, offline_mods, paths
 from .applog import clip, log
 from .bepinex_launch import (  # noqa: F401  (re-exported for the screen)
-    CLEANUP_RETRIES, POLL_INTERVAL_S, START_TIMEOUT_S, LaunchError, _remove_link, _retry, backup_dir, launch,
-    platform_error, record_path, remove_record, running_pids, steam_argv, write_record,
+    CLEANUP_RETRIES, POLL_INTERVAL_S, POLL_SLOW_S, START_TIMEOUT_S, LaunchError, _remove_link, _retry, backup_dir,
+    launch, platform_error, query_pids, record_path, remove_record, running_pids, steam_argv, write_record,
 )
 from .fsutil import is_link, read_json, read_text
 from .vdf import get_ci, parse_vdf

@@ -17,8 +17,9 @@ controls directly under it; SECTION_GAP between groups.
   (settings steam_acquire_via; unset = auto: 'gog' for a GOG install, else
   'steamcmd' - settings.effective_acquire_via); MISSING WORKSHOP MODS -
   Check for missing Workshop mods.
-- Troubleshooting: LOGS - Open log file (<app_root>/volt.log, applog.py) and
-  Open previous log file (volt.log.prev, disabled when there isn't one).
+- Troubleshooting: LOGS - Open log file (the app-wide <base>/logs/volt.log,
+  applog.py, since 0.6.45) and Open previous log file (volt.log.prev,
+  disabled when there isn't one), then Open logs folder (<base>/logs/, 0.6.46).
 
 The tabs themselves slide their underline and crossfade their pages
 (painters.animate_tabs).
@@ -45,7 +46,7 @@ in Electron (whose only disable is its own "Checking..." re-entrancy flag,
 not ported: the screen's `downloading` set already covers a second click).
 
 Logging is on in every build (applog.py, since 0.6.6); only a run whose log
-couldn't be written (read-only app root) has none, and then both log buttons
+couldn't be written (read-only VOLT folder) has none, and then both log buttons
 are disabled.
 """
 
@@ -538,11 +539,17 @@ class SettingsWindow(QDialog):
             else NO_LOG_TOOLTIP if self._log_path is None
             else NO_PREV_LOG_TOOLTIP
         )
-        _group(layout, "Logs", LOGS_NOTE, self.log_button, self.prev_log_button)
+        # 0.6.46: <base>/logs/ itself (volt.log's folder: crash and update logs too), in Explorer
+        self.logs_folder_button = _button("Open logs folder")
+        logs_dir = self._log_path.parent if self._log_path else None
+        self.logs_folder_button.setEnabled(logs_dir is not None)
+        self.logs_folder_button.setToolTip(str(logs_dir) if logs_dir else NO_LOG_TOOLTIP)
+        _group(layout, "Logs", LOGS_NOTE, self.log_button, self.prev_log_button, self.logs_folder_button)
         layout.addStretch(1)
 
         self.log_button.clicked.connect(lambda: self._open_log(self._log_path))
         self.prev_log_button.clicked.connect(lambda: self._open_log(self._prev_log_path))
+        self.logs_folder_button.clicked.connect(lambda: self._open_log(logs_dir))
         return page
 
     # ---- state ----
@@ -600,7 +607,7 @@ class SettingsWindow(QDialog):
         self._refresh()
 
     def _open_log(self, path: Path | None) -> None:
-        """Opens a log file with the OS's own association (App.jsx onOpenPath)."""
+        """Opens a log file (or the logs folder) with the OS's own association (App.jsx onOpenPath)."""
         if path is None:
             return
         try:

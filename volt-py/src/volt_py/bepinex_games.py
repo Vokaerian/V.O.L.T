@@ -7,7 +7,7 @@ A module's SLUG must equal its tile's key there. RimWorld isn't a
 Thunderstore game and has its own screen.
 """
 
-from . import lethal, valheim
+from . import lethal, repo, valheim
 
-GAMES = (valheim, lethal)
+GAMES = (valheim, lethal, repo)
 BY_SLUG = {game.SLUG: game for game in GAMES}

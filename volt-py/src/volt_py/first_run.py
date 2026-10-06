@@ -68,9 +68,15 @@ WELCOME_BODY = (
 WELCOME_OK = "Got it"
 
 
+def fill_text(text: str, game: str) -> str:
+    """`text` with "{game}" replaced (plain replace, as the Help entries); a
+    name ending in "." (R.E.P.O.) at a sentence's end keeps one full stop."""
+    return text.replace("{game}.", game.rstrip(".") + ".").replace("{game}", game)
+
+
 def fill(texts: dict, game: str) -> dict:
-    """`texts` with "{game}" replaced (plain replace, as the Help entries)."""
-    return {k: v.replace("{game}", game) for k, v in texts.items()}
+    """`texts` with fill_text applied to every value."""
+    return {k: fill_text(v, game) for k, v in texts.items()}
 
 
 def show_card(*, game_found: bool, open_slug, active_rows: int) -> bool:

@@ -356,7 +356,7 @@ def check_game(profile: dict, game: lo.ThunderstoreGame, game_name: str | None =
     that way)."""
     game_name = game_name or game.slug
     if profile.get("volt_game") and profile["volt_game"] != game.slug:
-        raise ProfileError(f"This profile was exported for another game ({profile['volt_game']}), not {game_name}.")
+        raise ProfileError(f"This profile was exported for another game ({profile['volt_game']}), not {game_name.rstrip('.')}.")
     foreign = [m["full_name"] for m in profile["mods"]
                if m["name"].lower().startswith(FRAMEWORK_HINT) and m["full_name"] != game.framework_package]
     if foreign:

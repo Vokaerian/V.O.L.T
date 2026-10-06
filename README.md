@@ -15,12 +15,7 @@
 **VOLT** (Vokaerian's Omni-game Load-order Tool) is a mod manager and troubleshooter for a variety of games, built around one idea: one app, one familiar way to manage load orders, whichever game you play.  
 Developed for personal use with [Claude](https://claude.ai) (Anthropic).
 
-| Game | Status |
-| --- | --- |
-| RimWorld | Available |
-| Valheim | Available |
-| Lethal Company, R.E.P.O. | Planned (Thunderstore) |
-| Project Zomboid, Slay the Spire 2, Palworld | Planned |
+VOLT currently manages mods for RimWorld, Valheim, Lethal Company and R.E.P.O., with more games on the way. The full list, with each game's status and mod source, is in [docs/GAMES.md](docs/GAMES.md).
 
 Python and PySide6, packaged with Nuitka as an unpacked Windows folder: no installer, just unzip and run.
 

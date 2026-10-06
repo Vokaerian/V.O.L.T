@@ -109,8 +109,8 @@ class ChecklistStrip(QFrame):
         self.title.setMinimumWidth(1)  # the first thing to give way in a narrow window (0 would mean "unset")
         row.addWidget(self.title)
         row.addSpacing(6)
-        self._labels = [s.replace("{game}", game) for s in fr.STEPS]
-        self._tips = [s.replace("{game}", game) for s in fr.STEP_TIPS]
+        self._labels = [fr.fill_text(s, game) for s in fr.STEPS]
+        self._tips = [fr.fill_text(s, game) for s in fr.STEP_TIPS]
         self.steps: list[QPushButton] = []
         for fn in actions:
             button = QPushButton()
@@ -123,7 +123,7 @@ class ChecklistStrip(QFrame):
         row.addStretch(1)
         self.hide_button = QPushButton(fr.HIDE_LABEL)
         self.hide_button.setProperty("variant", "link")
-        self.hide_button.setToolTip(fr.HIDE_TIP.replace("{game}", game))
+        self.hide_button.setToolTip(fr.fill_text(fr.HIDE_TIP, game))
         self.hide_button.clicked.connect(lambda: on_hide())
         row.addWidget(self.hide_button)
         self.set_state((False,) * len(self.steps), 0, (False,) * len(self.steps))

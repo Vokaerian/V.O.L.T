@@ -7,8 +7,8 @@ from PySide6.QtCore import QRectF, QSettings, QTimer
 from PySide6.QtGui import QPainter, QResizeEvent
 from PySide6.QtWidgets import QMainWindow
 
-from volt_py import bepinex_games, theme, update_flow
-from volt_py.app_root import resolve_base_root
+from volt_py import applog, bepinex_games, theme, update_flow
+from volt_py.app_root import resolve_app_root, resolve_base_root
 from volt_py.painters import crossfade, paint_dots
 from volt_py.screens.bepinex_help_entries import help_entries
 from volt_py.screens.bepinex_main_screen import BepInExMainScreen
@@ -102,9 +102,10 @@ class MainWindow(QMainWindow):
 
     def _on_game_selected(self, slug: str) -> None:
         # Constructing the game's screen is the whole "activation" (Electron's
-        # gameActivate IPC): RimWorldMainScreen resolves its own APP-ROOT and
-        # starts its log. setCentralWidget hides the game-select screen and
-        # deleteLater()s it, so this is safe to run from the tile's own
+        # gameActivate IPC): RimWorldMainScreen resolves its own APP-ROOT.
+        # applog.set_game first, so every line the screen logs while it's
+        # built is tagged with the game (0.6.45: one app-wide log).
+        # setCentralWidget hides the game-select screen and deleteLater()s it, so this is safe to run from the tile's own
         # click/key handler. RimWorld has its own screen; every Thunderstore
         # game in bepinex_games.GAMES gets the shared BepInEx manager bound to
         # its module and Help entries (only those tiles are enabled).
@@ -113,15 +114,20 @@ class MainWindow(QMainWindow):
         # crossfade of the game-select snapshot (painters.crossfade: phase 4
         # M1; the new screen and its mod lists are live at once, no effect).
         # A fresh screen on every pick, re-entering the same game included: its
-        # own log (re)start, migration and scan run again (nothing is cached
-        # on the old, deleted screen).
-        if slug == "rimworld":
-            screen = RimWorldMainScreen()
-        elif slug in bepinex_games.BY_SLUG:
-            game = bepinex_games.BY_SLUG[slug]
-            screen = BepInExMainScreen(game, help_entries(game))
-        else:
+        # own migration and scan run again (nothing is cached on the old,
+        # deleted screen).
+        if slug != "rimworld" and slug not in bepinex_games.BY_SLUG:
             return
+        applog.set_game(slug, resolve_app_root(slug))
+        try:
+            if slug == "rimworld":
+                screen = RimWorldMainScreen()
+            else:
+                game = bepinex_games.BY_SLUG[slug]
+                screen = BepInExMainScreen(game, help_entries(game))
+        except BaseException:
+            applog.set_game(None)  # still on game select: untagged again (the hook logs the traceback)
+            raise
         self._welcome_seen()  # a game has been opened: the welcome panel never shows again
         screen.back_requested.connect(self._on_back_requested)
         self._swap_to(screen)
@@ -149,6 +155,7 @@ class MainWindow(QMainWindow):
         # the reverse of _on_game_selected - a new game-select screen under
         # the same MOTION_SCREEN crossfade. Emitted from the manager's own
         # click/shortcut handler; setCentralWidget only deleteLater()s it.
+        applog.set_game(None)
         self._swap_to(self._game_select())
         if self._pending_release is not None:  # a startup offer that arrived while a manager was open
             QTimer.singleShot(theme.MOTION_SCREEN + 50, self._offer_pending_update)
