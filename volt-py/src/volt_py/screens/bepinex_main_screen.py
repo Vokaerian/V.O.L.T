@@ -163,11 +163,11 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     manifest read starts a read-only scan job (_scan_packages: plugin GUIDs /
     declared incompatibilities of each package not scanned yet this session,
     plus the shared-DLL-name hashing) that never takes the busy state; its
-    result (_on_scan_done) feeds _update_issues three more issue kinds
+    result (_on_scan_done) feeds _update_issues four more issue kinds
     (advice only, no buttons; evidence-derived only - the bundled
     known-pairs list was retired 2026-10-04). After an install / update /
-    reinstall / import a NEW incompatibility adds a "Heads up" to the
-    status text (_arm_headsup). The details pane's "Needed by" row
+    reinstall / import a NEW incompatibility or two versions of one mod
+    (0.6.49) adds a "Heads up" to the status text (_arm_headsup). The details pane's "Needed by" row
     lists the installed mods that depend on the selected one.
   - Edit config... (THUNDERSTORE.md §7; screens/bepinex_config_window.py):
     the open load order's BepInEx/config/ files, browsed and edited in a
@@ -332,6 +332,33 @@ _PACKAGE_URL = re.compile(r"thunderstore\.io/(?:c/[^/]+/p|package)/([A-Za-z0-9_]
 # The play triangle moved to icons.py (0.6.15) so RimWorld's Modded / Vanilla
 # share it; these names stay for this screen and its harness.
 _play_icon = icons.play_icon
+
+
+HEADSUP_KINDS = ("incompatible", "two_versions")  # conflict kinds the post-install "Heads up" names (0.6.49: + two_versions)
+
+
+def error_prompt(errors: list[dict]) -> tuple[str, str] | None:
+    """Modded's preflight confirm (title, text) for the error-severity issues
+    of the Active list, None without one. Only missing required mods: the
+    specific wording; any other error kind (e.g. "incompatible", 0.6.49): a
+    generic one, so the text never claims a mod is missing when it isn't;
+    a two_versions error (a known hard clash) says the game won't reach the
+    main menu instead of "the game will skip it"."""
+    n = len(dict.fromkeys(i["mod_id"] for i in errors))
+    if not n:
+        return None
+    them = "them" if n != 1 else "it"
+    if any(i["kind"] == "two_versions" for i in errors):
+        return ("Mods that won't load",
+                "Two versions of the same mod are both switched on, so the game will not start properly: it won't "
+                "reach the main menu. See the warnings button for what's wrong and which one to keep. Start anyway?")
+    if all(i["kind"] == "missing" for i in errors):
+        return ("Missing required mods",
+                f"{n} active mod{'s need' if n != 1 else ' needs'} other mods that aren't installed, so the game will "
+                f"skip {them}. Start anyway?")
+    return ("Mods that won't load",
+            f"{n} active mod{'s have' if n != 1 else ' has'} a problem that stops {them} from loading, so the game "
+            f"will skip {them}. See the warnings button for what's wrong. Start anyway?")
 
 
 def _now() -> str:
@@ -1382,13 +1409,13 @@ class BepInExMainScreen(QWidget):
         self._deliver_headsup(slug)
 
     def _alert_keys(self) -> set:
-        return {(i["mod_id"], i["dep"]) for i in self._issue_list if i["kind"] == "incompatible"}
+        return {(i["mod_id"], i["dep"]) for i in self._issue_list if i["kind"] in HEADSUP_KINDS}
 
     def _arm_headsup(self, slug: str | None = None, fresh: bool = False) -> None:
         """After an install / update / reinstall / import job, before its
         refresh: the next conflict scan of `slug` (default the open profile)
-        says "Heads up" for an incompatibility that wasn't there
-        before (`fresh`: a new profile - every one is new)."""
+        says "Heads up" for an incompatibility or two versions of one mod
+        (0.6.49) that weren't there before (`fresh`: a new profile - every one is new)."""
         slug = slug or self.current_load_order
         if slug is not None:
             self._headsup = (slug, set() if fresh else self._alert_keys())
@@ -1400,14 +1427,17 @@ class BepInExMainScreen(QWidget):
         self._headsup = None
         if armed != slug:
             return
-        new = [i for i in self._issue_list if i["kind"] == "incompatible"
+        new = [i for i in self._issue_list if i["kind"] in HEADSUP_KINDS
                and (i["mod_id"], i["dep"]) not in before]
         if not new:
             log("conflicts: heads-up armed, nothing new")
             return
         more = f" (and {len(new) - 1} more)" if len(new) > 1 else ""
-        note = (f"Heads up: {self._display_name(new[0]['mod_id'])} is incompatible with {new[0]['dep_name']} "
-                f"and won't load{more}. See the warnings button.")
+        mod, dep = self._display_name(new[0]["mod_id"]), new[0]["dep_name"]
+        note = (f"Heads up: {mod} is incompatible with {dep} and won't load{more}. See the warnings button."
+                if new[0]["kind"] == "incompatible" else
+                f"Heads up: {mod} and {dep} are two versions of the same mod, and both are on{more}. "
+                "See the warnings button.")
         kind = self.status_text.status_kind()
         self.status_text.set_status_text(f"{self.status_text.status_text()} {note}".strip(),
                                          "error" if kind == "error" else "warn")
@@ -2907,10 +2937,12 @@ class BepInExMainScreen(QWidget):
                        tryit="Open Settings > Launch, fix or clear the text, then try again.",
                        details=f"Launch arguments: {launch_args!r}\n{err}")
             return
-        mods_with_errors = [m for m, v in self._issues.items() if any(sev == "error" for sev, _ in v)]
+        errors = [i for i in self._issue_list if i["severity"] == "error"]
+        mods_with_errors = list(dict.fromkeys(i["mod_id"] for i in errors))
         log(f"run: preflight ok ({'modded' if modded else 'vanilla'}): game_dir={self.game_dir}, exe={exe.name}, "
             f"load order={slug} ({name!r}), tree={tree}, steam={steam_exe}, dirty={'yes' if self._dirty() else 'no'}, "
-            f"mods with dependency errors={len(mods_with_errors)}, launch args={extra_args}")
+            f"mods with errors={len(mods_with_errors)} ({', '.join(sorted({i['kind'] for i in errors})) or 'none'}), "
+            f"launch args={extra_args}")
         if modded and self._dirty() and not self._confirm(
             "Unsaved profile changes",
             f"You have unsaved changes. Modded doesn't save them: {self.game_name} starts with the profile "
@@ -2919,14 +2951,9 @@ class BepInExMainScreen(QWidget):
         ):
             log("run: cancelled at the unsaved-changes prompt (nothing saved)")
             return
-        n = len(mods_with_errors)
-        if modded and n and not self._confirm(
-            "Missing required mods",
-            f"{n} active mod{'s need' if n != 1 else ' needs'} other mods that aren't installed, so the game will skip "
-            f"{'them' if n != 1 else 'it'}. Start anyway?",
-            confirm_label="Start anyway",
-        ):
-            log("run: cancelled at the missing-dependencies prompt")
+        prompt = error_prompt(errors)
+        if modded and prompt and not self._confirm(*prompt, confirm_label="Start anyway"):
+            log(f"run: cancelled at the {prompt[0]!r} prompt")
             return
         if modded and (Path(self.game_dir) / BEPINEX_DIR).is_dir() and not self._confirm(
             "Another mod loader in the game folder",

@@ -23,7 +23,8 @@ index (bepinex_type_index) > nobody; never a guess), a confidence
 earliest error = likely root cause; errors within CASCADE_S after it that
 share a mod / namespace, or follow a load failure, are listed under it).
 Known-noise messages (HARMLESS) are kept but marked harmless. The duplicate-
-type check (two different enabled packages defining the same types) is added
+type check (two different enabled packages shipping the same assembly name
+with different bytes, bepinex_type_index.shared_types; 0.6.48) is added
 as a profile finding when DLL scans are given.
 
 Pure functions, Qt-free, nothing here raises (logged + empty/partial result).

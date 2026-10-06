@@ -2,9 +2,10 @@
 PLAN.md §14, spec temp/troubleshoot-phase2/SPEC.md §4): which installed
 package defines which .NET type. Feeds the log analyzer's attribution
 (bepinex_log_analysis: a stack frame's namespace -> the mod that owns it) and
-the duplicate-type check (two different packages defining the same
-fully-qualified type = copies of the same code, e.g. DawnLib stable beside
-DawnLibExperimental).
+the duplicate-type check (two different packages shipping the same assembly
+name with different bytes = two copies of the same code, e.g. DawnLib stable
+beside DawnLibExperimental; shared types alone, as in merged libraries, don't
+count since 0.6.48).
 
 read_types() is a pure-Python ECMA-335 metadata reader (no dependency): PE
 headers -> CLI header -> metadata root -> #~ tables stream + #Strings heap;
@@ -304,22 +305,29 @@ IGNORED_NAMES = {"MyPluginInfo", "PluginInfo", "ThisAssembly", "IgnoresAccessChe
                  "EmbeddedAttribute", "RefSafetyRulesAttribute", "NullableAttribute", "NullableContextAttribute",
                  "IsReadOnlyAttribute", "IsUnmanagedAttribute", "IsExternalInit",
                  "$BurstDirectCallInitializer", "UnitySourceGeneratedAssemblyMonoScriptTypes_v1"}  # Unity build output
-DUPLICATE_MIN = 20  # see the handoff report: real clashes vs shared helpers on megadong
 
 
 def shared_types(scans: dict, names: list[str], declared=None) -> list[dict]:
-    """[{"packages": [a, b], "shared_types": N, "examples": [...], "flagged": bool,
-    "dependency": bool}] for every pair of `names` (full_names, in order) whose
-    DLLs define a common non-ignored type, most shared first. A type both get
-    from byte-identical DLL files is one copy, not counted (phase 1's rule:
-    identical copies are harmless; HookGenPatcher / AutoHookGenPatcher's
-    MonoMod.dll). "flagged" =
-    N >= DUPLICATE_MIN and neither package declares the other a dependency
-    (`declared`: full_name -> iterable of full_names it depends on). Never raises."""
+    """[{"packages": [a, b], "shared_types": N, "examples": [...], "assemblies":
+    [casefolded names], "flagged": bool, "dependency": bool}] for every pair of
+    `names` (full_names, in order) whose DLLs define a common non-ignored type,
+    most shared first. A type both get from byte-identical DLL files is one
+    copy, not counted (phase 1's rule: identical copies are harmless;
+    HookGenPatcher / AutoHookGenPatcher's MonoMod.dll). "assemblies" = the
+    assembly names both packages ship with differing bytes: the runtime loads
+    one assembly per name, so only these clash (DawnLib vs DawnLibExperimental).
+    The same types in differently named assemblies (an ILRepack-merged
+    YamlDotNet inside a Valheim mod) are separate types to .NET: listed, never
+    flagged (0.6.48; the type count no longer decides). "flagged" = "assemblies"
+    not empty and neither package declares the other a dependency (`declared`:
+    full_name -> iterable of full_names it depends on). Never raises."""
     try:
         owners: dict[str, dict[str, set]] = {}  # type -> {package: {sha1 of the DLLs defining it}}
+        asms: dict[str, dict[str, set]] = {}  # package -> {casefolded assembly name: {sha1}}
         for n in names:
             for d in (scans.get(n) or {}).get("dlls", ()):
+                if d.get("assembly"):
+                    asms.setdefault(n, {}).setdefault(d["assembly"].casefold(), set()).add(d.get("sha1"))
                 for t in d["types"]:
                     if not _ignored(t):
                         owners.setdefault(t, {}).setdefault(n, set()).add(d.get("sha1"))
@@ -334,8 +342,12 @@ def shared_types(scans: dict, names: list[str], declared=None) -> list[dict]:
         out = []
         for (a, b), ts in pairs.items():
             dep = b in set(declared.get(a, ())) or a in set(declared.get(b, ()))
+            # only pairs that share a non-ignored type get here: two unrelated DLLs that merely reuse a
+            # generic assembly name (none seen on the 5 dev profiles) stay unflagged
+            aa, ab = asms.get(a, {}), asms.get(b, {})
+            clash = sorted(x for x in aa.keys() & ab.keys() if aa[x] != ab[x] or None in aa[x])
             out.append({"packages": [a, b], "shared_types": len(ts), "examples": sorted(ts)[:8],
-                        "dependency": dep, "flagged": len(ts) >= DUPLICATE_MIN and not dep})
+                        "assemblies": clash, "dependency": dep, "flagged": bool(clash) and not dep})
         out.sort(key=lambda d: -d["shared_types"])
         return out
     except Exception as err:

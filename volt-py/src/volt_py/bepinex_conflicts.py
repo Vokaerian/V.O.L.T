@@ -5,17 +5,33 @@ dicts into rows' tooltips / icons, the "⚠ N · ✕ M" count and the Warnings
 and errors window (screens/bepinex_issues_window.py), beside
 bepinex_load_orders.dependency_issues' (the same dict shape).
 
-Only Active, switched-on mods are checked. Three kinds, one issue per mod
-pair (the strongest wins: incompatible > duplicate_plugin > duplicate_file).
+Only Active, switched-on mods are checked. Four kinds, one issue per mod
+pair (the strongest wins: incompatible > two_versions > duplicate_plugin >
+duplicate_file).
 Evidence-derived only: no bundled or online list of known conflicting pairs
-(the phase-1 conflicts.json was retired 2026-10-04, user decision).
+(the phase-1 conflicts.json was retired 2026-10-04, user decision); the one
+exception is HARD_CLASH_PAIRS, which only raises a found two_versions pair
+to an error.
   - "incompatible" (error): a plugin declares [BepInIncompatibility(guid)]
     and another switched-on package's plugin has that GUID. BepInEx then
     refuses to load the DECLARING plugin ("Could not load [WeatherRegistry
     0.8.8] because it is incompatible with: Ozzymops.DisableStormyWeather");
     the other one loads. Matched GUID to GUID, never by package name.
+  - "two_versions" (warning; error for a HARD_CLASH_PAIRS pair, the game then
+    never reaches the main menu; 0.6.49, library-clash Phase A): a pair is both
+    a duplicate_plugin and a duplicate_file hit, and neither package declares
+    the other a dependency - two versions of one mod are on (DawnLib vs
+    DawnLibExperimental). The runtime loads one assembly per name, so mods
+    built for the other copy break. Detection is game-agnostic, no pair list.
+    # ponytail: stand-in for "same assembly name, differing bytes" (the
+    # same-named DLL file); a renamed DLL with an unchanged assembly name is
+    # missed. Phase B (assembly names from the type index) if one turns up.
+    The issue carries what "which one to keep" needs: both sides'
+    switched-on dependents, package and plugin versions, and "keep" (the
+    one the other mods need, else the newer one, else None).
   - "duplicate_plugin" (warning): two packages carry a plugin with the same
-    GUID (a re-upload of the same mod).
+    GUID (a re-upload of the same mod; or a fork declaring the original a
+    dependency, e.g. LethalLevelLoaderUpdated, which stays this kind).
   - "duplicate_file" (warning): two packages put a .dll with the same file
     name under BepInEx/{plugins,patchers,core,monomod} and the contents
     differ (size, then sha1). Identical copies are harmless and stay silent
@@ -50,10 +66,15 @@ from .bepinex_load_orders import _declared_dependencies
 BLOB_MAX = 64 * 1024 * 1024  # skip bigger files (no plugin DLL is near this)
 TREE_DIRS = ("BepInEx/plugins/",)  # where plugin DLLs (GUIDs) are scanned
 CODE_DIRS = ("BepInEx/plugins/", "BepInEx/patchers/", "BepInEx/core/", "BepInEx/monomod/")  # same-file check
-KIND_RANK = ("incompatible", "duplicate_plugin", "duplicate_file")  # one issue per pair, first wins
-SEVERITY = {"incompatible": "error", "duplicate_plugin": "warning", "duplicate_file": "warning"}
+KIND_RANK = ("incompatible", "two_versions", "duplicate_plugin", "duplicate_file")  # one issue per pair, first wins
+SEVERITY = {"incompatible": "error", "two_versions": "warning", "duplicate_plugin": "warning", "duplicate_file": "warning"}
+# ponytail: hardcoded known pairs only; user wants a generic rework when the next library-mod hard clash appears (memory/TODO.md #60)
+HARD_CLASH_PAIRS = {  # two_versions pairs (package full_names, either order) seen to stop the game: severity "error"
+    frozenset(("TeamXiaolan-DawnLib", "TeamXiaolan-DawnLibExperimental")),  # Lethal Company, hardware 2026-10-06
+}
 TEXT = {  # the row tooltip line; {dep} = the other mod's name as on screen
     "incompatible": "Won't load: it's incompatible with {dep}.",
+    "two_versions": "Another version of this mod is also on: {dep}.",
     "duplicate_file": "Shares files with {dep} that differ: may conflict.",
     "duplicate_plugin": "Looks like a second copy of {dep}.",
 }
@@ -82,15 +103,18 @@ def _ser_strings(data: bytes, pos: int, limit: int = 3) -> list[str] | None:
 
 
 def extract_plugin_info(data: bytes) -> dict:
-    """{"guids": [...], "incompat": [...]} read from one DLL's bytes (module
-    docstring). "incompat" holds CANDIDATES only - match them against
-    installed GUIDs, never report one on its own."""
+    """{"guids": [...], "incompat": [...], "versions": {guid: version}} read
+    from one DLL's bytes (module docstring). "incompat" holds CANDIDATES
+    only - match them against installed GUIDs, never report one on its own.
+    "versions" = each GUID's BepInPlugin version (BepInEx keeps the highest
+    per GUID)."""
     guids: list[str] = []
     incompat: list[str] = []
+    versions: dict[str, str] = {}
     plugin = b"BepInPlugin" in data
     declares = b"BepInIncompatibility" in data
     if not (plugin or declares):
-        return {"guids": guids, "incompat": incompat}
+        return {"guids": guids, "incompat": incompat, "versions": versions}
     for m in _PROLOG.finditer(data):
         strings = _ser_strings(data, m.end())
         if not strings or not _ID.match(strings[0]):
@@ -98,6 +122,7 @@ def extract_plugin_info(data: bytes) -> dict:
         if plugin and len(strings) == 3 and _VERSION.match(strings[2]):
             if strings[0] not in guids:
                 guids.append(strings[0])
+                versions[strings[0]] = strings[2]
         elif declares and len(strings) == 1 and len(strings[0]) >= 3 and strings[0] not in incompat:
             incompat.append(strings[0])
     # A candidate that is also a whole name in the DLL's string heap (an
@@ -108,7 +133,7 @@ def extract_plugin_info(data: bytes) -> dict:
     # ponytail: heuristic; a real CustomAttribute-table read (ECMA-335 #~
     # stream: TypeRef -> MemberRef -> CustomAttribute rows) if it ever misfires.
     incompat = [c for c in incompat if b"\x00" + c.encode("utf-8") + b"\x00" not in data]
-    return {"guids": guids, "incompat": incompat}
+    return {"guids": guids, "incompat": incompat, "versions": versions}
 
 
 def _tracked(entry: dict, dirs: tuple[str, ...]) -> list[str]:
@@ -135,9 +160,9 @@ def scan_key(entry: dict) -> tuple:
 
 def scan_package(root, entry: dict) -> dict:
     """extract_plugin_info over every tracked plugin DLL of `entry` in the
-    tree at `root`, united: {"guids", "incompat", "skipped"} ("skipped" =
-    files missing, unreadable or over BLOB_MAX). Never raises."""
-    out = {"guids": [], "incompat": [], "skipped": 0}
+    tree at `root`, united: {"guids", "incompat", "versions", "skipped"}
+    ("skipped" = files missing, unreadable or over BLOB_MAX). Never raises."""
+    out = {"guids": [], "incompat": [], "versions": {}, "skipped": 0}
     for rel in _tracked(entry, TREE_DIRS):
         try:
             path = _on_disk(Path(root), rel)
@@ -150,6 +175,7 @@ def scan_package(root, entry: dict) -> dict:
             continue
         for k in ("guids", "incompat"):
             out[k] += [g for g in info[k] if g not in out[k]]
+        out["versions"] = {**info["versions"], **out["versions"]}  # the first DLL's version of a GUID wins
     return out
 
 
@@ -246,6 +272,26 @@ def required_by(entries: dict[str, dict], full_name: str, framework: str | None 
             if n != framework and n != full_name and full_name in _declared_dependencies(e)]
 
 
+def _vkey(version) -> tuple:
+    """"1.0.9" -> (1, 0, 9); the leading digits-and-dots only; () = unknown."""
+    m = re.match(r"[\d.]*", version) if isinstance(version, str) else None
+    return tuple(int(x) for x in m.group().split(".") if x) if m else ()
+
+
+def _keep(a: tuple, b: tuple) -> tuple[str | None, str | None]:
+    """Which of two versions of one mod to keep: (full_name, why). Each side
+    is (full_name, switched-on dependents, package version, plugin version).
+    The one the other mods need ("needed"), else the newer one ("newer":
+    package version, then plugin version), else (None, None)."""
+    if bool(a[1]) != bool(b[1]):
+        return (a if a[1] else b)[0], "needed"
+    for i in (2, 3):
+        ka, kb = _vkey(a[i]), _vkey(b[i])
+        if ka and kb and ka != kb:
+            return (a if ka > kb else b)[0], "newer"
+    return None, None
+
+
 def _name(entries: dict[str, dict], full_name: str) -> str:
     e = entries.get(full_name)
     return (e.get("display_name") or e.get("name") or full_name) if e else full_name
@@ -253,13 +299,16 @@ def _name(entries: dict[str, dict], full_name: str) -> str:
 
 def profile_issues(entries: dict[str, dict], active_ids: list[str], toggles: dict[str, bool],
                    scans: dict[str, dict], file_hits: list[dict], framework: str | None = None) -> list[dict]:
-    """The three kinds (module docstring) for the Active, switched-on mods of
+    """The four kinds (module docstring) for the Active, switched-on mods of
     `active_ids` (on-screen order, framework left out) as issue dicts:
     dependency_issues' {"mod_id", "dep", "kind", "severity", "text"} plus
     "dep_name" (the other mod as on screen), "needed_by" (display names of
     the mods that need mod_id, sorted) and per kind "guid" (incompatible,
     duplicate_plugin) or "files"
-    (duplicate_file). One issue per pair, listed under the later mod in
+    (duplicate_file); two_versions carries "guid", "files", "version" /
+    "dep_version", "plugin_version" / "dep_plugin_version", "keep" /
+    "keep_why" (_keep) and switched-on dependents only, both sides:
+    "needed_by" / "dep_needed_by". One issue per pair, listed under the later mod in
     Active order (incompatible: under the dropped one). `scans`: full_name
     -> scan_package result (missing = not scanned yet); `file_hits`:
     file_conflicts' result (pairs not both enabled are ignored). Logs one
@@ -275,11 +324,27 @@ def profile_issues(entries: dict[str, dict], active_ids: list[str], toggles: dic
 
         for d in declared_incompatibilities(enabled, scans):
             found.append(("incompatible", d["dropped"], d["blocker"], {"guid": d["guid"]}))
+        files_of = {frozenset((h["a"], h["b"])): h["files"] for h in file_hits if h["a"] in pos and h["b"] in pos}
+        on = set(enabled)
+
+        def side(n: str, guid: str) -> tuple:
+            needers = sorted((_name(entries, m) for m in required_by(entries, n, framework) if m in on), key=str.casefold)
+            return n, needers, entries[n].get("version"), ((scans.get(n) or {}).get("versions") or {}).get(guid)
+
         for d in plugin_duplicates(enabled, scans):
-            found.append(("duplicate_plugin", *later(d["a"], d["b"]), {"guid": d["guid"]}))
-        for h in file_hits:
-            if h["a"] in pos and h["b"] in pos:
-                found.append(("duplicate_file", *later(h["a"], h["b"]), {"files": list(h["files"])}))
+            mod_id, dep = later(d["a"], d["b"])
+            found.append(("duplicate_plugin", mod_id, dep, {"guid": d["guid"]}))
+            files = files_of.get(frozenset((mod_id, dep)))
+            if files and dep not in _declared_dependencies(entries[mod_id]) \
+                    and mod_id not in _declared_dependencies(entries[dep]):
+                a, b = side(mod_id, d["guid"]), side(dep, d["guid"])
+                keep, why = _keep(a, b)
+                found.append(("two_versions", mod_id, dep, {
+                    "guid": d["guid"], "files": list(files), "needed_by": a[1], "dep_needed_by": b[1],
+                    "version": a[2], "dep_version": b[2], "plugin_version": a[3], "dep_plugin_version": b[3],
+                    "keep": keep, "keep_why": why}))
+        for pair, files in files_of.items():
+            found.append(("duplicate_file", *later(*pair), {"files": list(files)}))
         found.sort(key=lambda f: KIND_RANK.index(f[0]))  # stable: the strongest kind of a pair comes first
         seen: set[frozenset] = set()
         out: list[dict] = []
@@ -290,7 +355,7 @@ def profile_issues(entries: dict[str, dict], active_ids: list[str], toggles: dic
             seen.add(pair)
             dep_name = _name(entries, dep)
             out.append({"mod_id": mod_id, "dep": dep, "kind": kind,
-                        "severity": SEVERITY[kind],
+                        "severity": "error" if kind == "two_versions" and pair in HARD_CLASH_PAIRS else SEVERITY[kind],
                         "text": TEXT[kind].format(dep=dep_name), "dep_name": dep_name,
                         "needed_by": sorted((_name(entries, n) for n in required_by(entries, mod_id, framework)),
                                             key=str.casefold),

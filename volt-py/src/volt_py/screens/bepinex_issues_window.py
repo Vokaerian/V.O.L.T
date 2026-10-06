@@ -34,13 +34,15 @@ the mod itself) under the mod's own header - some or all of its files are
 gone from the profile folder; the detail says so and points at the row's
 Reinstall (no button here).
 
-Conflicts (troubleshooting phase 1, volt_py/bepinex_conflicts.py): three
+Conflicts (troubleshooting phase 1, volt_py/bepinex_conflicts.py): four
 more kinds, listed under the mod they affect, advice only (no button) -
 "incompatible" (a
 plugin declares the other mod incompatible, so BepInEx won't load it,
-error), "duplicate_plugin" and "duplicate_file" (warnings). Their dicts
-carry "dep_name" (the other mod as on screen) and "needed_by" (the mods
-that need this one), which the texts use.
+error), "two_versions" (0.6.49: two versions of one mod are both on; the
+text says which one to keep; an error for a known hard clash, then "What
+it means" says the game won't reach the main menu), "duplicate_plugin" and
+"duplicate_file" (warnings). Their dicts carry "dep_name" (the other mod as on screen) and
+"needed_by" (the mods that need this one), which the texts use.
 
 Three sections (0.6.28, PLAN.md §11 (g)): under the heading, the detail
 reads "What happened" / "What it means" / "What to try" (detail_text's
@@ -73,7 +75,7 @@ GROUP_GAP = 6
 
 # 0.6.24 plain words: a "dependency" is a "required mod" (a mod another mod needs to work).
 RAIL_LABEL = {"missing": "Required mod missing", "inactive": "Required mod inactive", "off": "Required mod switched off",
-              "files": "Files missing", "incompatible": "Incompatible mod",
+              "files": "Files missing", "incompatible": "Incompatible mod", "two_versions": "Two versions of one mod",
               "duplicate_file": "Shared files differ", "duplicate_plugin": "Possible duplicate"}
 HEADING = {
     "missing": "A mod it needs isn't installed",
@@ -81,6 +83,7 @@ HEADING = {
     "off": "A mod it needs is switched off",
     "files": "Some of its files are gone",
     "incompatible": "It won't load: another mod blocks it",
+    "two_versions": "Another version of this mod is also switched on",
     "duplicate_file": "It shares files with another mod",
     "duplicate_plugin": "It may be a second copy of another mod",
 }
@@ -93,7 +96,7 @@ def detail_text(issue: dict, name: str, dep_name: str) -> tuple[str, str, str]:
     """The selected issue as SECTIONS: what happened, what it means, what to
     try (plain text: blank lines split paragraphs, "1. " lines are steps)."""
     kind = issue["kind"]
-    if kind in ("incompatible", "duplicate_file", "duplicate_plugin"):
+    if kind in ("incompatible", "two_versions", "duplicate_file", "duplicate_plugin"):
         return _conflict_text(issue, name, issue.get("dep_name") or dep_name)
     if kind == "files":
         missing, total = issue["missing"], issue["total"]
@@ -150,6 +153,8 @@ def _conflict_text(issue: dict, name: str, dep: str) -> tuple[str, str, str]:
             f"Choose one: switch off or remove {dep} to use {name}, or switch off {name} to keep {dep}. "
             "Then press \"Save\".",
         )
+    if kind == "two_versions":
+        return _two_versions_text(issue, name, dep)
     if kind == "duplicate_file":
         files = issue.get("files") or ["?"]
         listed = _names(files, FILES_SHOWN)
@@ -168,6 +173,53 @@ def _conflict_text(issue: dict, name: str, dep: str) -> tuple[str, str, str]:
         "Having both usually causes errors, or one of them is ignored. This often happens with re-uploaded "
         "versions of a mod.",
         "Keep one and remove the other, then press \"Save\".",
+    )
+
+
+def _two_versions_text(issue: dict, name: str, dep: str) -> tuple[str, str, str]:
+    """detail_text for "two_versions": which one to keep comes from the
+    issue's own evidence (bepinex_conflicts._keep): the one the other
+    switched-on mods need, else the newer one."""
+    files = issue.get("files") or ["?"]
+    listed = _names(files, FILES_SHOWN)
+    # side 0 = this mod, 1 = the other one (keyed by side: two versions can share a display name)
+    names, needs = (name, dep), (issue.get("needed_by") or [], issue.get("dep_needed_by") or [])
+    versions = (issue.get("version"), issue.get("dep_version"))
+    if versions[0] == versions[1]:  # same package version: the plugin versions tell them apart
+        versions = (issue.get("plugin_version"), issue.get("dep_plugin_version"))
+
+    def need(who: list[str]) -> str:
+        return f"{_names(who)} need{'s' if len(who) == 1 else ''}"
+
+    asks = " ".join(f"{need(who)} {names[i]}." for i, who in enumerate(needs) if who)
+    k = {issue.get("mod_id"): 0, issue.get("dep"): 1}.get(issue.get("keep"))
+    keep, other = (names[k], names[1 - k]) if k is not None else (None, None)
+    shown = (f" ({keep} is version {versions[k]}, {other} is version {versions[1 - k]})"
+             if k is not None and versions[0] and versions[1] else "")
+    if needs[0] and needs[1]:
+        which = ("Which one to keep: each one is needed by a different mod, so no choice suits every mod. "
+                 + (f"Try the newer one, {keep}, first{shown}. If a mod that needs {other} then stops working, "
+                    f"switch {keep} off and {other} on instead, and test again. "
+                    if keep else "Try one, then the other, and test each time. ")
+                 + "If neither way works, this profile may need a different choice of mods: for example, leave out "
+                 "one of the mods named above, or look for a newer version of it.")
+    elif keep and issue.get("keep_why") == "needed":
+        which = f"Which one to keep: {keep}, because {need(needs[k])} it."
+    elif keep:
+        which = f"Which one to keep: the newer one, {keep}{shown}. No other switched-on mod needs either one."
+    else:
+        which = "Which one to keep: either one. No other switched-on mod needs either one, and VOLT can't tell which is newer."
+    return (
+        f"{name} and {dep} are both switched on. They are two versions of the same mod: both contain "
+        + (f"a file called {listed}" if len(files) == 1 else f"files called {listed}") + ", and the copies are different.",
+        "The game can only use one version. "
+        + ("With both on, the game will not start properly: it won't reach the main menu."
+           if issue.get("severity") == "error" else  # a known hard clash (bepinex_conflicts.HARD_CLASH_PAIRS)
+           "With both on, mods that use it can fail to load, or the game may not start properly.")
+        + (f" {asks}" if asks else ""),
+        "1. Decide which one to keep (see below).\n"
+        "2. Click the switch at the right of the other one to turn it off.\n"
+        "3. Press \"Save\" and start the game.\n\n" + which,
     )
 
 
