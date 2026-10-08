@@ -175,7 +175,8 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
             "you add or remove a mod, and on \"Rescan\".\n\n"
             "While updates are waiting, \"Update all\" turns yellow and shows how many. \"Update check failed · "
             "Retry\" means Thunderstore couldn't be reached.\n\n"
-            "Updating keeps each mod's settings and never changes which mods are switched on.\n\n"
+            "Update replaces each mod's own config files with the ones it ships; settings you changed in them are "
+            "lost. It never changes which mods are switched on.\n\n"
             "A red \"Deprecated\" label means the mod's author no longer looks after it."
         ),
     },
@@ -212,8 +213,10 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
             "- \"Copy Thunderstore name\" copies its name in the Author-ModName form.\n"
             "- \"Edit config\" opens its settings files.\n"
             "- \"Install missing required mods\" fetches the mods it needs.\n"
-            "- \"Update\" installs a newer version when there is one.\n"
-            "- \"Reinstall\" puts the same version back if its files went missing.\n"
+            "- \"Update\" installs a newer version when there is one. It replaces the mod's own config files with "
+            "the ones it ships; settings you changed in them are lost.\n"
+            "- \"Reinstall\" puts the same version back if its files went missing. It replaces the mod's own "
+            "config files the same way.\n"
             "- \"Uninstall\" removes it from this profile after you confirm.\n\n"
             "Options that can't be used right now are greyed out."
         ),
@@ -327,8 +330,10 @@ BEPINEX_HELP_ENTRIES: list[dict] = [
             "- A run \"probably worked\" when the mods finished loading and you played 5 minutes or more.\n"
             "- Mark a run \"worked\" or \"didn't work\" if VOLT got it wrong: your mark always wins.\n\n"
             "The \"Mod contents\" tab shows what each mod's files are made of, and warns when two mods contain "
-            "copies of the same code. VOLT only gives advice: it never changes your profile by itself. \"Copy "
-            "summary\" copies the findings, without your folder paths, to paste when you ask someone for help."
+            "copies of the same code. VOLT only gives advice: it never changes your profile by itself. To ask someone "
+            "for help, \"Copy summary\" copies the findings without your folder paths, and \"Export diagnostics...\" "
+            "at the top saves one .zip of VOLT's logs, this profile's mod list and configs and the game's logs (your "
+            "Windows user name replaced with \"***\", nothing uploaded)."
         ),
     },
     {

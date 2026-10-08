@@ -46,11 +46,13 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
   - Update checking (THUNDERSTORE.md §3, TODO #3): a check pass
     (check_updates, off the GUI thread) runs on opening the manager, on
     switching to a load order with unchecked packages, after a mod is
-    added / removed / updated and on Rescan. Only Rescan asks Thunderstore
-    about every package; the others ask only for packages whose check
-    failed or isn't from this session (after a change: from the last
-    RECHECK_AFTER_S), which keeps a big load order clear of HTTP 429
-    rate-limiting. The load-order bar's "Update
+    added / removed / updated and on Rescan. Only Rescan checks every
+    package; the others check only packages whose check failed or isn't
+    from this session (after a change: from the last RECHECK_AFTER_S).
+    0.6.52: answered from the community index (thunderstore_index, rebuilt
+    when over an hour old - the download bar reads "Updating package
+    list..." meanwhile), per package only for what it lacks or when it
+    can't be built. The load-order bar's "Update
     all" button carries the live count (warn-outline while > 0; "Up to
     date" / "Checking for updates..." / "Update check failed · Retry"
     otherwise). What it learns per package (latest version, date_updated,
@@ -156,9 +158,10 @@ Deltas from RimWorld's screen (THUNDERSTORE.md §3), all here:
     folder - so a mod whose files were deleted outside VOLT gets a "Files
     missing" pill (bepinex_mod_list.py), a tooltip line and a "files"
     warning in the issues window / "⚠ N" count. Reinstall (row menu, any
-    mod, always enabled while idle - a harmless repair on a healthy mod)
+    mod, always enabled while idle - a repair, also on a healthy mod)
     = reinstall_mod: the same version again from the cached zip (or
-    downloaded, the bar then shows), state / position / config kept.
+    downloaded, the bar then shows), state / position kept, its own config
+    files written again (0.6.51; Update / Reinstall menu tooltips say so).
   - Conflicts (troubleshooting phase 1, volt_py/bepinex_conflicts.py): every
     manifest read starts a read-only scan job (_scan_packages: plugin GUIDs /
     declared incompatibilities of each package not scanned yet this session,
@@ -317,6 +320,12 @@ IMPORT_LOCAL_TOOLTIP = (
 )
 BROWSE_TOOLTIP = "Browse Thunderstore's {game} mods and install them into the open profile."
 TROUBLESHOOT_TOOLTIP = "Reads the game's log from the last launch of this profile and explains what went wrong."
+# 0.6.51 (Gale's rule): every install overwrites the config files the mod ships - said where an update / reinstall starts
+UPDATE_CONFIG_NOTE = "Update replaces this mod's own config files with the ones it ships; settings you changed in them are lost."
+REINSTALL_CONFIG_NOTE = ("Reinstall replaces this mod's own config files with the ones it ships; settings you changed "
+                         "in them are lost.")
+UPDATE_ALL_CONFIG_NOTE = ("Update replaces each mod's own config files with the ones it ships; settings you changed in "
+                          "them are lost.")
 # The two launch buttons' tooltips ({game} = the game module's NAME).
 MODDED_TOOLTIP = "Start {game} with this profile's mods."
 VANILLA_TOOLTIP = "Start {game} without any mods."
@@ -963,7 +972,7 @@ class BepInExMainScreen(QWidget):
             text, enabled, variant, tip = "Checking for updates...", False, "", ""
         elif count:
             text, enabled, variant = f"{count} update{'s' if count != 1 else ''} · Update all", self._busy is None, "warn-outline"
-            tip = "Download and install the latest version of every mod in this profile that has one."
+            tip = f"Download and install the latest version of every mod in this profile that has one.\n{UPDATE_ALL_CONFIG_NOTE}"
         elif self._check_errors and self.current_load_order is not None:
             text, enabled, variant, tip = "Update check failed · Retry", self._busy is None, "", self._check_error()
         elif self._entries and all(n in self._meta for n in self._entries if self._entries[n].get("online_source", True)):
@@ -1282,6 +1291,8 @@ class BepInExMainScreen(QWidget):
         kind = ev.get("type")
         if kind == "checking":
             log("download bar: checking required mods (pre-pass)")
+        elif kind == "indexing":
+            log("download bar: updating the package list (community index)")
         for mod_id in ev["ids"] if kind == "plan" else [ev["id"]] if kind == "start" else []:
             self._dl_titles.setdefault(mod_id, self._mod_title(mod_id))
         self._dl = ds.apply_package_event(self._dl, ev)
@@ -2220,7 +2231,7 @@ class BepInExMainScreen(QWidget):
             warn=self._has_update(mod_id),
             error="\n".join(errors) or None,
             busy=mod_id in self._updating,
-            update_tip=f"Update {self._display_name(mod_id)} to {m.get('latest_version')}" if update else "",
+            update_tip=f"Update {self._display_name(mod_id)} to {m.get('latest_version')}\n{UPDATE_CONFIG_NOTE}" if update else "",
             disabled=in_active and not pinned and not self._toggles[mod_id],
             deprecated=bool(m.get("deprecated")),
             icon=self._row_icon(mod_id),
@@ -2394,6 +2405,8 @@ class BepInExMainScreen(QWidget):
             places={"<PROFILE>": self._load_order_dir(), "<VOLT>": self.app_root, "<GAME>": self.game_dir,
                     "<HOME>": Path.home()},
             app_version=self.app_version, parent=self,
+            export={"base": self.app_root.parent.parent,  # resolve_app_root: <base>/games/<slug>
+                    "app_root": self.app_root, "game_slug": self.ts_game.slug, "profile_slug": slug, "game_dir": self.game_dir},
         ).exec()
 
     def _install_missing(self, packages: list[str], on_done=None, parent: QWidget | None = None) -> None:
@@ -2429,7 +2442,8 @@ class BepInExMainScreen(QWidget):
                     failed.append((name, str(err)))
                     continue
                 done += [e["full_name"] for e in res["installed"]]
-                failed += [(p.get("package", "?"), p.get("message", "")) for p in res["problems"]]
+                failed += [(p.get("package", "?"), p.get("message", "")) for p in res["problems"]
+                           if p.get("kind") != lo.OTHER_COMMUNITY]  # 0.6.51: left out on purpose, not a failure
             return {"installed": done, "failed": failed}
 
         def finished(payload: dict) -> None:
@@ -2492,11 +2506,14 @@ class BepInExMainScreen(QWidget):
         log(f"update check: started for {len(names)} packages{' (all)' if force else ''}")
         self._apply_load_order_state()
         manifest, app_version, only = m, self.app_version, set(names)
+        app_root, community = self.app_root, self.ts_game.community
 
         def job(report):
-            return lo.check_updates(manifest, app_version, only=only)
+            return lo.check_updates(manifest, app_version, only=only, app_root=app_root, community=community)
 
-        self._run_job("update-check", job, self._on_check_done)
+        # 0.6.52: the bar shows "Updating package list..." while the check (re)builds the community index - only
+        # when no other job owns the bar (the check runs beside mutating jobs; their bar wins)
+        self._run_job("update-check", job, self._on_check_done, downloads=[] if self._dl_job is None else None)
 
     def _on_check_done(self, payload: dict) -> None:
         self._checking = False
@@ -2576,8 +2593,9 @@ class BepInExMainScreen(QWidget):
         """The row menu's Reinstall (0.6.27): the mod extracted again at its
         installed version (lo.reinstall_mod - the cached zip, else a download
         through the bar), putting back files deleted outside VOLT; its on/off
-        state, place in the list and settings files stay. Not confirmed (it
-        removes nothing). A local .zip mod whose zip VOLT no longer has gets
+        state and place in the list stay, its own config files are written
+        again (0.6.51, REINSTALL_CONFIG_NOTE in the menu's tooltip). Not
+        confirmed (no confirm existed; the tooltip carries it). A local .zip mod whose zip VOLT no longer has gets
         the friendly error box instead."""
         if self._busy is not None or mod_id not in self._entries or mod_id in self._updating:
             return
@@ -2721,7 +2739,7 @@ class BepInExMainScreen(QWidget):
     def _switch_version(self, full_name: str, version: str | None, on_done=None, parent: QWidget | None = None) -> None:
         """The browser's Versions tab (and its Update-to-latest button):
         re-installs an installed mod at `version` (None = the latest) in
-        place - update_mod's path: files diffed, config kept, on-disk state
+        place - update_mod's path: files diffed, its own config files overwritten (0.6.51), on-disk state
         and list position preserved - as a job; the panes refresh like an
         update. `on_done(payload)` runs last, on the GUI thread."""
         if self._busy is not None or full_name not in self._entries or full_name in self._updating:
@@ -2801,9 +2819,11 @@ class BepInExMainScreen(QWidget):
             new = [e["full_name"] for e in res["installed"]]
             log(f"add mod: installed {new}{source}, {len(res['problems'])} problems")
             self._absorb_installed(new)
-            if res["problems"]:
+            failed = [p for p in res["problems"] if p.get("kind") != lo.OTHER_COMMUNITY]
+            left_out = len(res["problems"]) - len(failed)  # 0.6.51: another game's mods, left out on purpose (Gale's rule)
+            if failed:
                 self._warn("Some required mods couldn't be installed",
-                           f"{ref.full_name} was installed, but {len(res['problems'])} mod(s) it needs couldn't be.",
+                           f"{ref.full_name} was installed, but {len(failed)} mod(s) it needs couldn't be.",
                            means="It may not work until they're installed.",
                            tryit="Press the warnings button above Save (⚠ / ✕), then Install all missing.",
                            details="\n".join(f"{p.get('package', '?')}: {p.get('message', '')}" for p in res["problems"]),
@@ -2814,7 +2834,9 @@ class BepInExMainScreen(QWidget):
             else:
                 self.status_text.set_status_text(
                     f"Installed {ref.full_name}{source}"
-                    + (f" and {extra} required mod{'s' if extra != 1 else ''}" if extra > 0 else "") + ".")
+                    + (f" and {extra} required mod{'s' if extra != 1 else ''}" if extra > 0 else "") + "."
+                    + (f" Left out {left_out} mod{'s' if left_out != 1 else ''} from another game's Thunderstore."
+                       if left_out else ""))
             self._start_update_check(max_age_s=RECHECK_AFTER_S)
             if on_done is not None:
                 on_done(payload)
@@ -3266,10 +3288,13 @@ class BepInExMainScreen(QWidget):
             f"missing deps={lo.mod_missing_dependencies(self._entries, mod_id, self.ts_game.framework_package)}, "
             f"files missing={self._missing_files.get(mod_id)})")
         menu = QMenu(pane)
+        menu.setToolTipsVisible(True)  # 0.6.51: Update / Reinstall say they replace the mod's config files
 
-        def item(label: str, enabled, fn) -> None:
+        def item(label: str, enabled, fn, tip: str = "") -> None:
             action = menu.addAction(label)
             action.setEnabled(bool(enabled))
+            if tip:
+                action.setToolTip(tip)
             action.triggered.connect(lambda: fn())
 
         item("Open folder", folder, lambda: self._open_folder(folder))
@@ -3281,8 +3306,9 @@ class BepInExMainScreen(QWidget):
         missing = lo.mod_missing_dependencies(self._entries, mod_id, self.ts_game.framework_package)
         if missing:  # only a mod with missing dependencies gets the entry (Active or Inactive alike)
             item(f"Install missing required mods ({len(missing)})", idle, lambda: self._install_missing(missing))
-        item("Update", idle and self._has_update(mod_id) and mod_id not in self._updating, lambda: self._update_one(mod_id))
-        item("Reinstall", idle and mod_id not in self._updating, lambda: self._reinstall(mod_id))  # 0.6.27
+        item("Update", idle and self._has_update(mod_id) and mod_id not in self._updating, lambda: self._update_one(mod_id),
+             UPDATE_CONFIG_NOTE)
+        item("Reinstall", idle and mod_id not in self._updating, lambda: self._reinstall(mod_id), REINSTALL_CONFIG_NOTE)  # 0.6.27
         item("Uninstall...", idle and not is_fw, lambda: self._uninstall(mod_id))
         menu.exec(pane.viewport().mapToGlobal(pos))
         menu.deleteLater()

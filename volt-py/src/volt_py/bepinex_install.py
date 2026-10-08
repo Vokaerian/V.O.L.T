@@ -3,16 +3,26 @@ game-agnostic: where each file of a package zip lands inside a load order's
 BepInEx tree, plus the per-mod enable/disable and removal file operations
 Save builds on (§2). No network, no Qt; the tree root is any folder.
 
-Routing (r2modman's rules, the de facto standard every Thunderstore-
-compatible manager matches). Paths are taken relative to the zip root, an
-optional leading `BepInEx/` folder is stripped, then the FIRST path
-component decides (case-insensitively):
-  - `config/<rest>`                    -> BepInEx/config/<rest>  (no per-mod subfolder)
-  - `core|patchers|plugins|monomod/<rest>` -> BepInEx/<that>/<Team-Package>/<rest>
-  - anything else: a loose `*.mm.dll`  -> BepInEx/monomod/<Team-Package>/<file>
-                   everything else     -> BepInEx/plugins/<Team-Package>/<path as-is>
+Routing (0.6.53: Gale's SubdirInstaller for BepInEx, flat_separated
+subdirs; until 0.6.52 only the first component counted and sub-paths were
+kept, which broke qwbarch-MirageCore's FSharp.Core/ load). Paths are taken
+relative to the zip root; walking the components from the left, the FIRST
+one (at any depth) that triggers a route decides - `plugins`, `patchers`,
+`monomod`, `core`, `config` (folder name, any case) or a name ending in
+`.mm.dll` (monomod; case-sensitive, as Gale's extension match). Everything
+before it is dropped, everything after it kept:
+  - `[x/]config/<rest>`                  -> BepInEx/config/<rest>  (no per-mod subfolder)
+  - `[x/]plugins|patchers|monomod|core/<rest>` -> BepInEx/<that>/<Team-Package>/<rest>
+  - `[x/]Name.mm.dll`                    -> BepInEx/monomod/<Team-Package>/Name.mm.dll
+  - no trigger (or the trigger is the file itself): the FILE NAME alone ->
+    BepInEx/plugins/<Team-Package>/<name> (sub-folders flattened)
 so a normal mod's manifest.json / icon.png / README.md sit beside its DLLs in
-BepInEx/plugins/<Team-Package>/ (matches a real TMM profile, temp/Vinland).
+BepInEx/plugins/<Team-Package>/, and a zip of loose sub-folders (MirageCore:
+FSharp.Core/FSharp.Core.dll) lands flat as in a Gale profile. Two files
+routed to one path (five LICENSE files): the last in zip order wins, as in
+Gale (its extract overwrites); compared case-folded. Gale's per-game extra
+subdirs (Valheim's `SlimVML` -> BepInEx/SlimVML/<Team-Package>/) are not
+modelled: such files take the default route.
 
 The framework package (the game's BepInExPack, e.g. Valheim's
 denikson-BepInExPack_Valheim) is routed differently: its payload - the
@@ -23,10 +33,17 @@ doorstop_libs/, .doorstop_version, ...). The zip-root metadata files outside
 that payload (manifest.json, icon.png, README.md, CHANGELOG.md) are not
 copied; the load-order manifest records the framework's version instead.
 
-Config files (anything routed under BepInEx/config/) are written only when
-absent - never clobbering a config the user has edited - and are neither
-renamed by disable nor deleted by removal (BepInEx's own convention: config
-survives reinstalls/updates).
+Config files (anything routed under BepInEx/config/): since 0.6.51 every
+install (fresh, update, reinstall, import, local zip) overwrites the config
+files the package itself ships, edited or not - Gale's rule (its config
+folder is untracked, ConflictResolution::Overwrite; user decision
+2026-10-08), so a modpack installed last wins and an update brings its new
+defaults. Config files no package ships (written by a mod at run time, made
+by the user) are never touched. They are neither renamed by disable nor
+deleted by removal (uninstall keeps them). install_package returns the
+sha256 of every config it wrote; the load order's manifest keeps it per
+entry ("config_sha256", 0.6.50) as a record only (0.6.50 used it to replace
+only untouched configs).
 
 Disable convention (BepInEx has no native one - its loader globs literally
 `*.dll` under plugins/, THUNDERSTORE.md §2): every tracked non-config file of
@@ -35,6 +52,7 @@ nothing of it still matches `*.dll`; enable renames back. Same trick TMM uses
 (`.old` there); the suffix is VOLT's own.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -47,8 +65,7 @@ BEPINEX_DIR = "BepInEx"
 MANIFEST_FILE = "manifest.json"
 DISABLED_SUFFIX = ".disabled"
 CONFIG_FOLDER = "config"
-SUBFOLDER_ROUTES = ("core", "patchers", "plugins", "monomod")  # get a <Team-Package>/ subfolder
-ROUTED_FOLDERS = (CONFIG_FOLDER, *SUBFOLDER_ROUTES)
+ROUTES = ("plugins", "patchers", "monomod", "core", CONFIG_FOLDER)  # Gale's BepInEx subdirs, in its order
 DEFAULT_ROUTE = "plugins"
 MONOMOD_ROUTE = "monomod"
 MONOMOD_SUFFIX = ".mm.dll"
@@ -172,20 +189,28 @@ def read_manifest(source: PackageSource) -> dict:
     return parse_manifest(source.read(hit), source.path)
 
 
+def _route_of(component: str) -> str | None:
+    """The route a path component triggers: a route folder name (any case),
+    or monomod for a name ending in `.mm.dll` (case as Gale matches it)."""
+    low = component.lower()
+    if low in ROUTES:
+        return low
+    return MONOMOD_ROUTE if component.endswith(MONOMOD_SUFFIX) else None
+
+
 def route_file(rel: str, full_name: str) -> str:
-    """Where one package file lands, relative to the tree root (posix)."""
+    """Where one package file lands, relative to the tree root (posix);
+    Gale's SubdirInstaller rule, the module docstring."""
     parts = rel.split("/")
-    if len(parts) > 1 and parts[0].lower() == BEPINEX_DIR.lower():
-        parts = parts[1:]
-    head = parts[0].lower()
-    if len(parts) > 1 and head in ROUTED_FOLDERS:
-        rest = parts[1:]
-        if head == CONFIG_FOLDER:
-            return "/".join([BEPINEX_DIR, CONFIG_FOLDER, *rest])
-        return "/".join([BEPINEX_DIR, head, full_name, *rest])
-    if len(parts) == 1 and parts[0].lower().endswith(MONOMOD_SUFFIX):  # a LOOSE .mm.dll only
-        return "/".join([BEPINEX_DIR, MONOMOD_ROUTE, full_name, parts[-1]])
-    return "/".join([BEPINEX_DIR, DEFAULT_ROUTE, full_name, *parts])
+    for i, part in enumerate(parts):
+        route = _route_of(part)
+        if route:
+            break
+    else:
+        route = DEFAULT_ROUTE
+    rest = parts[i + 1:] or parts[-1:]  # nothing after the trigger (or no trigger): the file name alone
+    base = [BEPINEX_DIR, CONFIG_FOLDER] if route == CONFIG_FOLDER else [BEPINEX_DIR, route, full_name]
+    return "/".join(base + rest)
 
 
 def route_package(files: list[str], full_name: str) -> list[tuple[str, str]]:
@@ -231,33 +256,44 @@ def _tree_path(tree_root: Path, rel: str) -> Path:
 def install_package(source_path, tree_root, full_name: str, framework: bool = False) -> dict:
     """Extracts one package into `tree_root` per the routing rules. Returns
     {"manifest": parsed manifest.json, "files": [tree-relative posix paths
-    written or (config) already present, sorted], "skipped_config": [config
-    files left as they were]}. Existing non-config files are overwritten (a
-    reinstall/update). PackageError for a malformed package; nothing is
-    written before the manifest has been read and every path validated."""
+    written, sorted], "config_sha256": {config path: sha256 of what this
+    package wrote}}. Existing files are overwritten (a reinstall/update),
+    config files included (0.6.51, the module docstring). PackageError
+    for a malformed package; nothing is written before the manifest has been
+    read and every path validated."""
     tree_root = Path(tree_root)
     with PackageSource(source_path) as src:
         manifest = read_manifest(src)
         files = src.files()
         routed = route_framework(files) if framework else route_package(files, full_name)
+        # Flattening can send several files to one path (MirageCore's five LICENSE files): the last in
+        # zip order wins, as in Gale (each extracted file overwrites); case-folded, as Windows sees paths.
+        final: dict[str, list[str]] = {}
+        for s, d in routed:
+            final.setdefault(d.casefold(), [d, s])[1] = s
         # Validate every destination before touching the tree.
-        dests = [(s, d, _tree_path(tree_root, d)) for s, d in routed]
-        written, skipped_config = [], []
+        dests = [(s, d, _tree_path(tree_root, d)) for d, s in final.values()]
+        written, replaced, hashes = [], [], {}
         for rel, dest_rel, dest in dests:
-            if is_config_path(dest_rel) and dest.exists():
-                skipped_config.append(dest_rel)
-                written.append(dest_rel)
-                continue
+            config = is_config_path(dest_rel)
+            if config and dest.exists():
+                replaced.append(dest_rel)  # Gale's rule: the package's own config wins, edited or not
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with src.open(rel) as f_in, open(dest, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
+            if config:
+                data = src.read(rel)  # config files are small: hash what is written
+                dest.write_bytes(data)
+                hashes[dest_rel] = hashlib.sha256(data).hexdigest()
+            else:
+                with src.open(rel) as f_in, open(dest, "wb") as f_out:
+                    shutil.copyfileobj(f_in, f_out)
             written.append(dest_rel)
     written.sort()
     log(
         f"[bepinex] installed {full_name} {manifest['version_number']}{' (framework)' if framework else ''} "
-        f"-> {tree_root}: {len(written)} files, {len(skipped_config)} config files kept"
+        f"-> {tree_root}: {len(written)} files, {len(hashes)} config files written"
+        + (f", {len(replaced)} existing config files overwritten {replaced[:20]}" if replaced else "")
     )
-    return {"manifest": manifest, "files": written, "skipped_config": skipped_config}
+    return {"manifest": manifest, "files": written, "config_sha256": hashes}
 
 
 def set_files_enabled(tree_root, files, enabled: bool) -> dict:

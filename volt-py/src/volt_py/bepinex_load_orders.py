@@ -25,13 +25,15 @@ Manifest (schema_version 1):
 <entry> = {
   "full_name": "ValheimModding-Jotunn", "namespace": "ValheimModding", "name": "Jotunn",
   "version": "2.30.0", "display_name": "Jotunn", "description": "...", "website_url": "...",
-  "dependencies": ["denikson-BepInExPack_Valheim-5.4.2333", ...],  # as declared, informational
+  "dependencies": ["denikson-BepInExPack_Valheim-5.4.2333", ...],  # as declared (install_mod resolves the versions)
   "enabled": true,               # active-list toggle; always true for framework/inactive-irrelevant
   "online_source": true,         # false = imported from a local zip (THUNDERSTORE.md §8b):
                                  #   never update-checked; absent in older manifests = true
   "installed_at": "<ISO>",
-  "files": ["BepInEx/plugins/ValheimModding-Jotunn/Jotunn.dll", ...]  # tree-relative, enabled names
-}
+  "files": ["BepInEx/plugins/ValheimModding-Jotunn/Jotunn.dll", ...],  # tree-relative, enabled names
+  "config_sha256": {"BepInEx/config/x.cfg": "<sha256>"},  # 0.6.50, optional: the config files it wrote (a record)
+  "skipped_dependencies": ["bbepis-BepInExPack"]  # 0.6.51, optional: listed dependencies install_mod left
+}                                # out as another game's (dependency_issues never calls them missing)
 On disk, a mod's files are enabled (plain names) iff it is in `active` with
 enabled=true; `inactive` mods and toggled-off active mods are renamed with
 bepinex_install.DISABLED_SUFFIX. save_load_order() is the one place that
@@ -40,17 +42,27 @@ materializes this. Unknown top-level fields are preserved.
 Network goes through thunderstore.py (fetch_package / ensure_cached), so the
 check harness fakes thunderstore.env.urlopen. Dependency auto-install
 (THUNDERSTORE.md §1): install_mod() pulls in every declared dependency not yet
-installed, recursively, at its LATEST version - a dependency string's version
-is informational, not a pin (TMM's own profiles show the same). A dependency
-that can't be fetched/installed is reported as a problem, not a failure of
-the whole install; the requested package failing raises.
+installed, recursively. Since 0.6.50 at the EXACT version the dependency
+string names (Gale's rule: breadth first, the first version seen of a
+package wins, a version that's gone falls back to the latest, recorded);
+before, every dependency was taken at its latest, which pulled a modpack's
+mods past the versions it was built with (Lethal_Enhanced_Party_Edition:
+34 newer, TeamXiaolan-DawnLibExperimental next to DawnLib). Dependencies are
+extracted first, the target last. A dependency that can't be
+fetched/installed is reported as a problem, not a failure of the whole
+install; the requested package failing raises. Config files: every
+install overwrites the config files the package ships (0.6.51, Gale's rule,
+bepinex_install.install_package). 0.6.51: the community index
+(thunderstore_index) answers the exact-version lookups with no request, and
+a dependency from another game's community is left out (Gale's rule).
 
-Updates (THUNDERSTORE.md §3, stage 3b): check_updates() asks Thunderstore for
-every installed package's current latest version (online_source ones only)
-and update_mod() re-downloads + installs one package (the framework
+Updates (THUNDERSTORE.md §3, stage 3b): check_updates() finds every
+installed package's current latest version (online_source ones only) - from
+the community index since 0.6.52 (rebuilt when over an hour old), per package
+only for what it lacks or when it can't be built - and update_mod() re-downloads + installs one package (the framework
 included) in place - new files overwrite, files the old version had and the
-new one doesn't are deleted, config kept, the mod's on-disk enabled/disabled
-state preserved. The manager screen runs both off the GUI thread.
+new one doesn't are deleted, the config files it ships overwritten (0.6.51;
+others kept), the mod's on-disk enabled/disabled state preserved. The manager screen runs both off the GUI thread.
 
 Import/Export (THUNDERSTORE.md §4, stage 3e) lives in bepinex_share.py and
 builds on this module's two pinning hooks: create_load_order(framework_
@@ -85,14 +97,21 @@ download job runs before its installs - the mods the install will fetch
 install_mod does, through thunderstore_browse.dependency_chain), announced
 as one {"type": "plan", "ids": [...]} event, so the bar's total is known
 before the first download. Inside package_progress every package metadata
-lookup is remembered for the rest of the block (_fetch_meta), so the
-install reuses the pre-pass's requests instead of repeating them. The
+lookup is remembered for the rest of the block (_fetch_meta; since 0.6.50
+also each pinned version's list), so the install reuses the pre-pass's
+requests instead of repeating them; since 0.6.50 its lookups run
+FETCH_WORKERS at a time (one at a time before: ~100 s for a 300-mod
+modpack) and it has no cap (was thunderstore_browse.CHAIN_LIMIT). The
 pre-pass never raises and never changes what the install does; a mod it
 missed still joins the total when it starts, as before. Since 0.6.34 it
 first emits {"type": "checking"} (the bar reads "Checking required
 mods..."), and every way out of it emits a "plan" (an empty one on a
 failure) that ends that state; a job that fails or ends meanwhile hides the
-bar as always.
+bar as always. Since 0.6.51 it first makes sure the community index is
+fresh (thunderstore_index.ensure); while that downloads (~12 s, once a day)
+it emits {"type": "indexing"} (the bar reads "Updating package list..."),
+then "checking" again; with the index warm the walk makes no request for
+a version the index has (~1 s for a 300-mod modpack).
 
 Missing files (0.6.27, PLAN.md §11 (f)): the manifest is the truth for what is
 installed (THUNDERSTORE.md §3a), so files deleted from a tree outside VOLT
@@ -103,7 +122,8 @@ DISABLED_SUFFIX twin; config files and the framework are left out - and
 files_issue() turns a result into the manager's "files" issue.
 reinstall_mod() is the fix: update_mod(reinstall=True) at the installed
 version, from the cached zip (downloaded first when it's gone), keeping the
-mod's on-disk state, list position and config files.
+mod's on-disk state and list position (its own config files are written
+again, 0.6.51).
 """
 
 import os
@@ -118,6 +138,7 @@ from pathlib import Path
 from . import bepinex_install as bx
 from . import thunderstore as ts
 from . import thunderstore_browse as tb
+from . import thunderstore_index as pi
 from .applog import clip, log
 from .fsutil import read_json, remove_tree_best_effort, write_json
 from .mods import natural_key
@@ -255,14 +276,18 @@ ISSUE_TEXT = {
 
 
 def _declared_dependencies(entry: dict | None) -> list[str]:
-    """The full_names an installed entry declares (bad strings skipped, each once)."""
+    """The full_names an installed entry declares (bad strings skipped, each
+    once), minus those its install left out as another game's (0.6.51,
+    "skipped_dependencies": never "missing", Install missing never asks for them)."""
     out: list[str] = []
+    left_out = (entry or {}).get("skipped_dependencies")
+    left_out = set(left_out) if isinstance(left_out, list) else set()
     for dep in (entry or {}).get("dependencies", ()):
         try:
             name = ts.PackageRef.parse(dep).full_name
         except ValueError:
             continue
-        if name not in out:
+        if name not in out and name not in left_out:
             out.append(name)
     return out
 
@@ -443,6 +468,7 @@ def _make_entry(ref: ts.PackageRef, result: dict) -> dict:
         "dependencies": list(m["dependencies"]),
         "enabled": True, "online_source": True, "installed_at": _now(),
         "files": list(result["files"]),
+        "config_sha256": dict(result.get("config_sha256") or {}),  # 0.6.50: what it wrote (a record only since 0.6.51)
     }
 
 
@@ -479,26 +505,29 @@ def _fetch_meta(namespace: str, name: str, app_version=None) -> dict:
     return meta
 
 
-def _planned_dependencies(app_root, ref: ts.PackageRef, app_version, lookup_pinned: bool) -> list[str]:
-    """plan_downloads: `ref`'s declared dependencies - an exact version's
-    from its cached zip, else (lookup_pinned) from Thunderstore when its
-    latest is that version; the latest's for an unpinned ref. [] when not
-    known without a request the install wouldn't make, or on any failure."""
+def _zip_dependencies(app_root, ref: ts.PackageRef) -> list[str] | None:
+    """A pinned version's dependency strings from its cached zip's
+    manifest.json (no request); None when it isn't cached or can't be read."""
+    path = ts.cached_package(app_root, ref) if ref.version is not None else None
+    if path is None:
+        return None
     try:
-        if ref.version is not None:
-            cached = ts.cached_package(app_root, ref)
-            if cached is not None:
-                with bx.PackageSource(cached) as src:
-                    return list(bx.read_manifest(src)["dependencies"])
-            if not lookup_pinned:
-                return []
-        latest = _fetch_meta(ref.namespace, ref.name, app_version)["latest"]
-        if ref.version is not None and latest.get("version_number") != ref.version:
-            return []
+        with bx.PackageSource(path) as src:
+            return list(bx.read_manifest(src)["dependencies"])
+    except (bx.PackageError, OSError) as err:
+        log(f"[loadorders] {ref.key}: cached zip unreadable for its dependencies ({err})")
+        return None
+
+
+def _known_dependencies(memo: dict, ref: ts.PackageRef) -> list[str] | None:
+    """A pinned version's dependency strings when an earlier lookup of this
+    block (the pre-pass) already has them - no request; else None."""
+    if ref.key in memo:
+        return memo[ref.key]
+    latest = (memo.get(ref.full_name) or {}).get("latest") or {}
+    if latest.get("version_number") == ref.version:
         return [d for d in latest.get("dependencies") or [] if isinstance(d, str)]
-    except (ts.ThunderstoreError, bx.PackageError, OSError, ValueError) as err:
-        log(f"[loadorders] pre-pass: {ref.full_name}'s dependencies unknown ({err})")
-        return []
+    return None
 
 
 def plan_downloads(app_root, slug, game: ThunderstoreGame, refs, app_version=None, *, lookup_pinned: bool = True) -> list[str]:
@@ -506,25 +535,52 @@ def plan_downloads(app_root, slug, game: ThunderstoreGame, refs, app_version=Non
     package_progress, the full_names installing `refs` into load order
     `slug` (None = a load order not created yet: only the framework counts
     as there) will fetch - each ref not installed yet, then their missing
-    required mods (latest versions, dependency_chain's walk = install_mod's)
-    - emitted as one "plan" event and returned. `lookup_pinned` False (an
+    required mods (install_mod's walk: thunderstore_browse.dependency_chain
+    at the exact versions, first seen wins; no cap since 0.6.50), looked up
+    FETCH_WORKERS at a time (0.6.50; one at a time before) - emitted as one
+    "plan" event and returned. A pinned version's list comes from its cached
+    zip, else Thunderstore (version_dependencies); `lookup_pinned` False (an
     import: every listed mod pinned) keeps a pinned ref without a cached zip
-    from costing a request the install wouldn't make. Outside
-    package_progress: nothing, []. Never raises."""
+    from costing a request (its own dependencies then aren't counted).
+    0.6.51: the community index first (thunderstore_index.ensure - built
+    here when missing or stale, the bar reading "Updating package list..."
+    meanwhile; any failure = the per-package lookups as before); a
+    dependency (not one of `refs`) the index lacks is checked against the
+    game's community - another game's is left out (Gale's rule), never
+    counted. Outside package_progress: nothing, []. Never raises."""
     if getattr(_progress, "cb", None) is None:
         return []
     _emit({"type": "checking"})  # 0.6.34: the bar reads "Checking required mods..." until the "plan" below
     try:
+        refs = list(refs)
         have = set(installed(load_load_order(app_root, slug))) if slug else set()
         have.add(game.framework_package)
-        plan: list[str] = []
-        deps: list[str] = []
-        for ref in refs:
-            if ref.full_name in have or ref.full_name in plan:
-                continue
-            plan.append(ref.full_name)
-            deps += _planned_dependencies(app_root, ref, app_version, lookup_pinned)
-        chain = tb.dependency_chain(deps, have | set(plan), game.framework_package, app_version, fetch=_fetch_meta)
+        memo = _progress.meta  # captured here: the lookups run on worker threads (_progress is per thread)
+        built = []
+        index = pi.ensure(app_root, game.community, app_version,
+                          on_build=lambda: (built.append(1), _emit({"type": "indexing"})))  # "Updating package list..."
+        if built:
+            _emit({"type": "checking"})  # back to "Checking required mods..."
+        targets = {r.full_name for r in refs}
+
+        def lookup(ref: ts.PackageRef):
+            hit = index.lookup(ref) if index is not None else None
+            if hit is not None:  # in the index = this game's package
+                return hit[0], hit[1], False
+            community = None if ref.full_name in targets else game.community  # another game's: left out
+            if ref.version is not None:
+                deps = _zip_dependencies(app_root, ref)
+                if deps is None and not lookup_pinned:
+                    deps = []  # an import: no request for a pinned mod (its own list then isn't counted)
+                if deps is not None:
+                    if community and (lookup_pinned or index is not None):
+                        _check_community(ref, app_version, memo, community)
+                    return ref.version, deps, False
+            return tb.version_dependencies(ref, app_version, cache=memo, community=community)
+
+        plan = list(dict.fromkeys(r.full_name for r in refs if r.full_name not in have))
+        chain = tb.parallel_dependency_chain([r.key if r.version else r.full_name for r in refs], have,
+                                             game.framework_package, app_version, lookup=lookup, limit=None)
         plan += [f for f in chain["missing"] if f not in plan]
     except Exception as err:  # the bar's total must never break an install
         log(f"[loadorders] pre-pass failed ({err!r}); the total grows as mods start")
@@ -555,21 +611,31 @@ def _fetch_and_install(app_root, slug, ref: ts.PackageRef, framework: bool, app_
     return entry
 
 
-def _fetch_and_install_quiet(app_root, slug, ref: ts.PackageRef, framework: bool, app_version=None) -> dict:
+def _download(app_root, ref: ts.PackageRef, app_version=None) -> tuple[ts.PackageRef, Path]:
+    """(the versioned ref, its cached zip): a pinned version as is, else
+    Thunderstore's latest (one metadata lookup, remembered in a block)."""
     url = None
     if ref.version is None:
         meta = _fetch_meta(ref.namespace, ref.name, app_version)
         ref = ts.latest_ref(meta)
         url = meta["latest"].get("download_url") if isinstance(meta["latest"].get("download_url"), str) else None
-    zip_path = ts.ensure_cached(app_root, ref, url, app_version)
-    root = tree_root(app_root, slug)
+    return ref, ts.ensure_cached(app_root, ref, url, app_version)
+
+
+def _extract(app_root, slug, ref: ts.PackageRef, zip_path, framework: bool) -> dict:
+    """Extracts a cached zip into the tree (a corrupt one is evicted). The entry."""
     try:
-        result = bx.install_package(zip_path, root, ref.full_name, framework=framework)
+        result = bx.install_package(zip_path, tree_root(app_root, slug), ref.full_name, framework=framework)
     except bx.PackageError as err:
         if err.kind == "bad-zip":  # a corrupt cached download: don't keep serving it
             ts.evict_cached(app_root, ref)
         raise
     return _make_entry(ref, result)
+
+
+def _fetch_and_install_quiet(app_root, slug, ref: ts.PackageRef, framework: bool, app_version=None) -> dict:
+    ref, zip_path = _download(app_root, ref, app_version)
+    return _extract(app_root, slug, ref, zip_path, framework)
 
 
 def _fetch_pinned_or_latest(app_root, slug, ref: ts.PackageRef, framework: bool, app_version=None) -> tuple[dict, bool]:
@@ -578,12 +644,12 @@ def _fetch_pinned_or_latest(app_root, slug, ref: ts.PackageRef, framework: bool,
     bad download), the package's latest is installed instead. Returns
     (entry, fell_back). An unpinned ref is just _fetch_and_install."""
     try:
-        return _fetch_and_install(app_root, slug, ref, framework=framework, app_version=app_version), False
+        return _fetch_and_install(app_root, slug, ref, framework, app_version), False
     except (ts.ThunderstoreError, bx.PackageError) as err:
         if ref.version is None:
             raise
         log(f"[loadorders] {slug}: {ref.key} unavailable ({err}); falling back to the latest {ref.full_name}")
-    entry = _fetch_and_install(app_root, slug, ts.PackageRef(ref.namespace, ref.name), framework=framework, app_version=app_version)
+    entry = _fetch_and_install(app_root, slug, ts.PackageRef(ref.namespace, ref.name), framework, app_version)
     return entry, True
 
 
@@ -615,68 +681,190 @@ def create_load_order(app_root, name: str, game: ThunderstoreGame, app_version=N
     return _write(app_root, slug, manifest)
 
 
+OTHER_COMMUNITY = "other-community"  # install_mod's problem kind for a dependency left out as another game's (0.6.51)
+
+
+def _check_community(r: ts.PackageRef, app_version, memo: dict, community: str) -> None:
+    """OtherCommunityError when `r`'s package is another game's (its
+    per-package reply, the memo first); a failed lookup is logged and
+    treated as unknown, so an offline install from the cache still works."""
+    try:
+        tb.checked_meta(r, app_version, cache=memo, community=community)
+    except tb.OtherCommunityError:
+        raise
+    except ts.ThunderstoreError as err:
+        log(f"[loadorders] {r.full_name}: community not checked ({err}) - kept")
+
+
 def install_mod(app_root, slug, game: ThunderstoreGame, target, app_version=None, *,
-                pins: dict[str, str] | None = None, fallback_latest: bool = False, target_installer=None) -> dict:
+                pins: dict[str, str] | None = None, fallback_latest: bool = False, target_installer=None,
+                target_dependencies=None) -> dict:
     """Installs `target` (a PackageRef or "Team-Package[-Version]" string) into
-    the load order, appended to the active list enabled, after any of its
-    declared dependencies not yet installed (recursively, latest versions -
-    or the version `pins` names for that full_name: an import's file
-    pins every package it lists, bepinex_share.py). Already-installed
-    packages (framework included) are left alone. Returns {"installed":
-    [entries, dependencies first], "problems": [{kind, path, message,
-    package}], "fallbacks": [{package, wanted, installed}]} - a dependency
-    that fails is a problem; the target itself failing raises
-    (ThunderstoreError / PackageError). With `fallback_latest`, a pinned
-    version that can't be fetched (gone from Thunderstore) is replaced by
-    the package's latest and recorded in "fallbacks" instead of failing;
-    without it (the browser's Versions tab), a pinned version is exact.
-    `target_installer(ref) -> entry` replaces the target's own fetch +
-    install (import_local_mod: the picked zip instead of a download);
-    dependencies still come from Thunderstore."""
+    the load order, appended to the active list enabled, after every
+    declared dependency not yet installed (recursively). 0.6.50 (Gale's
+    rule, was "latest of everything"): each dependency at the version its
+    dependency string names - or the version `pins` names for that
+    full_name (an import's file pins every package it lists, bepinex_share.
+    py) - resolved breadth first, the first version seen of a package
+    winning (thunderstore_browse.dependency_chain); a version that can't be
+    fetched any more falls back to the package's latest and is recorded in
+    "fallbacks". Already-installed packages (framework included) are left
+    alone. The whole set is resolved first (a pinned version's dependency
+    list: its cached zip, else what this block's pre-pass looked up, else
+    its download - the zip's own manifest.json), then extracted
+    dependencies first, the target LAST (so a modpack's config files are the
+    last written: every package overwrites the config files it ships, 0.6.51,
+    bepinex_install.install_package). 0.6.51: the community index
+    (thunderstore_index.current, built by the pre-pass; never the network
+    here) answers a pinned version's list first; a dependency it lacks is
+    checked against the game's community (the per-package reply, the
+    pre-pass's memo first) and another game's is LEFT OUT (Gale's rule):
+    a problem of kind "other-community", recorded on each installed entry
+    that lists it ("skipped_dependencies") so it never reads as missing.
+    The target and the packages `pins` names are never left out (asked for
+    by name / listed by the import's file). Returns {"installed": [entries,
+    dependencies first], "problems": [{kind, path,
+    message, package}], "fallbacks": [{package, wanted, installed}]} - a
+    dependency that fails is a problem; the target itself failing raises
+    (ThunderstoreError / PackageError). The target's own pinned version is
+    exact unless `fallback_latest` (an import): the browser's Versions tab.
+    `target_installer(ref) -> entry` replaces the target's
+    own fetch + install (import_local_mod: the picked zip instead of a
+    download; its `target_dependencies` are the zip's own); dependencies
+    still come from Thunderstore."""
     ref = target if isinstance(target, ts.PackageRef) else ts.PackageRef.parse(target)
     manifest = load_load_order(app_root, slug)
     have = installed(manifest)
     if ref.full_name == game.framework_package or ref.full_name in have:
         log(f"[loadorders] {slug}: {ref.full_name} already installed, nothing to do")
         return {"installed": [], "problems": [], "fallbacks": []}
-    done, problems, fallbacks, visiting = [], [], [], set()
+    memo = getattr(_progress, "meta", None)
+    memo = {} if memo is None else memo  # the pre-pass's lookups, when this runs inside its block
+    resolved: dict[str, tuple] = {}  # full_name -> (ref to install, wanted version, fell back, downloaded already)
+    failed: dict[str, Exception] = {}
+    announced: set[str] = set()  # got a "start" event during the lookups
+    problems, fallbacks, done = [], [], []
+    index = pi.current(app_root, game.community)
+    exempt = {ref.full_name, *(pins or ())}  # never left out as another game's
 
-    def visit(r: ts.PackageRef, is_target: bool) -> None:
-        if r.full_name in have or r.full_name == game.framework_package or r.full_name in visiting:
-            return
-        visiting.add(r.full_name)
-        if r.version is None and pins and pins.get(r.full_name):
-            r = r.with_version(pins[r.full_name])
+    def lookup(r: ts.PackageRef):
+        is_target = r.full_name == ref.full_name
+        try:
+            hit = index.lookup(r) if index is not None else None
+            if is_target and target_installer is not None:
+                deps = list(target_dependencies or [])
+                resolved[r.full_name] = (r, r.version, False, True)
+            elif hit is not None:  # in the index = this game's package
+                deps = hit[1]
+                resolved[r.full_name] = (r, r.version, False, False)
+            else:
+                if r.full_name not in exempt:
+                    _check_community(r, app_version, memo, game.community)  # another game's: OtherCommunityError
+                if r.version is None:
+                    meta = _fetch_meta(r.namespace, r.name, app_version)
+                    latest = ts.latest_ref(meta)
+                    deps = [d for d in meta["latest"].get("dependencies") or [] if isinstance(d, str)]
+                    resolved[r.full_name] = (latest, None, False, False)
+                else:
+                    deps = _zip_dependencies(app_root, r)
+                    if deps is None:
+                        deps = _known_dependencies(memo, r)
+                    if deps is not None:
+                        resolved[r.full_name] = (r, r.version, False, False)
+                    else:  # not known yet: download it now (the install needs the zip anyway); its manifest.json has the list
+                        deps = _download_for_dependencies(r, exact=is_target and not fallback_latest)
+            for dep in deps:
+                try:
+                    ts.PackageRef.parse(dep)
+                except ValueError as err:
+                    problems.append({"kind": "bad-dependency", "path": "", "message": str(err), "package": r.full_name})
+            return resolved[r.full_name][0].version, deps, resolved[r.full_name][2]
+        except Exception as err:
+            failed[r.full_name] = err
+            if r.full_name not in announced and not isinstance(err, tb.OtherCommunityError):  # the bar marks it failed
+                _emit({"type": "start", "id": r.full_name})
+                _emit({"type": "item-done", "id": r.full_name, "ok": False, "message": str(err) or repr(err)})
+            raise
+
+    def _download_for_dependencies(r: ts.PackageRef, exact: bool) -> list[str]:
+        announced.add(r.full_name)
+        _emit({"type": "start", "id": r.full_name})
+        try:
+            try:
+                got, zip_path, fell_back = r, ts.ensure_cached(app_root, r, None, app_version), False
+                deps = _zip_dependencies_strict(app_root, got, zip_path)
+            except (ts.ThunderstoreError, bx.PackageError) as err:
+                if exact:
+                    raise
+                log(f"[loadorders] {slug}: {r.key} unavailable ({err}); falling back to the latest {r.full_name}")
+                got, zip_path = _download(app_root, ts.PackageRef(r.namespace, r.name), app_version)
+                deps, fell_back = _zip_dependencies_strict(app_root, got, zip_path), True
+        except Exception as err:
+            _emit({"type": "item-done", "id": r.full_name, "ok": False, "message": str(err) or repr(err)})
+            raise
+        _emit({"type": "item-done", "id": r.full_name, "ok": True})
+        resolved[r.full_name] = (got, r.version, fell_back, True)
+        return deps
+
+    if pins and ref.version is None and pins.get(ref.full_name):
+        ref = ref.with_version(pins[ref.full_name])
+    chain = tb.dependency_chain([ref.key if ref.version else ref.full_name], have, game.framework_package, app_version,
+                                lookup=lookup, limit=None, pins=pins)
+    if ref.full_name not in resolved:
+        raise failed.get(ref.full_name) or ts.ThunderstoreError(f"Couldn't look up {ref.full_name}.")
+    for name, message in chain["problems"]:
+        if name in chain["skipped"]:
+            problems.append({"kind": OTHER_COMMUNITY, "path": "", "message": message, "package": name})
+            log(f"[loadorders] {slug}: dependency {name} left out: {message}")
+        elif name in failed:
+            err = failed[name]
+            problem = err.problem() if isinstance(err, bx.PackageError) else {"kind": "fetch-error", "path": "", "message": str(err)}
+            problems.append({**problem, "package": name})
+            log(f"[loadorders] {slug}: dependency {name} failed: {err}")
+    for full in chain["missing"]:  # dependencies first, the target last
+        r, wanted, fell_back, downloaded = resolved[full]
+        is_target = full == ref.full_name
         try:
             if is_target and target_installer is not None:
-                entry, fell_back = target_installer(r), False
-            elif fallback_latest:
-                entry, fell_back = _fetch_pinned_or_latest(app_root, slug, r, framework=False, app_version=app_version)
+                entry = target_installer(r)
+            elif downloaded:
+                entry = _extract(app_root, slug, r, ts.ensure_cached(app_root, r, None, app_version), False)
+            elif is_target and not fallback_latest:
+                entry = _fetch_and_install(app_root, slug, r, False, app_version)
             else:
-                entry, fell_back = _fetch_and_install(app_root, slug, r, framework=False, app_version=app_version), False
+                entry, late = _fetch_pinned_or_latest(app_root, slug, r, False, app_version)
+                fell_back = fell_back or late
         except (ts.ThunderstoreError, bx.PackageError) as err:
             if is_target:
                 raise
             problem = getattr(err, "problem", lambda: {"kind": "fetch-error", "path": "", "message": str(err)})()
-            problems.append({**problem, "package": r.full_name})
-            log(f"[loadorders] {slug}: dependency {r.full_name} failed: {err}")
-            return
-        if fell_back:
-            fallbacks.append({"package": r.full_name, "wanted": r.version, "installed": entry["version"]})
-        for dep in entry["dependencies"]:
-            try:
-                d = ts.PackageRef.parse(dep)
-                visit(ts.PackageRef(d.namespace, d.name), False)  # the dep string's version is informational: latest (or a pin)
-            except ValueError as err:
-                problems.append({"kind": "bad-dependency", "path": "", "message": str(err), "package": r.full_name})
-        have[entry["full_name"]] = entry
+            problems.append({**problem, "package": full})
+            log(f"[loadorders] {slug}: dependency {full} failed: {err}")
+            continue
+        if fell_back and wanted:
+            fallbacks.append({"package": full, "wanted": wanted, "installed": entry["version"]})
+        left_out = [d for d in _declared_dependencies(entry) if d in chain["skipped"]]
+        if left_out:
+            entry["skipped_dependencies"] = left_out  # dependency_issues: never "missing"
+        have[full] = entry
         manifest["active"].append(entry)
         done.append(entry)
         _write(app_root, slug, manifest)  # keep the manifest truthful after every install
-
-    visit(ref, True)
-    log(f"[loadorders] {slug}: installed {[e['full_name'] for e in done]}, {len(problems)} problems, {len(fallbacks)} fallbacks")
+    log(f"[loadorders] {slug}: installed {[e['full_name'] for e in done]}, {len(problems)} problems, "
+        f"{len(fallbacks)} fallbacks {fallbacks}")
     return {"installed": done, "problems": problems, "fallbacks": fallbacks}
+
+
+def _zip_dependencies_strict(app_root, ref: ts.PackageRef, zip_path) -> list[str]:
+    """A just-downloaded zip's dependency strings; a corrupt one is evicted
+    and the PackageError raised (the fallback / problem path)."""
+    try:
+        with bx.PackageSource(zip_path) as src:
+            return list(bx.read_manifest(src)["dependencies"])
+    except bx.PackageError as err:
+        if err.kind == "bad-zip":
+            ts.evict_cached(app_root, ref)
+        raise
 
 
 # ---- Import local mod (THUNDERSTORE.md §8b) ----
@@ -771,7 +959,8 @@ def import_local_mod(app_root, slug, game: ThunderstoreGame, zip_path, app_versi
         result = bx.install_package(cached, tree_root(app_root, slug), ref.full_name, framework=False)
         return {**_make_entry(ref, result), "online_source": False}
 
-    res = install_mod(app_root, slug, game, ref, app_version, target_installer=install_local)
+    res = install_mod(app_root, slug, game, ref, app_version, target_installer=install_local,
+                      target_dependencies=info["manifest"]["dependencies"])
     log(f"[loadorders] {slug}: local import of {zip_path} as {ref.key}: "
         f"{'installed' if res['installed'] else 'already installed, nothing done'}")
     return {**res, "ref": ref, "owner_source": info["owner_source"]}
@@ -849,45 +1038,81 @@ def set_mod_enabled(app_root, slug, full_name: str, enabled: bool) -> dict:
     return save_load_order(app_root, slug, active, [e["full_name"] for e in manifest["inactive"]])
 
 
-# Pause between check_updates' sequential metadata fetches, so a long load
-# order doesn't burst Thunderstore into rate-limiting (HTTP 429, ~9 req/s did).
-CHECK_REQUEST_GAP_S = 0.25
+def _check_one(entry: dict, latest_version: str, date_updated, deprecated) -> dict:
+    return {"latest_version": latest_version, "date_updated": date_updated if isinstance(date_updated, str) else None,
+            "update": ts.is_newer(latest_version, entry["version"]), "deprecated": bool(deprecated)}
 
 
-def check_updates(manifest: dict, app_version=None, only=None) -> dict[str, dict]:
-    """One Thunderstore metadata fetch per installed package with
-    online_source (framework included), or only those full_names in `only`
-    when given, CHECK_REQUEST_GAP_S apart: full_name -> {"latest_version",
-    "date_updated", "update": bool, "deprecated": bool (the same reply's
-    is_deprecated)} or {"error": str} (that package's
-    fetch failed - the rest still get checked; once Thunderstore is
-    rate-limiting past fetch_package's retries, the rest aren't asked and
-    get that same error). Pure network + compare, nothing written; the
-    caller keeps/caches the result."""
-    out = {}
-    todo = [(n, e) for n, e in installed(manifest).items()
-            if e.get("online_source", True) and (only is None or n in only)]
-    for i, (full_name, entry) in enumerate(todo):
-        if i:
-            ts.env.sleep(CHECK_REQUEST_GAP_S)
+def _check_per_package(todo: list, app_version) -> dict[str, dict]:
+    """check_updates' per-package path: one fetch_package per (full_name,
+    entry), FETCH_WORKERS at a time, no pause between them (0.6.52; was one
+    at a time 250 ms apart: ~3 min for 300 mods) - fetch_package's own HTTP
+    429 retry / back-off paces it, as it does the dependency chain's
+    lookups. Once one is still rate-limited after those retries, no new
+    request starts: the rest get that same error."""
+    out: dict[str, dict] = {}
+    limited: list[str] = []
+    not_asked: list[str] = []
+
+    def one(item) -> None:
+        full_name, entry = item
+        if limited:
+            out[full_name] = {"error": limited[0]}
+            not_asked.append(full_name)
+            return
         try:
             meta = ts.fetch_package(entry["namespace"], entry["name"], app_version)
         except ts.RateLimitedError as err:
-            log(f"[loadorders] update check: rate-limited, not asking for the other {len(todo) - i - 1} packages")
-            out.update({n: {"error": str(err)} for n, _ in todo[i:]})
-            break
+            limited.append(str(err))
+            out[full_name] = {"error": str(err)}
+            return
         except ts.ThunderstoreError as err:
             out[full_name] = {"error": str(err)}
-            continue
-        latest = meta["latest"]["version_number"]
-        out[full_name] = {
-            "latest_version": latest,
-            "date_updated": meta.get("date_updated") if isinstance(meta.get("date_updated"), str) else None,
-            "update": ts.is_newer(latest, entry["version"]),
-            "deprecated": bool(meta.get("is_deprecated")),
-        }
+            return
+        out[full_name] = _check_one(entry, meta["latest"]["version_number"], meta.get("date_updated"),
+                                    meta.get("is_deprecated"))
+
+    tb._parallel(todo, one, tb.FETCH_WORKERS)
+    if limited:
+        log(f"[loadorders] update check: rate-limited, didn't ask for the other {len(not_asked)} packages")
+    return {n: out.get(n, {"error": "The update check failed for this mod."}) for n, _ in todo}
+
+
+def check_updates(manifest: dict, app_version=None, only=None, *, app_root=None, community: str | None = None) -> dict[str, dict]:
+    """Every installed package with online_source (framework included), or
+    only those full_names in `only` when given: full_name ->
+    {"latest_version", "date_updated", "update": bool, "deprecated": bool}
+    or {"error": str} (that package's check failed - the rest still get
+    checked; once Thunderstore is rate-limiting past fetch_package's
+    retries, the rest aren't asked and get that same error). 0.6.52: with
+    `app_root` + `community`, answered from the community index
+    (thunderstore_index.ensure at UPDATE_MAX_AGE_S - built here when over an
+    hour old, "indexing" on the download bar meanwhile, inside
+    package_progress) with no request; per package (_check_per_package)
+    only for what it lacks, an installed version newer than its latest (it
+    is behind), or everything when it can't be built. Pure network +
+    compare, nothing written; the caller keeps/caches the result."""
+    todo = [(n, e) for n, e in installed(manifest).items()
+            if e.get("online_source", True) and (only is None or n in only)]
+    index = None
+    if todo and app_root is not None and community:
+        built = []
+        index = pi.ensure(app_root, community, app_version, max_age_s=pi.UPDATE_MAX_AGE_S,
+                          on_build=lambda: (built.append(1), _emit({"type": "indexing"})))  # "Updating package list..."
+        if built:
+            _emit({"type": "plan", "ids": []})  # the bar's "Updating package list..." ends
+    out, ask = {}, []
+    for full_name, entry in todo:
+        hit = index.latest(full_name) if index is not None else None
+        if hit is None or ts.is_newer(entry["version"], hit["latest_version"]):
+            ask.append((full_name, entry))  # not in the index (newer than it, another game's), or it is behind
+        else:
+            out[full_name] = _check_one(entry, **hit)
+    out.update(_check_per_package(ask, app_version) if ask else {})
+    out = {n: out[n] for n, _ in todo}
     log(f"[loadorders] update check: {sum(1 for v in out.values() if v.get('update'))} of {len(out)} packages have an update, "
-        f"{sum(1 for v in out.values() if 'error' in v)} failed")
+        f"{sum(1 for v in out.values() if 'error' in v)} failed; {len(todo) - len(ask)} from the package index, "
+        f"{len(ask)} asked per package")
     return out
 
 
@@ -897,7 +1122,7 @@ def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_versi
     version - or at `version` (the browser's Versions tab: any release,
     newer or older) - in place (the framework included). New files
     overwrite the tree's, files the old version tracked that the new one
-    doesn't are deleted (config kept, as always); the mod's on-disk state
+    doesn't are deleted (the config files it ships overwritten, 0.6.51); the mod's on-disk state
     and list position are preserved (an inactive or toggled-off mod comes
     back disabled). Returns {"manifest", "entry", "updated": bool} -
     updated False when the installed version already is the one asked for
@@ -932,7 +1157,9 @@ def update_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_versi
     if stale:
         res = bx.remove_files(root, stale)
         log(f"[loadorders] {slug}: {full_name} update dropped {len(stale)} files of {entry['version']}: {res}")
-    new_entry = {**entry, **new, "enabled": entry["enabled"], "online_source": entry.get("online_source", True)}
+    new_entry = {**entry, **new, "enabled": entry["enabled"], "online_source": entry.get("online_source", True),
+                 "config_sha256": {**(entry.get("config_sha256") if isinstance(entry.get("config_sha256"), dict) else {}),
+                                   **new["config_sha256"]}}  # what every version wrote (a record; 0.6.51: it overwrote its own)
     if is_framework:
         manifest["framework"] = new_entry
     else:
@@ -947,8 +1174,8 @@ def reinstall_mod(app_root, slug, game: ThunderstoreGame, full_name: str, app_ve
     """The Missing files fix (module docstring): `full_name` extracted again
     at its installed version - from the cached zip, else downloaded through
     the normal path - over the tree (update_mod(reinstall=True): on-disk
-    enabled / disabled state, list position and config files kept; no other
-    mod touched). Returns update_mod's dict plus "source" ("cache" /
+    enabled / disabled state and list position kept, its own config files
+    written again (0.6.51); no other mod touched). Returns update_mod's dict plus "source" ("cache" /
     "download") and "missing_before" / "missing_after" (that mod's missing
     file count). ValueError (plain words) for a local .zip mod with no
     cached copy; ThunderstoreError / PackageError from the fetch/install."""

@@ -59,6 +59,7 @@ class DownloadState:
     paused: bool = False
     pausing: bool = False
     checking: bool = False  # Thunderstore (0.6.34): plan_downloads' pre-pass is still working out the total
+    indexing: bool = False  # 0.6.51: ... and is downloading the community's package list first (checking too)
 
 
 def _uniq(*seqs) -> tuple[str, ...]:
@@ -213,6 +214,8 @@ def apply_package_event(d: DownloadState | None, ev: dict | None) -> DownloadSta
     """bepinex_load_orders.package_progress's events: "checking" (the
     pre-pass started, 0.6.34) sets `checking` - the bar reads "Checking
     required mods..." - until its "plan" or the first "start" clears it;
+    "indexing" (0.6.51: the pre-pass downloads the package list first) the
+    same, reading "Updating package list..." until the next "checking";
     "plan" (plan_downloads' pre-pass) adds every mod it names to the total; "start" adds the mod to
     the total (if new) and makes it the current one; "item-done" is
     apply_download_event's (done, failed / un-failed on a later success),
@@ -220,12 +223,13 @@ def apply_package_event(d: DownloadState | None, ev: dict | None) -> DownloadSta
     "Downloading..." between two mods (percent_of ignores a done `cur`)."""
     if d is None or not ev:
         return d
-    if ev.get("type") == "checking":
-        return replace(d, checking=True)
+    if ev.get("type") in ("checking", "indexing"):
+        return replace(d, checking=True, indexing=ev["type"] == "indexing")
     if ev.get("type") == "plan":  # the pre-pass (0.6.26): the job's whole list, before the first download
-        return replace(d, wids=_uniq(d.wids, tuple(ev.get("ids") or ())), checking=False)
+        return replace(d, wids=_uniq(d.wids, tuple(ev.get("ids") or ())), checking=False, indexing=False)
     if ev.get("type") == "start":
-        return replace(d, wids=_uniq(d.wids, (ev["id"],)), cur=Current(ev["id"], 0.0, None), checking=False)
+        return replace(d, wids=_uniq(d.wids, (ev["id"],)), cur=Current(ev["id"], 0.0, None), checking=False,
+                       indexing=False)
     after = apply_download_event(d, ev)
     return after if after is d else replace(after, cur=d.cur)
 
@@ -233,9 +237,10 @@ def apply_package_event(d: DownloadState | None, ev: dict | None) -> DownloadSta
 def package_label(d: DownloadState, titles: dict[str, str]) -> str:
     """"Downloading: <mod name>" (the current / last mod's title, else its
     id), or "Downloading..." before the first one starts; "Checking required
-    mods..." while the pre-pass works out the total (0.6.34)."""
+    mods..." while the pre-pass works out the total (0.6.34), "Updating
+    package list..." while it downloads the package list first (0.6.51)."""
     if d.checking:
-        return "Checking required mods..."
+        return "Updating package list..." if d.indexing else "Checking required mods..."
     if d.cur is None:
         return "Downloading..."
     return f"Downloading: {titles.get(d.cur.id) or d.cur.id}"

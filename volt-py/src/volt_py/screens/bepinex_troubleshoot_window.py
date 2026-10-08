@@ -48,25 +48,34 @@ of findings new since the baseline get a "New since <time>" line. The live log
 that VOLT has already kept (the game exited) is shown once, as the live entry,
 with that kept run's mark and baseline.
 
+Export diagnostics (0.6.50): "Export diagnostics..." in the header row (between
+the title and Close, an addition) saves one .zip for a helper -
+bepinex_diagnostics.write in a worker job after an intro box and a save dialog
+(Help's Report a problem pattern); off while the game runs or an export is
+being written (the 1 s poll); the result names the file, with "Open folder".
+
 Words and grouping live in volt_py/bepinex_troubleshoot.py (Qt-free, pinned by
 tools/checks/volt_py_bepinex_troubleshoot.py)."""
 
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSortFilterProxyModel, Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QEvent, QSortFilterProxyModel, QStandardPaths, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListView,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -76,8 +85,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from volt_py import bepinex_patchlog as pl, bepinex_runs as runs, bepinex_troubleshoot as bt, painters, theme
+from volt_py import bepinex_diagnostics as bd, bepinex_patchlog as pl, bepinex_runs as runs, bepinex_troubleshoot as bt, painters, theme
 from volt_py.applog import log
+from volt_py.screens.error_box import show_error
 from volt_py.screens.details_panel import READOUT_KEY_WIDTH, details_key
 from volt_py.screens.flow_layout import FlowLayout
 from volt_py.screens.help_window import TextBlocks
@@ -96,6 +106,17 @@ MONO_NOTE = "Changes made with MonoMod hooks (On.* / DawnLib) aren't in this lis
 PICKER_CHROME = 40  # the run selector's arrow (20) + padding + border, beyond its longest entry's text
 PICKER_MIN_CHARS = 24  # it shrinks (eliding its text) to this before the row overflows a narrow window
 CHANGE = "change:"  # rail keys of What changed rows (findings use their own ids)
+# Export diagnostics (0.6.50, bepinex_diagnostics): the header button, between the title and Close (an addition)
+EXPORT_LABEL = "Export diagnostics..."
+EXPORT_TOOLTIP = "Save one .zip with VOLT's logs and this profile's settings, configs and game logs. Nothing is uploaded."
+EXPORT_INTRO = (
+    "VOLT saves one .zip file you can send to whoever is helping you. It holds VOLT's logs, VOLT's settings for {game}, "
+    "this profile's mod list, its config files, the game's log of the last launch and the last {runs} runs VOLT kept. "
+    "No mod files and nothing from the game folder.\n\n"
+    "Your Windows user name is replaced with \"***\" everywhere in it. Nothing else is removed: mod configs and logs "
+    "can hold other names or folder paths. Nothing is uploaded: you choose who gets the file."
+)
+EXPORT_DONE = "Saved {name} in {folder}.\n\nSend this file to whoever is helping you (by email or chat, for example)."
 
 
 def _repolish(widget: QWidget) -> None:
@@ -309,13 +330,15 @@ class _Readout:
 class TroubleshootWindow(QDialog):
     def __init__(self, game_name: str, profile: str, *, log_path, root, manifest: Callable[[], dict | None],
                  run_job, type_cache: dict, game_running: Callable[[], bool], places: dict, app_version: str,
-                 parent: QWidget | None = None) -> None:
+                 export: dict | None = None, parent: QWidget | None = None) -> None:
         """`log_path`: the profile's BepInEx/LogOutput.log; `root`: its tree
         root; `manifest()`: the open profile's loadorder.json dict as saved;
         `run_job(name, fn, on_done)`: the screen's worker jobs; `type_cache`:
         the screen's session cache of type-index scans (scan_key -> scan),
         merged back on the GUI thread; `game_running()`: this profile's modded
-        run is live; `places`: {placeholder: folder} for redaction."""
+        run is live; `places`: {placeholder: folder} for redaction;
+        `export` (0.6.50, Export diagnostics): {"base", "app_root",
+        "game_slug", "profile_slug", "game_dir"} - no button without it."""
         super().__init__(parent)
         self.setObjectName("troubleshoot")
         self.setWindowTitle(f"Troubleshoot {profile}")
@@ -345,6 +368,7 @@ class TroubleshootWindow(QDialog):
         self._patch_recorded: str | None = None  # "19:23 today"
         self._mtech_open = False  # a game method's technical details
         self._mode = "mods"
+        self._export, self._exporting = export, False
 
         layout = QVBoxLayout(self)  # .modal: padding 16, gap 10
         layout.setContentsMargins(16, 16, 16, 16)
@@ -353,6 +377,12 @@ class TroubleshootWindow(QDialog):
         title = QLabel(f"Troubleshoot — {profile}")
         title.setProperty("role", "modal-title")
         header.addWidget(title, 1)
+        self.export_button = None
+        if export is not None:
+            self.export_button = QPushButton(EXPORT_LABEL)
+            self.export_button.setAutoDefault(False)
+            self.export_button.clicked.connect(lambda _=False: self._export_diagnostics())
+            header.addWidget(self.export_button)
         self.close_button = QPushButton("Close")
         self.close_button.setAutoDefault(False)
         self.close_button.clicked.connect(lambda _=False: self.reject())
@@ -374,7 +404,9 @@ class TroubleshootWindow(QDialog):
         self._poll = QTimer(self)
         self._poll.setInterval(1000)
         self._poll.timeout.connect(self._apply_banners)
+        self._poll.timeout.connect(self._apply_export)
         self._poll.start()
+        self._apply_export()
         self.close_button.setFocus()
         self.read()
 
@@ -1423,6 +1455,78 @@ class TroubleshootWindow(QDialog):
         self._mtech_open = not self._mtech_open
         log(f"[troubleshoot] game method technical details {'shown' if self._mtech_open else 'hidden'}")
         painters.crossfade(self.method_detail, self._apply_mtech, theme.MOTION_FAST)
+
+    # ---- Export diagnostics (0.6.50) ----
+    def _apply_export(self) -> None:
+        """The button: off while the game runs (the sqlite log is in use) or an export is being written."""
+        if self.export_button is None:
+            return
+        running = self._game_running()
+        self.export_button.setEnabled(not running and not self._exporting)
+        self.export_button.setToolTip(bt.RUNNING_TIP if running else EXPORT_TOOLTIP)
+
+    def _export_diagnostics(self) -> None:
+        """What goes in first (Help's Report a problem pattern), a save dialog
+        (default name bepinex_diagnostics.file_name, on the Desktop), then
+        bepinex_diagnostics.write in a worker job; the result names the file
+        with an "Open folder" button; a failure is the friendly error box."""
+        if self._export is None or self._exporting or self._game_running():
+            return
+        e = self._export
+        box = QMessageBox(QMessageBox.Icon.Information, "Export diagnostics",
+                          EXPORT_INTRO.format(game=self._game, runs=bd.RUNS_KEPT), QMessageBox.StandardButton.Cancel, self)
+        save = box.addButton("Save...", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(save)  # Enter goes on (the confirm convention)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not save:
+            log("[troubleshoot] export diagnostics: cancelled at the intro")
+            return
+        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation) or str(Path.home())
+        default = str(Path(folder) / bd.file_name(e["game_slug"], e["profile_slug"], datetime.now()))
+        path, _ = QFileDialog.getSaveFileName(self, "Export diagnostics", default, "Zip files (*.zip)")
+        if not path:
+            log("[troubleshoot] export diagnostics: cancelled at the save dialog")
+            return
+        dest, manifest = Path(path), self._manifest()
+        try:
+            import PySide6
+            from PySide6.QtCore import qVersion
+            qt = f"PySide6 {PySide6.__version__}, Qt {qVersion()}"
+        except Exception:  # only ever a line in diagnostics.txt
+            qt = "unknown"
+        self._exporting = True
+        self._apply_export()
+        log(f"[troubleshoot] export diagnostics -> {dest}")
+
+        def job(report):
+            return bd.write(dest, base=e["base"], app_root=e["app_root"], tree=self._root, game_name=self._game,
+                            game_slug=e["game_slug"], profile_name=self._profile, profile_slug=e["profile_slug"],
+                            manifest=manifest, game_dir=e.get("game_dir"), app_version=self._version, qt_version=qt)
+
+        self._run_job("troubleshoot-export", job, lambda payload: self._on_export(dest, payload))
+
+    def _on_export(self, dest: Path, payload: dict) -> None:
+        self._exporting = False
+        if self._closed:
+            log(f"[troubleshoot] export diagnostics finished after the window closed: {payload.get('error') or dest}")
+            return
+        self._apply_export()
+        if "error" in payload:
+            show_error(self, "Export diagnostics", "Couldn't save the diagnostics file.", means="No file was saved.",
+                       tryit="Pick another folder (your Desktop, say) and try again.", details=f"{dest}\n{payload['error']}",
+                       log_prefix="[troubleshoot] ")
+            return
+        res = payload["ok"]
+        log(f"[troubleshoot] export diagnostics: saved {dest} ({len(res['files'])} files, {len(res['skipped'])} skipped)")
+        box = QMessageBox(QMessageBox.Icon.Information, "Export diagnostics",
+                          EXPORT_DONE.format(name=dest.name, folder=dest.parent), QMessageBox.StandardButton.Ok, self)
+        opener = box.addButton("Open folder", QMessageBox.ButtonRole.ActionRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+        if box.clickedButton() is opener:
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(dest.parent)))
+            log(f"[troubleshoot] open folder {dest.parent}: {'opened' if opened else 'FAILED (openUrl returned false)'}")
 
     # ---- lifecycle ----
     def done(self, result: int) -> None:

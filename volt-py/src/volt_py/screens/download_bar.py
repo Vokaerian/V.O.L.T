@@ -28,8 +28,9 @@ the user worded it - "Downloading: <mod name>  <done> / <total>  [pill]" -
 and the label elided at LABEL_MAX_WIDTH (full name as its tooltip). The
 state is the same DownloadState (download_state's package helpers). While a
 job's pre-pass works out the total (`checking`, 0.6.34) it shows only the
-label, "Checking required mods..." - no new painting; the counter and pill
-return with the real total.
+label, "Checking required mods..." ("Updating package list..." while it
+downloads the community's package list first, 0.6.51) - no new painting;
+the counter and pill return with the real total.
 Since 0.6.26 Browse Mods shows two more of it on the same state (its footer,
 its detail card), so the bar stays in sight over the modal window.
 

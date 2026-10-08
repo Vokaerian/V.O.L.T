@@ -71,11 +71,14 @@ one PAGE_SIZE long with the pinned packages taken out (the site's page 1
 holds them, so its pages and VOLT's pages drift by that many; the class
 tops a page up from the next site page and keeps the offsets consistent);
 dependency_chain (which of a package's dependencies the open load
-order already has, which get pulled in - recursively, at Thunderstore's
-latest, THUNDERSTORE.md §1 / §9's policy - so the detail view's Install
-button can say "+ N dependencies") and parallel_dependency_chain (the same
-answer, its package metadata fetched level by level FETCH_WORKERS at once
-first), fetch_bytes for the card icons (ccdn.
+order already has, which get pulled in - recursively, at the version each
+dependency string names since 0.6.50 (first seen, breadth first, wins:
+Gale's rule; version_dependencies), so the detail view's Install button can
+say "+ N dependencies"; the same walk serves install_mod and its pre-pass;
+0.6.51: the community index (thunderstore_index) answers first, and a
+package of another game's community is left out - "skipped")
+and parallel_dependency_chain (the same answer, each level's lookups
+FETCH_WORKERS at once), fetch_bytes for the card icons (ccdn.
 thunderstore.io), and the number formatting the cards use.
 
 Pure Python, no Qt; every request goes through thunderstore.env.urlopen (the
@@ -115,12 +118,11 @@ IMAGE_LIMIT = 24  # images fetched per README / changelog, in order of appearanc
 # ![alt](url "title") and <img src="url"> - the two ways a README carries an image.
 _MD_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*<?([^\s)>]+)>?(?:\s+\"[^\"]*\")?\s*\)|<img\b[^>]*?\bsrc\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
 # The browser's preview of what an install pulls in (dependency_chain) stops once this many packages
-# are to be installed and says "at least" (chain["truncated"]); the install itself (install_mod) has no
-# cap. 0.6.33: was 40 - a modpack of four modpacks (Lethal_Enhanced_Party_Edition) went far past it.
+# are to be installed and says "at least" (chain["truncated"]); the install itself (install_mod) and, since
+# 0.6.50, its pre-pass (plan_downloads) have no cap. 0.6.33: was 40 - a modpack of four modpacks
+# (Lethal_Enhanced_Party_Edition) went far past it.
 CHAIN_LIMIT = 300
-CHAIN_WARM_LIMIT = CHAIN_LIMIT + CHAIN_LIMIT // 3  # parallel_dependency_chain's warm-up: at most this many requests
-CHAIN_ON_DEMAND_LIMIT = 20  # then at most this many one-at-a-time lookups the warm-up missed; past it: truncated
-FETCH_WORKERS = 6  # load_images / parallel_dependency_chain: requests at once (0.6.31; were one at a time)
+FETCH_WORKERS = 6  # load_images / parallel_dependency_chain (+ the install pre-pass, 0.6.50): requests at once (0.6.31)
 IMAGE_TIMEOUT_S = 8.0  # per socket operation for a README image (the API calls keep thunderstore.TIMEOUT_S)
 IMAGE_BUDGET_S = 20.0  # per page: no new image fetch starts after this; the queue is abandoned
 IMAGE_CACHE_DIR = "readme-images"  # <APP-ROOT>/cache/readme-images/<sha256 of the URL>
@@ -885,145 +887,213 @@ def fetch_bytes(url: str, app_version=None, *, what: str = "icon", max_bytes: in
     return _get(url, app_version, what, max_bytes=max_bytes, timeout=timeout)
 
 
-def dependency_chain(dependencies: list[str], installed, framework: str | None, app_version=None, *,
-                     fetch=None) -> dict:
+def _is_gone(err: ThunderstoreError) -> bool:
+    """The request behind `err` was an HTTP 404 (not a network / rate-limit failure)."""
+    cause = err.__cause__
+    return isinstance(cause, urllib.error.HTTPError) and cause.code == 404
+
+
+class OtherCommunityError(ThunderstoreError):
+    """The package isn't on this game's Thunderstore community (0.6.51,
+    THUNDERSTORE.md TODO #17): a dependency naming it is left out, as Gale
+    does (it resolves against the game's community index only)."""
+
+
+OTHER_COMMUNITY_MSG = "{mod} lists {dep}, a mod from another game's Thunderstore; VOLT left it out (Gale does the same)."
+
+
+def other_community(meta: dict, community: str) -> bool:
+    """True when a per-package reply's community_listings name communities
+    but not `community` (each listing's "community" = the community's slug).
+    No / an odd field = False: unknown, kept (as before 0.6.51)."""
+    listings = meta.get("community_listings") if isinstance(meta, dict) else None
+    names = [x.get("community") for x in listings if isinstance(x, dict)] if isinstance(listings, list) else []
+    names = [n for n in names if isinstance(n, str)]
+    return bool(names) and community not in names
+
+
+def checked_meta(ref: ts.PackageRef, app_version=None, *, fetch=None, cache: dict | None = None,
+                 community: str | None = None) -> dict:
+    """The per-package reply for `ref`'s package (`cache` first, remembered
+    there); OtherCommunityError when `community` is given and the reply says
+    the package belongs to other communities only."""
+    meta = cache.get(ref.full_name) if cache is not None else None
+    if meta is None:
+        meta = (fetch or ts.fetch_package)(ref.namespace, ref.name, app_version)
+        if cache is not None:
+            cache[ref.full_name] = meta
+    if community and other_community(meta, community):
+        log(f"[browse] {ref.full_name} isn't on the {community} community ({clip(meta.get('community_listings'), 300)})")
+        raise OtherCommunityError(f"{ref.full_name} is a mod from another game's Thunderstore.")
+    return meta
+
+
+def version_dependencies(ref: ts.PackageRef, app_version=None, *, fetch=None, fetch_ver=None,
+                         cache: dict | None = None, index=None, community: str | None = None) -> tuple[str, list[str], bool]:
+    """(version, dependency strings, fell_back) for the package version `ref`
+    names (0.6.50: exact versions, Gale's rule) - Thunderstore's latest for an
+    unpinned ref. A pinned version's own list: the package's latest when that
+    IS the pinned version (the one request every lookup makes), else that
+    version's own metadata (one more request, fetch_version). A pinned
+    version Thunderstore no longer has (HTTP 404): the latest's, fell_back
+    True. `cache`: full_name -> fetch's reply and "Team-Package-Version" ->
+    that version's list (successes only; the browser window's own cache, the
+    pre-pass's memo). ThunderstoreError when the package can't be looked up.
+    0.6.51: `index` (a thunderstore_index.PackageIndex) answers first, no
+    request; what it lacks is looked up as above. `community`: a package
+    whose reply says it is another community's raises OtherCommunityError
+    (the index having it means it is this one's)."""
+    fetch, fetch_ver = fetch or ts.fetch_package, fetch_ver or fetch_version
+    cache = {} if cache is None else cache
+    hit = index.lookup(ref) if index is not None else None
+    if hit is not None:
+        return hit[0], hit[1], False
+    if ref.version is not None and ref.key in cache:
+        return ref.version, cache[ref.key], False
+    meta = checked_meta(ref, app_version, fetch=fetch, cache=cache, community=community)
+    latest = meta.get("latest") or {}
+    latest_version = latest.get("version_number")
+    latest_deps = [d for d in latest.get("dependencies") or [] if isinstance(d, str)]
+    if ref.version is None or ref.version == latest_version:
+        return latest_version, latest_deps, False
+    try:
+        deps = fetch_ver(ref.namespace, ref.name, ref.version, app_version)["dependencies"]
+    except ThunderstoreError as err:
+        if not _is_gone(err):
+            raise
+        log(f"[browse] {ref.key} is gone from Thunderstore: its latest {latest_version}'s dependencies instead")
+        return latest_version, latest_deps, True
+    cache[ref.key] = deps
+    return ref.version, deps, False
+
+
+def dependency_chain(dependencies, installed, framework: str | None, app_version=None, *, fetch=None, fetch_ver=None,
+                     cache: dict | None = None, lookup=None, workers: int = 1, limit: int | None = CHAIN_LIMIT,
+                     pins: dict | None = None, index=None, community: str | None = None) -> dict:
     """What installing a package with these declared dependencies pulls in,
     given the open load order's installed full_names (`installed`) and its
-    framework: {"satisfied": [full_names already there, framework included,
-    declaration order], "missing": [full_names that get installed, each
-    once, dependencies before dependents - install_mod's order], "problems":
-    [(full_name, message)] for a dependency whose metadata couldn't be
-    fetched or whose string isn't a package reference, "truncated": True
-    when the walk stopped at CHAIN_LIMIT packages to install (the counts are
-    then "at least"; 0.6.33: the cut-off is no longer a problem entry, which
-    pinned it on whichever package was being visited)}. Missing
-    dependencies are resolved recursively at Thunderstore's latest version
-    (fetch = thunderstore.fetch_package), the same policy install_mod
-    applies (which has no cap). A `fetch` raising _ChainCut also ends the
-    walk as truncated (parallel_dependency_chain's on-demand bound)."""
-    fetch = fetch or ts.fetch_package
+    framework: {"satisfied": [full_names already there, framework included],
+    "missing": [full_names that get installed, each once, dependencies
+    before dependents - install_mod's order], "problems": [(full_name,
+    message)] for a package that couldn't be looked up or a string that isn't
+    a package reference, "truncated": True when more than `limit` packages
+    would be installed (the counts are then "at least"; None = no cap),
+    "skipped": {full_name: the package that listed it (None = a root)} for
+    a package of another game's community (0.6.51, Gale's rule: never
+    installed; also in "problems", OTHER_COMMUNITY_MSG)}.
+
+    0.6.50 (Gale's rule; it was "latest of everything" before): every
+    dependency string's own VERSION is resolved, breadth first - the first
+    version of a package seen (the shallowest; in declaration order within a
+    level) wins and later mentions are ignored; `pins` (full_name -> version,
+    an import's file) wins over the strings. Each level's lookups run
+    `workers` at a time (_parallel; the answer never depends on it).
+    `lookup(ref) -> (version, dependency strings, fell_back)` (raising
+    ThunderstoreError / ValueError = a problem; OtherCommunityError = left
+    out, "skipped") defaults to version_dependencies over `fetch` /
+    `fetch_ver` / `cache` / `index` / `community`; bepinex_load_orders passes
+    its own (the index, the cached zip, the download)."""
+    if lookup is None:
+        cache = {} if cache is None else cache
+
+        def lookup(ref):
+            return version_dependencies(ref, app_version, fetch=fetch, fetch_ver=fetch_ver, cache=cache, index=index,
+                                        community=community)
+
     installed = set(installed)
     satisfied: list[str] = []
-    missing: list[str] = []
     problems: list[tuple[str, str]] = []
+    chosen: dict[str, ts.PackageRef] = {}
+    found: dict[str, list[str]] = {}  # full_name -> its resolved version's dependency strings
+    parent: dict[str, str | None] = {}  # full_name -> the package whose list named it first (None = a root)
+    skipped: dict[str, str | None] = {}
     seen: set[str] = set()
     truncated = False
+    start, calls = time.monotonic(), 0
 
-    def visit(dep_strings) -> None:
+    def take(dep_strings, by: str | None = None) -> list:
         nonlocal truncated
+        out = []
         for dep in dep_strings:
             try:
                 ref = ts.PackageRef.parse(dep)
+                if pins and pins.get(ref.full_name):
+                    ref = ref.with_version(pins[ref.full_name])
             except ValueError as err:
                 problems.append((str(dep), str(err)))
                 continue
             full = ref.full_name
             if full in seen:
-                continue
+                continue  # first seen wins
             seen.add(full)
             if full == framework or full in installed:
                 satisfied.append(full)
-                continue
-            if len(missing) >= CHAIN_LIMIT:
+            elif limit is not None and len(chosen) >= limit:
                 truncated = True
-                return
-            try:
-                meta = fetch(ref.namespace, ref.name, app_version)
-            except _ChainCut:
-                truncated = True
-                return
-            except ThunderstoreError as err:
-                problems.append((full, str(err)))
-                continue
-            sub = meta.get("latest", {}).get("dependencies") or []
-            visit([d for d in sub if isinstance(d, str)])
-            missing.append(full)  # after its own dependencies: install order
-
-    visit([d for d in dependencies if isinstance(d, str)])
-    log(f"[browse] dependency chain: {len(satisfied)} satisfied, {len(missing)} to install {clip(missing, 2000)}, "
-        f"{len(problems)} problems" + (f", cut at {CHAIN_LIMIT} (truncated)" if truncated else ""))
-    return {"satisfied": satisfied, "missing": missing, "problems": problems, "truncated": truncated}
-
-
-class _ChainCut(Exception):
-    """parallel_dependency_chain's fetch past CHAIN_ON_DEMAND_LIMIT: dependency_chain stops, truncated."""
-
-
-def parallel_dependency_chain(dependencies: list[str], installed, framework: str | None, app_version=None, *,
-                              fetch=None, cache: dict | None = None, workers: int = FETCH_WORKERS) -> dict:
-    """dependency_chain's exact answer (same order, same CHAIN_LIMIT cut-off,
-    same problems), faster: the packages it will ask for are fetched first,
-    level by level (breadth first), `workers` at a time, into `cache`
-    (full_name -> fetch_package's dict; the window passes its own so a
-    reopened page or Back costs nothing - successes only, a failure is
-    retried next time), then dependency_chain runs over that cache. The
-    warm-up makes at most CHAIN_WARM_LIMIT requests; a package it didn't
-    reach is fetched on demand, at most CHAIN_ON_DEMAND_LIMIT of them - past
-    that the chain ends truncated ("at least"), so the worst case is
-    bounded (only a graph past CHAIN_WARM_LIMIT can get there). Pacing:
-    `workers` requests at once, thunderstore.open_url's HTTP 429 retry /
-    backoff per request; the warm-up's requests, 429 retries and seconds are
-    logged."""
-    fetch = fetch or ts.fetch_package
-    cache = {} if cache is None else cache
-    failed: dict[str, ThunderstoreError] = {}  # this run only
-    installed = set(installed)
-    seen: set[str] = set()
-    hits = fetched = levels = on_demand = 0
-    start, rate_limited = time.monotonic(), ts.rate_limit_hits()
-
-    def new_refs(dep_strings) -> list:
-        out = []
-        for dep in dep_strings:
-            if not isinstance(dep, str):
-                continue
-            try:
-                ref = ts.PackageRef.parse(dep)
-            except ValueError:
-                continue  # dependency_chain reports it
-            if ref.full_name in seen or ref.full_name == framework or ref.full_name in installed:
-                continue
-            seen.add(ref.full_name)
-            out.append(ref)
+            else:
+                chosen[full] = ref
+                parent[full] = by
+                out.append(ref)
         return out
 
-    def warm(ref) -> None:
-        try:
-            cache[ref.full_name] = fetch(ref.namespace, ref.name, app_version)
-        except ThunderstoreError as err:
-            failed[ref.full_name] = err
+    roots = level = take([d for d in dependencies if isinstance(d, str)])
+    while level:
+        got: dict[str, object] = {}
 
-    level = new_refs(dependencies)
-    # ponytail: no cancel - a page left mid-warm-up still finishes its levels (at most CHAIN_WARM_LIMIT small
-    # API calls; the results stay in the window's cache). Add a `cancelled` like load_images' if it shows.
-    while level and fetched < CHAIN_WARM_LIMIT:
-        level = level[:CHAIN_WARM_LIMIT - fetched]
-        todo = [r for r in level if r.full_name not in cache]
-        hits += len(level) - len(todo)
-        fetched += len(todo)
-        levels += 1
-        _parallel(todo, warm, workers)
-        level = new_refs(d for r in level for d in ((cache.get(r.full_name) or {}).get("latest", {}).get("dependencies") or []))
-    log(f"[browse] dependency chain warm-up: {fetched} requests ({len(failed)} failed), {hits} from the window's cache, "
-        f"{levels} levels, {ts.rate_limit_hits() - rate_limited} HTTP 429 retries (all VOLT requests meanwhile), "
-        f"{time.monotonic() - start:.2f}s" + (f" - stopped at the {CHAIN_WARM_LIMIT}-request bound" if level else ""))
+        def one(ref) -> None:
+            try:
+                got[ref.full_name] = lookup(ref)
+            except (ThunderstoreError, ValueError) as err:
+                got[ref.full_name] = err
 
-    def cached(namespace: str, name: str, app_version=None) -> dict:
-        nonlocal on_demand
-        full = f"{namespace}-{name}"
-        if full in cache:
-            return cache[full]
-        if full in failed:
-            raise failed[full]
-        if on_demand >= CHAIN_ON_DEMAND_LIMIT:
-            raise _ChainCut()
-        on_demand += 1
-        log(f"[browse] dependency chain: {full} past the warm-up, fetched on demand ({on_demand} of at most {CHAIN_ON_DEMAND_LIMIT})")
-        meta = fetch(namespace, name, app_version)
-        cache[full] = meta
-        return meta
+        calls += len(level)
+        if workers > 1:
+            _parallel(level, one, workers)
+        else:
+            for ref in level:
+                one(ref)
+        nxt = []
+        for ref in level:  # declaration order, whatever order the workers finished in
+            res = got.get(ref.full_name, ThunderstoreError(f"{ref.full_name} couldn't be looked up"))
+            if isinstance(res, OtherCommunityError):
+                skipped[ref.full_name] = parent.get(ref.full_name)
+                problems.append((ref.full_name, OTHER_COMMUNITY_MSG.format(mod=parent.get(ref.full_name) or "This mod",
+                                                                           dep=ref.full_name)))
+                continue
+            if isinstance(res, Exception):
+                problems.append((ref.full_name, str(res)))
+                continue
+            found[ref.full_name] = res[1]
+            nxt += take(res[1], ref.full_name)
+        level = nxt
+    missing: list[str] = []
+    placed: set[str] = set()
 
-    return dependency_chain(dependencies, installed, framework, app_version, fetch=cached)
+    def place(full: str) -> None:  # depth first over the resolved graph: dependencies before dependents
+        if full in placed or full not in found:
+            return
+        placed.add(full)
+        for dep in found[full]:
+            try:
+                place(ts.PackageRef.parse(dep).full_name)
+            except ValueError:
+                pass
+        missing.append(full)
+
+    for ref in roots:
+        place(ref.full_name)
+    log(f"[browse] dependency chain: {len(satisfied)} satisfied, {len(missing)} to install {clip(missing, 2000)}, "
+        f"{len(problems)} problems, {len(skipped)} left out (another game's) {clip(skipped, 600)}, {calls} lookups ({workers} at a time) in {time.monotonic() - start:.2f}s"
+        + (f", cut at {limit} (truncated)" if truncated else ""))
+    return {"satisfied": satisfied, "missing": missing, "problems": problems, "truncated": truncated, "skipped": skipped}
+
+
+def parallel_dependency_chain(dependencies, installed, framework: str | None, app_version=None, **kw) -> dict:
+    """dependency_chain with each level's lookups FETCH_WORKERS at a time
+    (the browser window, the install pre-pass): the same answer, faster.
+    Pacing: thunderstore.open_url's HTTP 429 retry / backoff per request."""
+    kw.setdefault("workers", FETCH_WORKERS)
+    return dependency_chain(dependencies, installed, framework, app_version, **kw)
 
 
 def format_count(n) -> str:

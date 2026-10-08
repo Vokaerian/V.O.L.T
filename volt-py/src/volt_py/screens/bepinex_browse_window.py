@@ -92,7 +92,10 @@ it is cached or shown; the cache held under 100 MB by a prune when the
 window opens; each merged into its _Readme as it lands through _ImageFeed,
 no network inside the widget) and the dependency chain
 (parallel_dependency_chain over the window's own package cache,
-`_pkg_cache`, so reopening a page or Back refetches nothing). Until the
+`_pkg_cache`, so reopening a page or Back refetches nothing; since 0.6.51
+the game's community index first - thunderstore_index.ensure, no request
+for a version it has - and a dependency from another game's community is
+left out: its Required pill reads Skipped, its problem row says why). Until the
 chain lands the big Install button shows its plain label but is disabled,
 the dependency sub-line says it is checking and the Required pills read
 Checking.... Picking another version is the same job minus the package-level
@@ -198,6 +201,7 @@ from PySide6.QtWidgets import (
 )
 
 from volt_py import icons, mod_icons, painters, theme, thunderstore as ts, thunderstore_browse as tb
+from volt_py import thunderstore_index as pi
 from volt_py.applog import clip, log
 from volt_py.screens.download_bar import LABEL_MAX_WIDTH, PackageDownloadBar
 from volt_py.screens.flow_layout import FlowLayout
@@ -2059,11 +2063,14 @@ class BepInExBrowseWindow(QDialog):
         listing, version, gen = self._detail_listing, self._version, self._detail_gen
         deps = list((self._version_meta or {}).get("dependencies") or [])
         installed, framework = set(self._installed()), self._framework
-        app_version, cache = self.app_version, self._pkg_cache
+        app_version, cache, app_root, community = self.app_version, self._pkg_cache, self._app_root, self.game.community
         started = time.monotonic()
 
         def job(report):
-            return tb.parallel_dependency_chain(deps, installed, framework, app_version, cache=cache)
+            # 0.6.51: the community index first (built here when missing / stale, ~12 s once a day; None = per package)
+            index = pi.ensure(app_root, community, app_version) if app_root else None
+            return tb.parallel_dependency_chain(deps, installed, framework, app_version, cache=cache, index=index,
+                                                community=community)
 
         def done(payload: dict) -> None:
             if self._closed or gen != self._detail_gen:
@@ -2397,6 +2404,8 @@ class BepInExBrowseWindow(QDialog):
             return "Already installed", "ok"
         if self._chain is None:
             return ("Couldn't check", "warn") if self._chain_error else ("Checking...", "pending")
+        if full_name in chain.get("skipped", ()):  # 0.6.51: another game's mod, left out (Gale's rule)
+            return "Skipped", "warn"
         if any(n == full_name for n, _ in chain["problems"]):
             return "Unavailable", "warn"
         return "Will be installed", "get"
